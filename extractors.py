@@ -371,6 +371,58 @@ def resolve_vikingfile(url, session):
         safe_print(f"  [!] VikingFile: {e}")
         return None
 
+def resolve_lulacloud(url, session):
+    """
+    Resolve a lulacloud.com/d/ URL to the actual CDN download URL.
+    Follows redirect chain — 1 or 2 hops.
+    """
+    try:
+        s = requests.Session()
+        s.headers.update({'User-Agent': UA_DESKTOP, 'Referer': f'https://www.{NAIJAVAULT_DOMAIN}/'})
+
+        r1 = None
+        for attempt in range(3):
+            try:
+                r1 = s.get(url, timeout=15, allow_redirects=False)
+                break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(2)
+                else:
+                    raise
+        if not r1:
+            return None
+
+        loc = r1.headers.get('location')
+        if loc:
+            if 'lulacloud' in loc:
+                # Second hop
+                r2 = s.get(loc, timeout=15, allow_redirects=False)
+                loc2 = r2.headers.get('location')
+                return loc2 if loc2 else loc
+            return loc
+
+        if r1.status_code == 200:
+            ct = r1.headers.get('content-type', '')
+            if ct.startswith('video/'):
+                return url
+            soup = BeautifulSoup(r1.text, 'html.parser')
+            for a in soup.find_all('a', href=True):
+                if any(ext in a['href'] for ext in ['.mkv', '.mp4', '.m3u8']):
+                    return a['href']
+            m = re.search(r'(?:window\.location|location\.href)\s*=\s*["\'"]([^"\'"]+ )["\'"]', r1.text)
+            if m:
+                return m.group(1)
+            cdn = find_direct_video(r1.text)
+            if cdn:
+                return cdn
+
+        safe_print(f"  [!] LulaCloud: could not resolve {url[:60]}")
+        return None
+    except Exception as e:
+        safe_print(f"  [!] LulaCloud: {e}")
+        return None
+
 def resolve_plutomovies_dl(dl_url, session):
     try:
         session.headers.update({'Referer': PLUTO_BASE + '/'})
@@ -458,12 +510,86 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
 # ─── SITE EXTRACTORS ──────────────────────────────────────────
 
 def extract_nkiri(url, session, ctx=None):
-    ctx = ctx or {}
-    _extract_downloadwella_site(
-        url, session, ctx,
-        site_label='NKIRI/Thenkiri',
-        name_cleaner=lambda s: re.sub(r'-s\d+.*$', '', s, flags=re.IGNORECASE)
-    )
+    ctx  = ctx or {}
+    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+
+    safe_print("[*] NKiri/TheNkiri mode")
+    slug = url.rstrip('/').split('/')[-1]
+    name = re.sub(r'-(korean|complete|drama|series|nollywood|hollywood|tv|movie).*$', '', slug, flags=re.IGNORECASE)
+    name = clean_name(name)
+    safe_print(f"[*] Title: {name}")
+    folder  = os.path.join(BASE_DIR, safe_filename(name))
+    summary = DownloadSummary()
+
+    session.headers['Referer'] = 'https://thenkiri.com/'
+    r = safe_get(session, url, timeout=20)
+    if not r:
+        safe_print("[!] Could not fetch page")
+        return
+    soup = BeautifulSoup(r.text, 'html.parser')
+
+    # Priority 1: downloadwella links (most common across full catalogue)
+    dw_links = list(dict.fromkeys(
+        a['href'] for a in soup.find_all('a', href=True)
+        if 'downloadwella.com' in a['href']
+    ))
+    if dw_links:
+        safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) — saving to: {folder}")
+        pf = Prefetcher(resolve_downloadwella)
+        next_direct = [None]
+        for i, ep_url in enumerate(dw_links, 1):
+            if _stopped(ctx): break
+            _wait(ctx)
+            ep_name = ep_url.split('/')[-1].replace('.html', '')
+            safe_print(f"\n[{i}/{len(dw_links)}] {ep_name}")
+            direct = next_direct[0] if next_direct[0] else resolve_downloadwella(ep_url, session)
+            next_direct[0] = None
+            if i < len(dw_links):
+                pf.prefetch(dw_links[i], session)
+            if direct:
+                ext = 'mkv' if '.mkv' in direct else 'mp4'
+                download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
+                              series_url=url, series_name=name,
+                              bandwidth_limit=bw, current_process=cur_proc,
+                              stop_flag=stop, wait_fn=ctx.get('wait'))
+                if i < len(dw_links):
+                    next_direct[0] = pf.get(timeout=60)
+            else:
+                safe_print(f"  [x] Could not extract link")
+                summary.add_failed(ep_name)
+                if i < len(dw_links):
+                    next_direct[0] = pf.get(timeout=60)
+        if summary.failed == 0 and not _stopped(ctx):
+            mark_series_complete(url)
+        summary.report()
+        return
+
+    # Priority 2: direct CDN links (newer posts)
+    cdn_links = list(dict.fromkeys(
+        a['href'] for a in soup.find_all('a', href=True)
+        if 'nkiserv.com' in a['href'] and a['href'].endswith('.mkv')
+    ))
+    if cdn_links:
+        safe_print(f"[*] Found {len(cdn_links)} CDN link(s) — saving to: {folder}")
+        for i, cdn_url in enumerate(cdn_links, 1):
+            if _stopped(ctx): break
+            _wait(ctx)
+            fname = cdn_url.split('/')[-1]
+            fname = re.sub(r'\.\([^)]+\)\.[a-z0-9]+\.mkv$', '.mkv', fname, flags=re.IGNORECASE)
+            fname = safe_filename(fname)
+            safe_print(f"\n[{i}/{len(cdn_links)}] {fname}")
+            download_file(cdn_url, folder, fname, summary,
+                          series_url=url, series_name=name,
+                          bandwidth_limit=bw, current_process=cur_proc,
+                          stop_flag=stop, wait_fn=ctx.get('wait'))
+            time.sleep(0.5)
+        if summary.failed == 0 and not _stopped(ctx):
+            mark_series_complete(url)
+        summary.report()
+        return
+
+    safe_print("[!] No download links found")
+    diagnose_page(soup, url, "downloadwella.com or nkiserv.com links")
 
 def extract_dramakey_com(url, session, ctx=None):
     ctx = ctx or {}
@@ -716,122 +842,202 @@ def extract_naijavault(url, session, ctx=None):
     soup    = BeautifulSoup(r.text, 'html.parser')
     summary = DownloadSummary()
 
-    # ZIP check
-    zip_links = [a['href'] for a in soup.find_all('a', href=True)
-                 if a['href'].endswith('.zip') or 'zip' in a.get_text(strip=True).lower()]
-    if zip_links:
-        safe_print(f"[*] ZIP file found — downloading ZIP")
-        zip_url  = zip_links[0]
-        zip_name = zip_url.split('/')[-1] or f"{name}.zip"
-        download_file(zip_url, folder, safe_filename(zip_name), summary,
-                      bandwidth_limit=bw, current_process=cur_proc,
-                      stop_flag=stop, wait_fn=ctx.get('wait'))
-        summary.report()
-        return
-
-    # Find /dl- episode links
-    seen_dl  = set()
-    dl_links = []
+    # ── Scan series page for both link formats ─────────────────
+    # Format A: /dl-{hash}/ intermediate pages
+    seen   = set()
+    format_a = []
     for a in soup.find_all('a', href=True):
         href = a['href']
-        if f'/dl-' in href and NAIJAVAULT_DOMAIN in href and href not in seen_dl:
-            seen_dl.add(href)
-            dl_links.append((a.text.strip(), href))
+        if '/dl-' in href and NAIJAVAULT_DOMAIN in href and href not in seen:
+            seen.add(href)
+            format_a.append((a.get_text(strip=True), href))
 
-    # Single /dl- page pasted directly — detect by page content
-    if not dl_links:
-        is_dl_page = (
-            re.search(r'var downloadURL = "([^"]+)"', r.text) or
-            re.search(r'https?://vikingfile\.com/[^\s"\'<>]+', r.text) or
-            re.search(r'[?&]nj_download=', r.text)
+    # Format B: lulacloud.com/d/ direct links
+    format_b = []
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if 'lulacloud.com/d/' in href and href not in seen:
+            seen.add(href)
+            format_b.append((a.get_text(strip=True), href))
+
+    # Single dl- page pasted directly
+    if not format_a and not format_b:
+        is_dl = (
+            re.search('var downloadURL', r.text) or
+            re.search('vikingfile.com', r.text) or
+            re.search('lulacloud.com/d/', r.text) or
+            re.search('nj_download=', r.text)
         )
-        if is_dl_page:
+        if is_dl:
             page_title = soup.find('title')
             label      = page_title.get_text(strip=True) if page_title else slug
-            dl_links   = [(label, url)]
+            format_a   = [(label, url)]
 
-    if not dl_links:
+    if not format_a and not format_b:
         safe_print("[!] No episode links found")
-        diagnose_page(soup, url, "/dl- links or vikingfile.com anchor")
+        diagnose_page(soup, url, "/dl- or lulacloud.com/d/ links")
         return
 
-    safe_print(f"[*] Found {len(dl_links)} episode(s) — saving to: {folder}")
+    total = len(format_a) + len(format_b)
+    safe_print(f"[*] Found {total} episode(s) — Format A: {len(format_a)}, Format B: {len(format_b)}")
+    safe_print(f"[*] Saving to: {folder}")
 
-    items = []
-    for i, (label, dl_url) in enumerate(dl_links, 1):
-        if _stopped(ctx):
+    items   = []
+    zip_hit = False
+
+    # ── Process Format A (/dl- pages) ─────────────────────────
+    for i, (label, dl_url) in enumerate(format_a, 1):
+        if _stopped(ctx) or zip_hit:
             break
-        ep_name = safe_filename(clean_ep_name(label) or f"episode-{i}")
-        safe_print(f"\n[{i}/{len(dl_links)}] Extracting: {ep_name}")
+        ep_label = clean_ep_name(label) or f"episode-{i}"
+        safe_print(f"\n[A {i}/{len(format_a)}] Extracting: {ep_label}")
 
-        session.headers.update({'Referer': url})
+        session.headers['Referer'] = url
         r2 = safe_get(session, dl_url, timeout=20)
         if not r2:
-            safe_print(f"  [✗] Could not fetch download page")
-            summary.add_failed(ep_name)
+            safe_print(f"  [x] Could not fetch dl page")
+            summary.add_failed(ep_label)
             continue
 
-        # Pattern 1 (PRIMARY): vikingfile.com anchor — new page format
-        vf_anchor = re.search(r'https?://vikingfile\.com/[^\s"\'<>]+', r2.text)
-        if vf_anchor:
-            vf_url = vf_anchor.group(0).rstrip('.,;)')
-            safe_print(f"  [*] VikingFile anchor found")
-            direct = resolve_vikingfile(vf_url, session)
-            if direct:
-                ext = 'mkv' if '.mkv' in direct else 'mp4'
-                items.append((direct, safe_filename(f"{ep_name}.{ext}")))
+        # Read var fileTitle for filename — most reliable
+        ft_m    = re.search(r'var fileTitle\s*=\s*"([^"]+)"', r2.text)
+        ep_name = safe_filename(ft_m.group(1)) if ft_m else safe_filename(f"{ep_label}.mkv")
+
+        # ZIP detection — download ZIP and stop
+        if ep_name.lower().endswith('.zip'):
+            safe_print(f"  [*] ZIP found — downloading season archive")
+            du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
+            if du_m:
+                zip_url = du_m.group(1)
+                if 'vikingfile.com' in zip_url:
+                    zip_url = resolve_vikingfile(zip_url, session) or zip_url
+                elif 'lulacloud.com' in zip_url:
+                    zip_url = resolve_lulacloud(zip_url, session) or zip_url
+                if zip_url:
+                    items = [(zip_url, ep_name)]
+                    zip_hit = True
+                    break
+            continue
+
+        # Primary: var downloadURL (JS)
+        du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
+        if du_m:
+            cdn_url = du_m.group(1)
+            direct  = None
+            if 'vikingfile.com' in cdn_url:
+                direct = resolve_vikingfile(cdn_url, session)
+                if not direct:
+                    # Fallback: check page for lulacloud
+                    lc = re.search('lulacloud.com/d/', r2.text)
+                    if lc:
+                        direct = resolve_lulacloud(lc.group(0), session)
+            elif 'lulacloud.com' in cdn_url:
+                direct = resolve_lulacloud(cdn_url, session)
+                if not direct:
+                    # Fallback: check page for vikingfile
+                    vf = re.search('vikingfile.com/', r2.text)
+                    if vf:
+                        direct = resolve_vikingfile(vf.group(0), session)
+            elif 'cdn.filevault.com.ng' in cdn_url:
+                direct = cdn_url
             else:
-                safe_print(f"  [✗] VikingFile resolution failed")
-                summary.add_failed(ep_name)
-            time.sleep(0.5)
-            continue
-
-        # Pattern 2 (FALLBACK): old var downloadURL JS format
-        vf_match = re.search(r'var downloadURL = "([^"]+)"', r2.text)
-        if vf_match:
-            vf_url = vf_match.group(1)
-            direct = resolve_vikingfile(vf_url, session) if 'vikingfile.com' in vf_url else vf_url
+                direct = cdn_url
             if direct:
-                ext = 'mkv' if '.mkv' in direct else 'mp4'
-                items.append((direct, safe_filename(f"{ep_name}.{ext}")))
+                ext = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
+                fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
+                items.append((direct, safe_filename(fname)))
             else:
-                safe_print(f"  [✗] VikingFile resolution failed")
-                summary.add_failed(ep_name)
+                safe_print(f"  [x] All resolvers failed")
+                summary.add_failed(ep_label)
             time.sleep(0.5)
             continue
 
-        # Pattern 3: cdn.filevault.com.ng
-        fv = re.findall(r'https?://cdn\.filevault\.com\.ng/[^\s"\'<>]+', r2.text)
-        if fv:
-            ext = 'mkv' if '.mkv' in fv[0] else 'mp4'
-            items.append((fv[0], safe_filename(f"{ep_name}.{ext}")))
-            time.sleep(0.5)
-            continue
+        # Fallback: vikingfile anchor directly in page
+        vf = re.search('vikingfile.com/', r2.text)
+        if vf:
+            direct = resolve_vikingfile(vf.group(0).rstrip('.,;)'), session)
+            if direct:
+                ext = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
+                fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
+                items.append((direct, safe_filename(fname)))
+                time.sleep(0.5)
+                continue
+            # Try lulacloud on same page
+            lc = re.search('lulacloud.com/d/', r2.text)
+            if lc:
+                direct = resolve_lulacloud(lc.group(0), session)
+                if direct:
+                    ext = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
+                    fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
+                    items.append((direct, safe_filename(fname)))
+                    time.sleep(0.5)
+                    continue
 
-        # Pattern 4: nj_download redirect
-        nj_dl = re.search(
-            r'https?://[^\s"\'<>]*naijavault\.com[^\s"\'<>]*[?&]nj_download=[^\s"\'<>]+',
-            r2.text
-        )
-        if nj_dl:
-            nj_url = nj_dl.group(0).rstrip('.,;)')
-            safe_print(f"  [*] nj_download link found — following redirect")
+        # nj_download redirect
+        nj_match = 'naijavault.com' in r2.text and 'nj_download=' in r2.text
+        if nj:
             try:
-                rr  = session.get(nj_url, timeout=15, allow_redirects=False)
+                rr  = session.get(re.search(r"https?://[^ 	]+nj_download=[^ 	<>]+", r2.text).group(0).rstrip('.,;)'), timeout=15, allow_redirects=False)
                 cdn = rr.headers.get('location')
                 if cdn and cdn.startswith('http'):
                     ext = 'mkv' if '.mkv' in cdn else 'mp4'
-                    items.append((cdn, safe_filename(f"{ep_name}.{ext}")))
+                    fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
+                    items.append((cdn, safe_filename(fname)))
                     time.sleep(0.5)
                     continue
             except Exception as e:
-                safe_print(f"  [!] nj_download redirect failed: {e}")
+                safe_print(f"  [!] nj_download failed: {e}")
 
-        safe_print(f"  [✗] No download URL found on page")
-        summary.add_failed(ep_name)
+        safe_print(f"  [x] No download URL found")
+        summary.add_failed(ep_label)
         time.sleep(0.5)
 
-    safe_print(f"\n[*] Starting {len(items)} download(s)...")
+    # ── Process Format B (lulacloud direct) ───────────────────
+    if not zip_hit:
+        for i, (label, lc_url) in enumerate(format_b, 1):
+            if _stopped(ctx):
+                break
+            ep_label = clean_ep_name(label) or f"episode-{i}"
+            safe_print(f"\n[B {i}/{len(format_b)}] Extracting: {ep_label}")
+
+            # Parse filename from URL slug
+            slug_part = lc_url.rstrip('/').split('/')[-1]
+            # Strip leading hash token (alphanumeric, 8+ chars before first hyphen)
+            fname_slug = re.sub(r'^[a-zA-Z0-9]{8,}-', '', slug_part)
+            # Fix extension suffix: -mkv → .mkv
+            fname_slug = re.sub(r'-mkv$', '.mkv', fname_slug)
+            fname_slug = re.sub(r'-mp4$', '.mp4', fname_slug)
+            ep_name    = safe_filename(fname_slug or f"{ep_label}.mkv")
+
+            # Primary: lulacloud resolver
+            direct = resolve_lulacloud(lc_url, session)
+            if not direct:
+                # Fallback: fetch page, look for vikingfile or var downloadURL
+                r2 = safe_get(session, lc_url, timeout=20)
+                if r2:
+                    du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
+                    if du_m and 'vikingfile.com' in du_m.group(1):
+                        direct = resolve_vikingfile(du_m.group(1), session)
+                    if not direct:
+                        vf = re.search('vikingfile.com/', r2.text if r2 else '')
+                        if vf:
+                            direct = resolve_vikingfile(vf.group(0), session)
+                    if not direct:
+                        fv = re.search('cdn.filevault.com.ng', r2.text if r2 else '')
+                        if fv:
+                            direct = fv.group(0)
+
+            if direct:
+                ext   = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
+                fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
+                items.append((direct, safe_filename(fname)))
+            else:
+                safe_print(f"  [x] All resolvers failed")
+                summary.add_failed(ep_label)
+            time.sleep(0.5)
+
+    # ── Download all resolved items ────────────────────────────
+    safe_print(f"\n[*] Downloading {len(items)} file(s)...")
     for dl_url, dl_fname in items:
         if _stopped(ctx):
             break

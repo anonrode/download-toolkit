@@ -361,13 +361,12 @@ def main():
 
     from downloader import check_disk_space, show_history
     from extractors import process_link_queue
-    from search import search, refresh_index_if_stale, rebuild_index_command
+    from search import search, rebuild_index_command
 
     cfg     = load_config()
     session = make_session()
     setup_signal_handler()
     check_disk_space()
-    refresh_index_if_stale()
     print_banner(cfg)
 
     while True:
