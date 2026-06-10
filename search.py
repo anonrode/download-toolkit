@@ -134,12 +134,12 @@ def search(raw_query, session=None):
     results = []
     lock    = threading.Lock()
 
-    t1 = threading.Thread(target=_search_nkiri,    args=(base, season_slug, year, results, lock), daemon=True)
-    t2 = threading.Thread(target=_search_dramakey, args=(base, season_slug, year, results, lock), daemon=True)
+    t1 = threading.Thread(target=_search_nkiri,    args=(base, season_slug, year, results, lock))
+    t2 = threading.Thread(target=_search_dramakey, args=(base, season_slug, year, results, lock))
     t1.start()
     t2.start()
-    t1.join(timeout=20)
-    t2.join(timeout=20)
+    t1.join(timeout=60)
+    t2.join(timeout=60)
 
     if not results:
         safe_print(f"\n  [!] Nothing found for: {raw_query}")
