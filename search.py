@@ -17,13 +17,13 @@ NKIRI_PATTERNS = [
     '{base}-{season}-complete-japanese-drama',
     '{base}-{season}-complete-chinese-drama',
     '{base}-{season}-complete-nollywood',
+    '{base}-complete-korean-drama',
+    '{base}-complete-tv-series',
+    '{base}-complete-nollywood',
     '{base}-{year}-download-hollywood-movie',
     '{base}-{year}-download-korean-movie',
     '{base}-{year}-download-chinese-movie',
     '{base}-{year}-download-foreign-movie',
-    '{base}-complete-korean-drama',
-    '{base}-complete-tv-series',
-    '{base}-complete-nollywood',
     '{base}-korean-drama',
     '{base}',
 ]
@@ -59,51 +59,89 @@ def _parse_query(raw):
     base = re.sub(r'-season-\d+-?', '-', base).strip('-')
     base = re.sub(r'-20\d{2}-?', '-', base).strip('-')
     base = base.strip('-')
+    # If base is empty or just numbers, use original slug
+    if not base or base.isdigit():
+        base = re.sub(r'[^a-z0-9-]', '', re.sub(r'\s+', '-', q.strip())).strip('-')
     return base, season_slug, year
 
 # ─── SINGLE SITE SEARCH ───────────────────────────────────────
 
 def _probe(base_url, patterns, base, season_slug, year):
     """
-    Try each pattern with HEAD request.
-    - 200 = confirmed found, return immediately
-    - 403 = page may or may not exist (NKiri uses 403 for both)
-            collect candidates, verify with GET + title check at end
-    - 404 = does not exist, skip
+    Fire all pattern HEAD requests in parallel via ThreadPoolExecutor.
+    - 200 = confirmed found
+    - 403 = collect and verify with GET + title check
+    - 404 = skip
     """
-    s = requests.Session()
-    s.headers.update({
-        'User-Agent':      UA_DESKTOP,
-        'Referer':         base_url,
-        'Accept':          'text/html,application/xhtml+xml,*/*;q=0.9',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection':      'keep-alive',
-    })
-    base_url = base_url.rstrip('/')
-    candidates_403 = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    for pattern in patterns:
-        url = base_url + '/' + pattern.replace('{base}', base).replace('{season}', season_slug).replace('{year}', year) + '/'
+    base_url = base_url.rstrip('/')
+    urls = [
+        base_url + '/' + p.replace('{base}', base)
+                          .replace('{season}', season_slug)
+                          .replace('{year}', year) + '/'
+        for p in patterns
+    ]
+
+    def head_check(url):
+        s = requests.Session()
+        s.headers.update({
+            'User-Agent':      UA_DESKTOP,
+            'Referer':         base_url,
+            'Accept':          'text/html,application/xhtml+xml,*/*;q=0.9',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection':      'keep-alive',
+        })
         try:
             r = s.head(url, timeout=10, allow_redirects=True)
-            if r.status_code == 200:
-                return r.url
-            elif r.status_code == 403:
-                candidates_403.append(r.url)
+            return url, r.status_code, r.url
         except Exception:
-            continue
+            return url, 0, url
 
-    # Verify 403 candidates — do a GET and check title contains base slug
-    for url in candidates_403:
+    # Map original_url -> (status, final_url)
+    results_map = {}
+    candidates_403 = []
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {ex.submit(head_check, url): url for url in urls}
+        for future in as_completed(futures):
+            orig_url = futures[future]
+            _, status, final_url = future.result()
+            results_map[orig_url] = (status, final_url)
+
+    # Return highest-priority 200 hit — walk patterns in order
+    for u in urls:
+        status, final_url = results_map.get(u, (0, u))
+        if status == 200:
+            return final_url
+
+    # Collect 403 candidates in pattern priority order
+    for u in urls:
+        status, final_url = results_map.get(u, (0, u))
+        if status == 403:
+            candidates_403.append(final_url)
+
+    # Verify 403 candidates with GET + title check
+    def verify(url):
+        s = requests.Session()
+        s.headers['User-Agent'] = UA_DESKTOP
         try:
             r = s.get(url, timeout=15, allow_redirects=True)
             if r.status_code == 200:
                 title = r.text[r.text.find('<title>')+7:r.text.find('</title>')].lower()
                 if base.replace('-', ' ') in title or base in title:
-                    return r.url
+                    return url
         except Exception:
-            continue
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futures = [ex.submit(verify, url) for url in candidates_403]
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                return result
 
     return None
 
@@ -122,24 +160,42 @@ def _search_dramakey(base, season_slug, year, results, lock):
 # ─── MAIN SEARCH ──────────────────────────────────────────────
 
 def search(raw_query, session=None):
-    base, season_slug, year = _parse_query(raw_query)
+    # Check for site-specific suffix — "search vincenzo nkiri"
+    site_filter = None
+    query = raw_query.strip()
+    if query.lower().endswith(' nkiri'):
+        site_filter = 'nkiri'
+        query = query[:-6].strip()
+    elif query.lower().endswith(' dramakey'):
+        site_filter = 'dramakey'
+        query = query[:-9].strip()
+
+    base, season_slug, year = _parse_query(query)
 
     if not base:
         safe_print("[!] Empty query")
         return None
 
-    safe_print(f"\n  Searching: {raw_query}")
+    safe_print(f"\n  Searching: {query}")
+    if site_filter:
+        safe_print(f"  Site: {site_filter}")
     safe_print(f"  {'─'*44}")
 
     results = []
     lock    = threading.Lock()
 
-    t1 = threading.Thread(target=_search_nkiri,    args=(base, season_slug, year, results, lock))
-    t2 = threading.Thread(target=_search_dramakey, args=(base, season_slug, year, results, lock))
-    t1.start()
-    t2.start()
-    t1.join(timeout=60)
-    t2.join(timeout=60)
+    threads = []
+    if site_filter != 'dramakey':
+        t1 = threading.Thread(target=_search_nkiri, args=(base, season_slug, year, results, lock))
+        threads.append(t1)
+    if site_filter != 'nkiri':
+        t2 = threading.Thread(target=_search_dramakey, args=(base, season_slug, year, results, lock))
+        threads.append(t2)
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
 
     if not results:
         safe_print(f"\n  [!] Nothing found for: {raw_query}")
