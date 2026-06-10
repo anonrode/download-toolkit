@@ -66,15 +66,22 @@ def _parse_query(raw):
 def _probe(base_url, patterns, base, season_slug, year):
     """Try each pattern, return first URL that returns 200."""
     s = requests.Session()
-    s.headers['User-Agent'] = UA_DESKTOP
-    s.headers['Referer'] = base_url
+    s.headers.update({
+        'User-Agent':      UA_DESKTOP,
+        'Referer':         base_url,
+        'Accept':          'text/html,application/xhtml+xml,*/*;q=0.9',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection':      'keep-alive',
+    })
     base_url = base_url.rstrip('/')
 
     for pattern in patterns:
         url = base_url + '/' + pattern.replace('{base}', base).replace('{season}', season_slug).replace('{year}', year) + '/'
         try:
             r = s.head(url, timeout=10, allow_redirects=True)
-            if r.status_code == 200:
+            if r.status_code in (200, 403):
+                # 403 means page exists but blocks HEAD — still a valid result
                 return r.url
         except Exception:
             continue
