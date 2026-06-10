@@ -64,7 +64,13 @@ def _parse_query(raw):
 # ─── SINGLE SITE SEARCH ───────────────────────────────────────
 
 def _probe(base_url, patterns, base, season_slug, year):
-    """Try each pattern, return first URL that returns 200."""
+    """
+    Try each pattern with HEAD request.
+    - 200 = confirmed found, return immediately
+    - 403 = page may or may not exist (NKiri uses 403 for both)
+            collect candidates, verify with GET + title check at end
+    - 404 = does not exist, skip
+    """
     s = requests.Session()
     s.headers.update({
         'User-Agent':      UA_DESKTOP,
@@ -75,16 +81,30 @@ def _probe(base_url, patterns, base, season_slug, year):
         'Connection':      'keep-alive',
     })
     base_url = base_url.rstrip('/')
+    candidates_403 = []
 
     for pattern in patterns:
         url = base_url + '/' + pattern.replace('{base}', base).replace('{season}', season_slug).replace('{year}', year) + '/'
         try:
             r = s.head(url, timeout=10, allow_redirects=True)
-            if r.status_code in (200, 403):
-                # 403 means page exists but blocks HEAD — still a valid result
+            if r.status_code == 200:
                 return r.url
+            elif r.status_code == 403:
+                candidates_403.append(r.url)
         except Exception:
             continue
+
+    # Verify 403 candidates — do a GET and check title contains base slug
+    for url in candidates_403:
+        try:
+            r = s.get(url, timeout=15, allow_redirects=True)
+            if r.status_code == 200:
+                title = r.text[r.text.find('<title>')+7:r.text.find('</title>')].lower()
+                if base.replace('-', ' ') in title or base in title:
+                    return r.url
+        except Exception:
+            continue
+
     return None
 
 def _search_nkiri(base, season_slug, year, results, lock):
