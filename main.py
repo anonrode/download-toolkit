@@ -86,7 +86,7 @@ def setup_signal_handler():
 
 def wait_if_paused():
     global PAUSED, STOP, _CTRL_C_COUNT
-    if not PAUSED:
+    if not PAUSED or not sys.stdin.isatty():
         return
     try:
         import termios
@@ -291,7 +291,8 @@ def auto_update():
             script_dir = os.path.dirname(os.path.abspath(__file__))
             result = subprocess.run(
                 ['git', 'pull'], cwd=script_dir,
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=30,
+                stdin=subprocess.DEVNULL
             )
             if result.returncode == 0 and 'Already up to date' not in result.stdout:
                 print("[ok] Auto-updated to latest version")
@@ -342,17 +343,16 @@ def print_banner(cfg):
 
 # ─── SESSION FACTORY ──────────────────────────────────────────
 def make_session():
-    ua = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-          'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    from downloader import UA_DESKTOP
     try:
         from curl_cffi import requests as cf_requests
         s = cf_requests.Session(impersonate='chrome120')
-        s.headers['User-Agent'] = ua
+        s.headers['User-Agent'] = UA_DESKTOP
         return s
     except ImportError:
         import requests
         s = requests.Session()
-        s.headers['User-Agent'] = ua
+        s.headers['User-Agent'] = UA_DESKTOP
         return s
 
 # ─── MAIN REPL ────────────────────────────────────────────────

@@ -19,7 +19,7 @@ from downloader import (
     DownloadSummary, download_file, download_batch, download_with_ytdlp,
     download_social_ytdlp, Prefetcher, safe_print, safe_filename,
     find_direct_video, base_domain, is_streaming_link,
-    mark_series_complete, BASE_DIR, DIAG_LOG, UA_DESKTOP
+    mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
@@ -53,6 +53,9 @@ def safe_get(session, url, timeout=20, referer=None, retries=3):
             if referer:
                 session.headers['Referer'] = referer
             r = session.get(url, timeout=timeout)
+            if not r.ok:
+                safe_print(f"  [!] HTTP {r.status_code}: {url[:60]}")
+                return None
             return r
         except Exception as e:
             safe_print(f"  [!] Attempt {attempt+1}/{retries} failed: {e}")
@@ -210,6 +213,8 @@ def resolve_streamtape(url, session):
                     loc = r2.headers.get('location')
                     if loc:
                         return loc
+                else:
+                    safe_print(f"  [!] Streamtape JS pattern not matched — site may have changed")
         return find_direct_video(r.text)
     except Exception as e:
         safe_print(f"  [!] Streamtape: {e}")
@@ -718,7 +723,8 @@ def extract_myasiantv(url, session, ctx=None):
         show_slug = re.sub(r'-\d{4}.*$', '', slug)
         ep_links  = list(dict.fromkeys(
             a['href'] for a in soup.find_all('a', href=True)
-            if ('episode-' in a['href'] and bd in a['href'] and show_slug in a['href'])
+            if ('episode-' in a['href'] and show_slug in a['href']
+                and (bd in a['href'] or a['href'].startswith('/')))
         ))
         if not ep_links:
             safe_print("[!] No episode links found")
@@ -928,16 +934,16 @@ def extract_naijavault(url, session, ctx=None):
                 direct = resolve_vikingfile(cdn_url, session)
                 if not direct:
                     # Fallback: check page for lulacloud
-                    lc = re.search('lulacloud.com/d/', r2.text)
+                    lc = re.search(r'https?://(?:www\.)?lulacloud\.com/d/\S+', r2.text)
                     if lc:
-                        direct = resolve_lulacloud(lc.group(0), session)
+                        direct = resolve_lulacloud(lc.group(0).rstrip('.,;)"\''), session)
             elif 'lulacloud.com' in cdn_url:
                 direct = resolve_lulacloud(cdn_url, session)
                 if not direct:
                     # Fallback: check page for vikingfile
-                    vf = re.search('vikingfile.com/', r2.text)
+                    vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
                     if vf:
-                        direct = resolve_vikingfile(vf.group(0), session)
+                        direct = resolve_vikingfile(vf.group(0).rstrip('.,;)"\''), session)
             elif 'cdn.filevault.com.ng' in cdn_url:
                 direct = cdn_url
             else:
@@ -953,9 +959,9 @@ def extract_naijavault(url, session, ctx=None):
             continue
 
         # Fallback: vikingfile anchor directly in page
-        vf = re.search('vikingfile.com/', r2.text)
+        vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
         if vf:
-            direct = resolve_vikingfile(vf.group(0).rstrip('.,;)'), session)
+            direct = resolve_vikingfile(vf.group(0).rstrip('.,;)"\''), session)
             if direct:
                 ext = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
                 fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
@@ -963,9 +969,9 @@ def extract_naijavault(url, session, ctx=None):
                 time.sleep(0.5)
                 continue
             # Try lulacloud on same page
-            lc = re.search('lulacloud.com/d/', r2.text)
+            lc = re.search(r'https?://(?:www\.)?lulacloud\.com/d/\S+', r2.text)
             if lc:
-                direct = resolve_lulacloud(lc.group(0), session)
+                direct = resolve_lulacloud(lc.group(0).rstrip('.,;)"\''), session)
                 if direct:
                     ext = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
                     fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
@@ -1027,7 +1033,7 @@ def extract_naijavault(url, session, ctx=None):
                     if not direct:
                         vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
                         if vf:
-                            direct = resolve_vikingfile(vf.group(0).rstrip('.,;)'), session)
+                            direct = resolve_vikingfile(vf.group(0).rstrip('.,;)"\''), session)
                     if not direct:
                         fv = re.search(r'https?://cdn\.filevault\.com\.ng/[^\s"\'<>]+', r2.text)
                         if fv:
@@ -1143,7 +1149,6 @@ def extract_anitaku(url, session, ctx=None):
             _wait(ctx)
             ep_name = safe_filename(ep_url.rstrip('/').split('/')[-1])
             safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
-            from downloader import already_downloaded
             done, _ = already_downloaded(folder, f"{ep_name}.mp4")
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
