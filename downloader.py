@@ -276,7 +276,7 @@ def check_url_alive(url, session):
 def safe_filename(name):
     name = re.sub(r'[<>:"/\\|?*]', '', name)
     name = re.sub(r'\s+', ' ', name)
-    name = name.strip().rstrip('.')
+    name = name.strip().lstrip('.').rstrip('.')
     return name
 
 def find_direct_video(text):
@@ -340,13 +340,13 @@ def _update_ytdlp():
 
 # ─── DOWNLOAD BACKENDS ────────────────────────────────────────
 def download_with_aria2c(url, folder, filename, summary,
-                         bandwidth_limit=0, current_process=None, retries=3):
+                         bandwidth_limit=0, current_process=None, retries=3, stop_flag=None):
     import shutil
     has_aria2c = shutil.which('aria2c') is not None
     if not has_aria2c:
         if not _install_aria2c():
             safe_print("[!] aria2c unavailable — falling back to requests")
-            return download_with_requests(url, folder, filename, summary)
+            return download_with_requests(url, folder, filename, summary, stop_flag=stop_flag)
         has_aria2c = True
 
     os.makedirs(folder, exist_ok=True)
@@ -445,7 +445,7 @@ def download_with_aria2c(url, folder, filename, summary,
             return False
     return False
 
-def download_with_requests(url, folder, filename, summary):
+def download_with_requests(url, folder, filename, summary, stop_flag=None):
     import requests
     filepath = os.path.join(folder, filename)
     os.makedirs(folder, exist_ok=True)
@@ -466,6 +466,9 @@ def download_with_requests(url, folder, filename, summary):
         start      = time.time()
         with open(filepath, 'wb') as f:
             for chunk in r.iter_content(chunk_size=512 * 1024):
+                if stop_flag and stop_flag[0]:
+                    safe_print(f"\n  [!] Stopped")
+                    break
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
@@ -698,7 +701,8 @@ def download_file(url, folder, filename, summary,
     else:
         result = download_with_aria2c(url, folder, filename, summary,
                                       bandwidth_limit=bandwidth_limit,
-                                      current_process=current_process)
+                                      current_process=current_process,
+                                      stop_flag=stop_flag)
 
     if result and series_url:
         mark_episode_done(series_url, series_name or folder, filename)

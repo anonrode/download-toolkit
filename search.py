@@ -5,6 +5,7 @@ No index, no Google. Direct HEAD requests against known URL patterns.
 
 import re
 import threading
+import datetime
 import requests
 
 from downloader import safe_print, UA_DESKTOP
@@ -51,7 +52,7 @@ def _parse_query(raw):
     season_slug = ('s%02d' % season_n) if season_n else 's01'
     # Extract year
     year_m = re.search(r'(20\d{2})', q)
-    year = year_m.group(1) if year_m else '2026'
+    year = year_m.group(1) if year_m else str(datetime.date.today().year)
     # Build base slug — strip season, year, noise words
     slug = re.sub(r'\s+', '-', q)
     slug = re.sub(r'[^a-z0-9-]', '', slug)
@@ -137,11 +138,15 @@ def _probe(base_url, patterns, base, season_slug, year):
         return None
 
     with ThreadPoolExecutor(max_workers=3) as ex:
-        futures = [ex.submit(verify, url) for url in candidates_403]
+        futures = {ex.submit(verify, url): url for url in candidates_403}
+        verified = {orig: None for orig in candidates_403}
         for future in as_completed(futures):
-            result = future.result()
-            if result:
-                return result
+            orig = futures[future]
+            verified[orig] = future.result()
+    # Return first verified hit in original pattern priority order
+    for url in candidates_403:
+        if verified.get(url):
+            return verified[url]
 
     return None
 
@@ -157,6 +162,29 @@ def _search_dramakey(base, season_slug, year, results, lock):
         with lock:
             results.append(('DramaKey', url))
 
+def _search_anitaku(base, season_slug, year, results, lock):
+    """Search Anitaku via its working keyword search endpoint."""
+    try:
+        keyword = base.replace('-', '+')
+        s = requests.Session()
+        s.headers['User-Agent'] = UA_DESKTOP
+        r = s.get(f'https://anitaku.com.ro/search.html?keyword={keyword}', timeout=15)
+        if not r or r.status_code != 200:
+            return
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, 'html.parser')
+        for li in soup.select('ul.items li'):
+            a = li.select_one('p.name a')
+            if a and a.get('href'):
+                href = a['href']
+                if not href.startswith('http'):
+                    href = 'https://anitaku.com.ro' + href
+                with lock:
+                    results.append(('Anitaku', href))
+                return  # first result only
+    except Exception:
+        pass
+
 # ─── MAIN SEARCH ──────────────────────────────────────────────
 
 def search(raw_query, session=None):
@@ -169,6 +197,9 @@ def search(raw_query, session=None):
     elif query.lower().endswith(' dramakey'):
         site_filter = 'dramakey'
         query = query[:-9].strip()
+    elif query.lower().endswith(' anitaku'):
+        site_filter = 'anitaku'
+        query = query[:-8].strip()
 
     base, season_slug, year = _parse_query(query)
 
@@ -185,12 +216,15 @@ def search(raw_query, session=None):
     lock    = threading.Lock()
 
     threads = []
-    if site_filter != 'dramakey':
+    if site_filter not in ('dramakey', 'anitaku'):
         t1 = threading.Thread(target=_search_nkiri, args=(base, season_slug, year, results, lock))
         threads.append(t1)
-    if site_filter != 'nkiri':
+    if site_filter not in ('nkiri', 'anitaku'):
         t2 = threading.Thread(target=_search_dramakey, args=(base, season_slug, year, results, lock))
         threads.append(t2)
+    if site_filter not in ('nkiri', 'dramakey'):
+        t3 = threading.Thread(target=_search_anitaku, args=(base, season_slug, year, results, lock))
+        threads.append(t3)
 
     for t in threads:
         t.start()
