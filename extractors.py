@@ -43,7 +43,7 @@ EP_KEYWORDS = ['-e', 'episode', 's0', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 
 SOCIAL_DOMAINS = [
     'facebook.com', 'fb.watch', 'instagram.com', 'twitter.com', 'x.com',
     'tiktok.com', 'youtube.com', 'youtu.be', 'vimeo.com', 'dailymotion.com',
-    'twitch.tv', 'reddit.com', 'pinterest.com', 'snapchat.com'
+    'twitch.tv', 'reddit.com', 'pinterest.com', 'pin.it', 'snapchat.com'
 ]
 
 # ─── HELPERS ──────────────────────────────────────────────────
@@ -1312,22 +1312,257 @@ def extract_plutomovies(url, session, ctx=None):
 
     summary.report()
 
+def _yt_quality_prompt(default_quality):
+    """Ask user to pick a quality. Returns a yt-dlp format string."""
+    QUALITY_MAP = {
+        '1': ('360p',  'bestvideo[height<=360]+bestaudio/best[height<=360]'),
+        '2': ('480p',  'bestvideo[height<=480]+bestaudio/best[height<=480]'),
+        '3': ('720p',  'bestvideo[height<=720]+bestaudio/best[height<=720]'),
+        '4': ('1080p', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'),
+    }
+    # Work out which number matches the current default
+    label_to_num = {'360p': '1', '480p': '2', '720p': '3', '1080p': '4'}
+    default_label = '480p'
+    for label in label_to_num:
+        if label in default_quality:
+            default_label = label
+            break
+    default_num = label_to_num.get(default_label, '2')
+
+    safe_print(f"\n  Quality: [1] 360p  [2] 480p  [3] 720p  [4] 1080p  (default: {default_label})")
+    try:
+        choice = input("  Pick [1-4] or Enter for default: ").strip()
+    except EOFError:
+        choice = ''
+    if not choice:
+        choice = default_num
+    _, fmt = QUALITY_MAP.get(choice, QUALITY_MAP[default_num])
+    return fmt
+
+
+def _yt_get_playlist_count(url):
+    """Return number of items in a YouTube playlist, or None on failure."""
+    import shutil
+    if not shutil.which('yt-dlp'):
+        return None
+    try:
+        result = subprocess.run(
+            ['yt-dlp', '--flat-playlist', '--print', 'id',
+             '--no-warnings', '--quiet', url],
+            capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL
+        )
+        ids = [l for l in result.stdout.strip().splitlines() if l.strip()]
+        return len(ids) if ids else None
+    except Exception:
+        return None
+
+
+def _yt_playlist_items_prompt(count):
+    """
+    Ask what to download from a playlist.
+    Returns a --playlist-items string, or None to cancel.
+    'all' means download everything.
+    """
+    count_str = str(count) if count else '?'
+    safe_print(f"\n  Playlist detected — {count_str} videos")
+    safe_print(f"  [1] Download all")
+    safe_print(f"  [2] Range      (e.g. 5-10)")
+    safe_print(f"  [3] Specific   (e.g. 1,3,7)")
+    safe_print(f"  [0] Cancel")
+    try:
+        choice = input("\n  Pick: ").strip()
+    except EOFError:
+        return None
+    if choice == '0' or not choice:
+        return None
+    if choice == '1':
+        return 'all'
+    if choice == '2':
+        try:
+            r = input("  Range (e.g. 5-10): ").strip()
+            parts = r.split('-')
+            int(parts[0]); int(parts[1])  # validate
+            return r
+        except Exception:
+            safe_print("  [!] Invalid range")
+            return None
+    if choice == '3':
+        try:
+            items = input("  Items (e.g. 1,3,7): ").strip()
+            [int(x) for x in items.split(',')]  # validate
+            return items
+        except Exception:
+            safe_print("  [!] Invalid selection")
+            return None
+    return None
+
+
 def extract_social(url, session, ctx=None):
     ctx  = ctx or {}
     stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
 
-    bd   = base_domain(url).replace('https://', '').replace('www.', '')
-    safe_print(f"[*] Social/Generic mode: {bd}")
-    name   = bd.split('.')[0].title()
-    folder = os.path.join(BASE_DIR, 'Social', safe_filename(name))
+    bd     = base_domain(url).replace('https://', '').replace('www.', '')
+    is_yt  = 'youtube.com' in url or 'youtu.be' in url
+    is_pin = 'pinterest.com' in url or 'pin.it' in url
 
+    # ── Pinterest ──────────────────────────────────────────────
+    if is_pin:
+        safe_print(f"[*] Pinterest")
+        # Boards: pinterest.com/user/boardname/  — multiple pins
+        # Single pin: pinterest.com/pin/12345/
+        is_board = bool(re.search(r'pinterest\.com/[^/]+/[^/]+/?$', url)) and '/pin/' not in url
+        folder = os.path.join(BASE_DIR, 'Pinterest')
+        summary = DownloadSummary()
+        if is_board:
+            board_slug = safe_filename(url.rstrip('/').split('/')[-1] or 'board')
+            folder = os.path.join(folder, board_slug)
+            safe_print(f"[*] Board: {board_slug}")
+            safe_print(f"[*] Saving to: {folder}")
+            fmt = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+            os.makedirs(folder, exist_ok=True)
+            out_template = os.path.join(folder, '%(playlist_index)s - %(title)s.%(ext)s')
+            cmd = [
+                'yt-dlp', '-f', fmt,
+                '--merge-output-format', 'mp4',
+                '-o', out_template,
+                '--yes-playlist',
+                '--retries', '3', '--fragment-retries', '3',
+                '--quiet', '--no-warnings', '--progress', '--newline',
+                url
+            ]
+        else:
+            pin_id  = re.search(r'/pin/(\d+)', url)
+            slug    = pin_id.group(1) if pin_id else 'pin'
+            filename = safe_filename(f"{slug}.mp4")
+            safe_print(f"[*] Pin: {slug}")
+            safe_print(f"[*] Saving to: {folder}")
+            fmt = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+            os.makedirs(folder, exist_ok=True)
+            out_template = os.path.join(folder, safe_filename(slug) + '.%(ext)s')
+            cmd = [
+                'yt-dlp', '-f', fmt,
+                '--merge-output-format', 'mp4',
+                '-o', out_template,
+                '--no-playlist',
+                '--retries', '3', '--fragment-retries', '3',
+                '--quiet', '--no-warnings', '--progress', '--newline',
+                url
+            ]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True,
+                                    stdin=subprocess.DEVNULL)
+            cur_proc[0] = proc
+            for line in proc.stdout:
+                safe_print(line.rstrip())
+            proc.wait()
+            if proc.returncode == 0:
+                summary.add_success()
+            else:
+                summary.add_failed('pinterest')
+        except Exception as e:
+            safe_print(f"  [!] Error: {e}")
+            summary.add_failed('pinterest')
+        summary.report()
+        return
+
+    # ── YouTube ────────────────────────────────────────────────
+    if is_yt:
+        has_list    = 'list=' in url
+        has_watch   = 'watch?v=' in url or 'youtu.be/' in url
+
+        # Single video that is part of a playlist
+        if has_watch and has_list:
+            safe_print(f"\n  This video is part of a playlist")
+            safe_print(f"  [1] This video only")
+            safe_print(f"  [2] Full playlist")
+            safe_print(f"  [0] Cancel")
+            try:
+                choice = input("\n  Pick: ").strip()
+            except EOFError:
+                choice = '1'
+            if choice == '0':
+                return
+            if choice == '2':
+                # strip to just the list URL
+                list_id = re.search(r'list=([^&]+)', url)
+                if list_id:
+                    url = f'https://www.youtube.com/playlist?list={list_id.group(1)}'
+                has_watch = False  # fall through to playlist flow below
+            else:
+                has_list = False   # fall through to single video flow below
+
+        # Pure playlist
+        if has_list and not has_watch:
+            count       = _yt_get_playlist_count(url)
+            items_sel   = _yt_playlist_items_prompt(count)
+            if items_sel is None:
+                return
+            fmt         = _yt_quality_prompt(quality)
+            list_id     = re.search(r'list=([^&]+)', url)
+            folder_name = safe_filename(list_id.group(1) if list_id else 'playlist')
+            folder      = os.path.join(BASE_DIR, 'YouTube', folder_name)
+            os.makedirs(folder, exist_ok=True)
+            safe_print(f"\n[*] Saving to: {folder}")
+            out_template = os.path.join(folder, '%(playlist_index)s - %(title)s.%(ext)s')
+            cmd = [
+                'yt-dlp', '-f', fmt,
+                '--merge-output-format', 'mp4',
+                '-o', out_template,
+                '--yes-playlist',
+                '--retries', '3', '--fragment-retries', '3',
+                '--quiet', '--no-warnings', '--progress', '--newline',
+            ]
+            if items_sel != 'all':
+                cmd += ['--playlist-items', items_sel]
+            cmd.append(url)
+            summary = DownloadSummary()
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True,
+                                        stdin=subprocess.DEVNULL)
+                cur_proc[0] = proc
+                for line in proc.stdout:
+                    safe_print(line.rstrip())
+                proc.wait()
+                if proc.returncode == 0:
+                    summary.add_success()
+                else:
+                    summary.add_failed('playlist')
+            except Exception as e:
+                safe_print(f"  [!] Error: {e}")
+                summary.add_failed('playlist')
+            summary.report()
+            return
+
+        # Single YouTube video
+        fmt      = _yt_quality_prompt(quality)
+        vid_id   = re.search(r'(?:v=|youtu\.be/)([^&?/]+)', url)
+        slug     = vid_id.group(1) if vid_id else 'video'
+        folder   = os.path.join(BASE_DIR, 'YouTube')
+        filename = safe_filename(f"{slug}.mp4")
+        os.makedirs(folder, exist_ok=True)
+        safe_print(f"\n[*] Saving to: {folder}")
+        out_template = os.path.join(folder, '%(title)s.%(ext)s')
+        summary = DownloadSummary()
+        download_social_ytdlp(url, folder, filename, summary,
+                              current_process=cur_proc,
+                              quality_override=fmt,
+                              out_template=out_template)
+        summary.report()
+        return
+
+    # ── Everything else (Instagram, TikTok, Facebook, etc.) ───
+    safe_print(f"[*] Social/Generic mode: {bd}")
+    name     = bd.split('.')[0].title()
+    folder   = os.path.join(BASE_DIR, 'Social', safe_filename(name))
     slug     = url.rstrip('/').split('/')[-1] or 'video'
     slug     = re.sub(r'[^\w-]', '_', slug)[:50]
     filename = safe_filename(f"{slug}.mp4")
-
     safe_print(f"[*] Downloading: {filename}")
     safe_print(f"[*] Saving to: {folder}")
-    summary = DownloadSummary()
+    summary  = DownloadSummary()
     download_social_ytdlp(url, folder, filename, summary, current_process=cur_proc)
     summary.report()
 

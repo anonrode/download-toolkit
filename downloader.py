@@ -80,6 +80,19 @@ def save_history(history):
     except Exception:
         pass
 
+def _media_scan(filepath):
+    """Trigger Android media scanner so file appears in Gallery/WhatsApp immediately."""
+    if not IS_ANDROID:
+        return
+    try:
+        subprocess.Popen(
+            ['termux-media-scan', filepath],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL
+        )
+    except Exception:
+        pass
+
 def log_download(name, url, filepath):
     history = load_history()
     if name not in history:
@@ -88,6 +101,7 @@ def log_download(name, url, filepath):
     if entry not in history[name]:
         history[name].append(entry)
     save_history(history)
+    _media_scan(filepath)
 
 def show_history():
     history = load_history()
@@ -578,7 +592,8 @@ def download_with_ytdlp(url, folder, filename, summary,
         summary.add_failed(filename)
         return False
 
-def download_social_ytdlp(url, folder, filename, summary, current_process=None):
+def download_social_ytdlp(url, folder, filename, summary, current_process=None,
+                           quality_override=None, out_template=None):
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
     has_aria2c = shutil.which('aria2c') is not None
@@ -590,17 +605,24 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None):
             return False
 
     os.makedirs(folder, exist_ok=True)
-    base         = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
-    out_template = os.path.join(folder, base + '.%(ext)s')
+    base = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
+    if not out_template:
+        out_template = os.path.join(folder, base + '.%(ext)s')
 
-    format_chain = [
-        'bestvideo[height<=720]+bestaudio/best[height<=720]',
-        'bestvideo[height<=480]+bestaudio/best[height<=480]',
-        'bestvideo[height<=360]+bestaudio/best[height<=360]',
-        'bestvideo+bestaudio/best',
-        'best',
-    ]
-    safe_print(f"  [↓] yt-dlp (720p auto): {filename}")
+    # If caller already picked a quality, use it directly with a best fallback.
+    # Otherwise use the default auto chain.
+    if quality_override:
+        format_chain = [quality_override, 'bestvideo+bestaudio/best', 'best']
+        safe_print(f"  [↓] yt-dlp: {filename}")
+    else:
+        format_chain = [
+            'bestvideo[height<=720]+bestaudio/best[height<=720]',
+            'bestvideo[height<=480]+bestaudio/best[height<=480]',
+            'bestvideo[height<=360]+bestaudio/best[height<=360]',
+            'bestvideo+bestaudio/best',
+            'best',
+        ]
+        safe_print(f"  [↓] yt-dlp (720p auto): {filename}")
 
     for fmt in format_chain:
         try:

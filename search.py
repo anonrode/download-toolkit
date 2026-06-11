@@ -161,29 +161,6 @@ def _search_dramakey(base, season_slug, year, results, lock):
         with lock:
             results.append(('DramaKey', url))
 
-def _search_anitaku(base, season_slug, year, results, lock):
-    """Search Anitaku via its working keyword search endpoint."""
-    try:
-        keyword = base.replace('-', '+')
-        s = requests.Session()
-        s.headers['User-Agent'] = UA_DESKTOP
-        r = s.get(f'https://anitaku.com.ro/search.html?keyword={keyword}', timeout=15)
-        if not r or r.status_code != 200:
-            return
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(r.text, 'html.parser')
-        for li in soup.select('ul.items li'):
-            a = li.select_one('p.name a')
-            if a and a.get('href'):
-                href = a['href']
-                if not href.startswith('http'):
-                    href = 'https://anitaku.com.ro' + href
-                with lock:
-                    results.append(('Anitaku', href))
-                return  # first result only
-    except Exception:
-        pass
-
 # ─── MAIN SEARCH ──────────────────────────────────────────────
 
 def search(raw_query, session=None):
@@ -196,9 +173,6 @@ def search(raw_query, session=None):
     elif query.lower().endswith(' dramakey'):
         site_filter = 'dramakey'
         query = query[:-9].strip()
-    elif query.lower().endswith(' anitaku'):
-        site_filter = 'anitaku'
-        query = query[:-8].strip()
 
     base, season_slug, year = _parse_query(query)
 
@@ -215,15 +189,12 @@ def search(raw_query, session=None):
     lock    = threading.Lock()
 
     threads = []
-    if site_filter not in ('dramakey', 'anitaku'):
+    if site_filter != 'dramakey':
         t1 = threading.Thread(target=_search_nkiri, args=(base, season_slug, year, results, lock))
         threads.append(t1)
-    if site_filter not in ('nkiri', 'anitaku'):
+    if site_filter != 'nkiri':
         t2 = threading.Thread(target=_search_dramakey, args=(base, season_slug, year, results, lock))
         threads.append(t2)
-    if site_filter not in ('nkiri', 'dramakey'):
-        t3 = threading.Thread(target=_search_anitaku, args=(base, season_slug, year, results, lock))
-        threads.append(t3)
 
     for t in threads:
         t.start()
