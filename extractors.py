@@ -410,7 +410,7 @@ def resolve_lulacloud(url, session):
             for a in soup.find_all('a', href=True):
                 if any(ext in a['href'] for ext in ['.mkv', '.mp4', '.m3u8']):
                     return a['href']
-            m = re.search(r'(?:window\.location|location\.href)\s*=\s*["\'"]([^"\'"]+ )["\'"]', r1.text)
+            m = re.search(r'(?:window\.location|location\.href)\s*=\s*["\']([^"\']+)["\']', r1.text)
             if m:
                 return m.group(1)
             cdn = find_direct_video(r1.text)
@@ -975,7 +975,7 @@ def extract_naijavault(url, session, ctx=None):
 
         # nj_download redirect
         nj_match = 'naijavault.com' in r2.text and 'nj_download=' in r2.text
-        if nj:
+        if nj_match:
             try:
                 rr  = session.get(re.search(r"https?://[^ 	]+nj_download=[^ 	<>]+", r2.text).group(0).rstrip('.,;)'), timeout=15, allow_redirects=False)
                 cdn = rr.headers.get('location')
@@ -1016,14 +1016,20 @@ def extract_naijavault(url, session, ctx=None):
                 r2 = safe_get(session, lc_url, timeout=20)
                 if r2:
                     du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
-                    if du_m and 'vikingfile.com' in du_m.group(1):
-                        direct = resolve_vikingfile(du_m.group(1), session)
+                    if du_m:
+                        cdn = du_m.group(1)
+                        if 'vikingfile.com' in cdn:
+                            direct = resolve_vikingfile(cdn, session)
+                        elif 'lulacloud.com' in cdn:
+                            direct = resolve_lulacloud(cdn, session)
+                        else:
+                            direct = cdn   # bare CDN URL — use directly
                     if not direct:
-                        vf = re.search('vikingfile.com/', r2.text if r2 else '')
+                        vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
                         if vf:
-                            direct = resolve_vikingfile(vf.group(0), session)
+                            direct = resolve_vikingfile(vf.group(0).rstrip('.,;)'), session)
                     if not direct:
-                        fv = re.search('cdn.filevault.com.ng', r2.text if r2 else '')
+                        fv = re.search(r'https?://cdn\.filevault\.com\.ng/[^\s"\'<>]+', r2.text)
                         if fv:
                             direct = fv.group(0)
 

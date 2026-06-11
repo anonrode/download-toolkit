@@ -23,6 +23,7 @@ STOP            = False
 PAUSED          = False
 _CTRL_C_COUNT   = [0]
 CURRENT_PROCESS = [None]
+STOP_FLAG       = [False]   # mutable stop flag — shared with ctx so signal reaches extractor loops
 
 # ─── CONFIG ───────────────────────────────────────────────────
 DEFAULT_CONFIG = {
@@ -54,13 +55,14 @@ def save_config(cfg):
 # ─── SIGNAL HANDLING (Ctrl+C) ─────────────────────────────────
 def setup_signal_handler():
     import signal
-    global STOP, PAUSED, _CTRL_C_COUNT, CURRENT_PROCESS
+    global STOP, PAUSED, _CTRL_C_COUNT, CURRENT_PROCESS, STOP_FLAG
 
     def handler(sig, frame):
         global STOP, PAUSED, _CTRL_C_COUNT
         _CTRL_C_COUNT[0] += 1
         if _CTRL_C_COUNT[0] == 1:
             PAUSED = True
+            STOP_FLAG[0] = False
             proc = CURRENT_PROCESS[0]
             if proc:
                 try:
@@ -71,6 +73,7 @@ def setup_signal_handler():
         else:
             STOP   = True
             PAUSED = False
+            STOP_FLAG[0] = True
             proc   = CURRENT_PROCESS[0]
             if proc:
                 try:
@@ -111,7 +114,7 @@ def _quality_str(q):
 
 def _make_ctx(cfg):
     return {
-        'stop':            [False],
+        'stop':            STOP_FLAG,
         'wait':            wait_if_paused,
         'bandwidth':       cfg.get('bandwidth', 0),
         'quality':         _quality_str(cfg.get('quality', '480p')),
@@ -373,6 +376,7 @@ def main():
         STOP             = False
         PAUSED           = False
         _CTRL_C_COUNT[0] = 0
+        STOP_FLAG[0]     = False
 
         try:
             raw = input("\n> ").strip()
