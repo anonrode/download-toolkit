@@ -5,7 +5,6 @@ No index, no Google. Direct HEAD requests against known URL patterns.
 
 import re
 import threading
-import datetime
 import requests
 
 from downloader import safe_print, UA_DESKTOP
@@ -52,7 +51,7 @@ def _parse_query(raw):
     season_slug = ('s%02d' % season_n) if season_n else 's01'
     # Extract year
     year_m = re.search(r'(20\d{2})', q)
-    year = year_m.group(1) if year_m else str(datetime.date.today().year)
+    year = year_m.group(1) if year_m else '2026'
     # Build base slug — strip season, year, noise words
     slug = re.sub(r'\s+', '-', q)
     slug = re.sub(r'[^a-z0-9-]', '', slug)
