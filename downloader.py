@@ -29,9 +29,8 @@ UA_DESKTOP   = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KH
 
 PRINT_LOCK   = threading.Lock()
 
-def safe_print(*args, **kwargs):
-    with PRINT_LOCK:
-        print(*args, **kwargs)
+# Route all output through the UI layer
+from ui import safe_print, info, success, warn, error, downloading, plain, blank, LiveProgress
 
 # ─── DISK SPACE ───────────────────────────────────────────────
 def get_free_space_gb():
@@ -209,24 +208,20 @@ class DownloadSummary:
             if name:
                 self.failed_list.append(name)
 
-    def report(self):
+    def report(self, name=''):
+        from ui import print_summary
         total = self.success + self.skipped + self.failed
         if total == 0:
             return
-        print(f"\n{'='*50}")
-        print(f"  DOWNLOAD COMPLETE")
-        print(f"  Total:     {total}")
-        print(f"  ✓ Done:    {self.success}")
-        if self.skipped:
-            print(f"  ✓ Skipped: {self.skipped} (already downloaded)")
-        if self.failed:
-            print(f"  ✗ Failed:  {self.failed}")
-            for name in self.failed_list:
-                print(f"    • {name}")
-        print(f"{'='*50}")
-        # Termux notification when batch finishes
+        print_summary(
+            name=name or 'download',
+            success=self.success,
+            skipped=self.skipped,
+            failed=self.failed,
+            failed_list=self.failed_list if self.failed_list else None,
+        )
         if IS_ANDROID and total > 1:
-            _notify(f"Download done — {self.success}/{total} episodes")
+            _notify(f"Done — {self.success}/{total} downloaded")
 
     def offer_retry(self):
         """Return failed list so caller can retry them."""
@@ -369,7 +364,8 @@ def download_with_aria2c(url, folder, filename, summary,
     filepath      = os.path.join(folder, filename)
     referer       = get_referer_for_url(url)
 
-    safe_print(f"  [↓] Downloading: {filename}")
+    downloading(filename)
+    progress = LiveProgress(filename)
 
     for attempt in range(retries):
         try:
@@ -396,7 +392,7 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--allow-overwrite=true',
                 '--auto-file-renaming=false',
                 '--console-log-level=warn',
-                '--summary-interval=0',
+                '--summary-interval=1',
                 '-d', folder,
                 '-o', filename,
             ]
@@ -404,9 +400,31 @@ def download_with_aria2c(url, folder, filename, summary,
                 cmd += ['--max-download-limit', f'{bandwidth_limit}K']
             cmd.append(url)
 
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
             if current_process is not None:
                 current_process[0] = proc
+
+            # Parse aria2c progress lines: "[#abc 512KiB/856MiB(60%) CN:16 DL:3.8MiB ETA:2m14s]"
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                pct_m   = re.search(r'\((\d+)%\)', line)
+                spd_m   = re.search(r'DL:([0-9.]+)([KM])i?B', line)
+                eta_m   = re.search(r'ETA:([^\]]+)', line)
+                if pct_m:
+                    pct = float(pct_m.group(1))
+                    spd = None
+                    if spd_m:
+                        spd = float(spd_m.group(1))
+                        if spd_m.group(2) == 'K':
+                            spd /= 1024
+                    eta = eta_m.group(1).strip() if eta_m else None
+                    progress.update(pct, spd, eta)
+
             proc.wait()
             code = proc.returncode
             if current_process is not None:
@@ -416,19 +434,20 @@ def download_with_aria2c(url, folder, filename, summary,
                 if os.path.exists(filepath):
                     size = os.path.getsize(filepath)
                     if size < 100 * 1024:
-                        safe_print(f"  [✗] File too small ({size/1024:.0f}KB) — likely error page")
+                        progress.fail()
+                        error(f'file too small ({size/1024:.0f}KB) — likely error page')
                         try:
                             os.remove(filepath)
                         except Exception:
                             pass
                         if attempt < retries - 1:
-                            safe_print(f"  [*] Retrying ({attempt+2}/{retries})...")
+                            info(f'retrying ({attempt+2}/{retries})...')
                             time.sleep(5)
                             continue
                         summary.add_failed(filename)
                         return False
                     size_mb = size / (1024 * 1024)
-                    safe_print(f"  [✓] Done: {filename} ({size_mb:.1f}MB)")
+                    progress.done(size_mb)
                     try:
                         if os.path.exists(session_file):
                             os.remove(session_file)
@@ -438,23 +457,26 @@ def download_with_aria2c(url, folder, filename, summary,
                     log_download(filename, url, filepath)
                     return True
                 else:
-                    safe_print(f"  [✗] File not found after download")
+                    progress.fail()
+                    error('file not found after download')
                     if attempt < retries - 1:
-                        safe_print(f"  [*] Retrying ({attempt+2}/{retries})...")
+                        info(f'retrying ({attempt+2}/{retries})...')
                         time.sleep(5)
                         continue
                     summary.add_failed(filename)
                     return False
             else:
-                safe_print(f"  [✗] aria2c failed (code {code})")
+                progress.fail()
+                error(f'aria2c failed (code {code})')
                 if attempt < retries - 1:
-                    safe_print(f"  [*] Retrying ({attempt+2}/{retries})...")
+                    info(f'retrying ({attempt+2}/{retries})...')
                     time.sleep(5)
                     continue
                 summary.add_failed(filename)
                 return False
         except Exception as e:
-            safe_print(f"  [!] aria2c error: {e}")
+            progress.fail()
+            error(f'aria2c error: {e}')
             summary.add_failed(filename)
             return False
     return False
@@ -529,20 +551,21 @@ def download_with_ytdlp(url, folder, filename, summary,
 
     if not has_ytdlp:
         if not _install_ytdlp():
-            safe_print(f"  [!] yt-dlp unavailable")
+            warn('yt-dlp unavailable')
             summary.add_failed(filename)
             return False
     if not has_ffmpeg:
-        safe_print(f"  [!] ffmpeg not found — install with: pkg install ffmpeg")
+        warn('ffmpeg not found — install with: pkg install ffmpeg')
         summary.add_failed(filename)
         return False
 
     os.makedirs(folder, exist_ok=True)
-    base         = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
+    base        = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
     out_template = os.path.join(folder, base + '.%(ext)s')
     quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
 
-    safe_print(f"  [↓] yt-dlp: {filename}")
+    downloading(filename)
+    progress = LiveProgress(filename)
     try:
         cmd = [
             'yt-dlp',
@@ -553,7 +576,7 @@ def download_with_ytdlp(url, folder, filename, summary,
             '--retries', 'infinite',
             '--fragment-retries', 'infinite',
             '--retry-sleep', '10',
-            '--quiet', '--no-warnings', '--progress', '--newline',
+            '--no-warnings', '--progress', '--newline',
         ]
         if has_aria2c:
             cmd += [
@@ -563,9 +586,31 @@ def download_with_ytdlp(url, folder, filename, summary,
                 '--connect-timeout=60 --file-allocation=none --min-split-size=1M'
             ]
         cmd.append(url)
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
         if current_process is not None:
             current_process[0] = proc
+
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if '[download]' in line:
+                pct_m = re.search(r'(\d+\.?\d*)%', line)
+                spd_m = re.search(r'at\s+([0-9.]+)([KM])iB/s', line)
+                eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
+                if pct_m:
+                    pct = float(pct_m.group(1))
+                    spd = None
+                    if spd_m:
+                        spd = float(spd_m.group(1))
+                        if spd_m.group(2) == 'K':
+                            spd /= 1024
+                    eta = eta_m.group(1) if eta_m else None
+                    progress.update(pct, spd, eta)
+
         proc.wait()
         code = proc.returncode
         if current_process is not None:
@@ -576,19 +621,21 @@ def download_with_ytdlp(url, folder, filename, summary,
                 p = os.path.join(folder, f"{base}.{ext}")
                 if os.path.exists(p):
                     size_mb = os.path.getsize(p) / (1024 * 1024)
-                    safe_print(f"  [✓] Done: {filename} ({size_mb:.1f}MB)")
+                    progress.done(size_mb)
                     summary.add_success()
                     log_download(filename, url, p)
                     return True
-            safe_print(f"  [✓] Done: {filename}")
+            progress.done()
             summary.add_success()
             return True
         else:
-            safe_print(f"  [✗] yt-dlp failed")
+            progress.fail()
+            error('yt-dlp failed')
             summary.add_failed(filename)
             return False
     except Exception as e:
-        safe_print(f"  [!] yt-dlp error: {e}")
+        progress.fail()
+        error(f'yt-dlp error: {e}')
         summary.add_failed(filename)
         return False
 

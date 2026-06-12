@@ -8,6 +8,8 @@ import threading
 import requests
 
 from downloader import safe_print, UA_DESKTOP
+from ui import (search_start, search_site_found, search_results,
+                search_found_one, search_not_found, sep, plain)
 
 # ─── SLUG PATTERNS ────────────────────────────────────────────
 
@@ -154,12 +156,14 @@ def _search_nkiri(base, season_slug, year, results, lock):
     if url:
         with lock:
             results.append(('NKiri', url))
+        search_site_found('NKiri')
 
 def _search_dramakey(base, season_slug, year, results, lock):
     url = _probe('https://dramakey.com/', DRAMAKEY_PATTERNS, base, season_slug, year)
     if url:
         with lock:
             results.append(('DramaKey', url))
+        search_site_found('DramaKey')
 
 # ─── MAIN SEARCH ──────────────────────────────────────────────
 
@@ -180,10 +184,7 @@ def search(raw_query, session=None):
         safe_print("[!] Empty query")
         return None
 
-    safe_print(f"\n  Searching: {query}")
-    if site_filter:
-        safe_print(f"  Site: {site_filter}")
-    safe_print(f"  {'─'*44}")
+    search_start(query)
 
     results = []
     lock    = threading.Lock()
@@ -202,27 +203,18 @@ def search(raw_query, session=None):
         t.join(timeout=60)
 
     if not results:
-        safe_print(f"\n  [!] Nothing found for: {raw_query}")
-        safe_print(f"  [*] Try different spelling or paste URL directly")
+        search_not_found(raw_query)
         return None
 
-    # If only one result — ask yes/no
     if len(results) == 1:
         site, url = results[0]
-        safe_print(f"\n  Found on {site}:")
-        safe_print(f"  {url}")
+        search_found_one(site, url)
         ans = input("\n  Download this? [Y/n]: ").strip().lower()
         if ans in ('', 'y', 'yes'):
             return url
         return None
 
-    # Multiple results — numbered list
-    print()
-    for i, (site, url) in enumerate(results, 1):
-        print(f"  [{i}] {site}")
-        print(f"       {url}")
-
-    print(f"\n  {'─'*44}")
+    search_results(results)
     try:
         choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(results)).strip())
     except (ValueError, EOFError):

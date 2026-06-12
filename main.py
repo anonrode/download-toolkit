@@ -324,25 +324,16 @@ def setup_android():
 
 # ─── BANNER ───────────────────────────────────────────────────
 def print_banner(cfg):
-    q = cfg.get('quality', '480p')
-    p = cfg.get('parallel', 1)
-    print("╔══════════════════════════════════════════════╗")
-    print("║         DOWNLOAD TOOLKIT v3.0                ║")
-    print(f"║  Quality: {q:<6}   Parallel: {p}               ║")
-    print("╠══════════════════════════════════════════════╣")
-    print("║  SITES:                                      ║")
-    print("║  nkiri • dramakey • dramarain • naijavault   ║")
-    print("║  plutomovies • anitaku • myasiantv           ║")
-    print("║  naijaprey • 9jarocks                        ║")
-    print("║  yt (playlist/video) • ig • tiktok • fb      ║")
-    print("║  pinterest (pins & boards)                   ║")
-    print("╠══════════════════════════════════════════════╣")
-    print("║  COMMANDS:                                   ║")
-    print("║  search <title> [nkiri|dramakey]             ║")
-    print("║  resume  • clip  • queue add/list/start      ║")
-    print("║  settings  • history                         ║")
-    print("╚══════════════════════════════════════════════╝")
-    print()
+    import shutil
+    from ui import print_splash
+    from downloader import get_free_space_gb
+    aria2c_ok = bool(shutil.which('aria2c'))
+    ytdlp_ok  = bool(shutil.which('yt-dlp'))
+    try:
+        free_gb = get_free_space_gb()
+    except Exception:
+        free_gb = None
+    print_splash(cfg, aria2c_ok=aria2c_ok, ytdlp_ok=ytdlp_ok, free_gb=free_gb)
 
 # ─── SESSION FACTORY ──────────────────────────────────────────
 def make_session():
@@ -382,7 +373,9 @@ def main():
         STOP_FLAG[0]     = False
 
         try:
-            raw = input("\n> ").strip()
+            from ui import prompt_line
+            prompt_line(cfg)
+            raw = input('').strip()
         except (EOFError, KeyboardInterrupt):
             print("\n[*] Exiting...")
             break
