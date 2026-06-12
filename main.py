@@ -246,22 +246,88 @@ def handle_settings(parts, cfg):
     return cfg
 
 def _show_settings(cfg):
-    bw  = cfg.get('bandwidth', 0)
-    dis = cfg.get('disabled_sites', [])
-    print(f"\n{'='*50}")
-    print(f"  SETTINGS")
-    print(f"{'='*50}")
-    print(f"  Quality:   {cfg.get('quality', '480p')}")
-    print(f"  Parallel:  {cfg.get('parallel', 1)}")
-    print(f"  Bandwidth: {'unlimited' if not bw else f'{bw}K/s'}")
-    print(f"  Disabled:  {', '.join(dis) if dis else 'none'}")
-    print(f"  Save dir:  {BASE_DIR}")
-    print(f"{'='*50}")
-    print(f"  settings quality <360p|480p|720p|1080p>")
-    print(f"  settings parallel <1|2|3>")
-    print(f"  settings bandwidth <KB/s or 0=unlimited>")
-    print(f"  settings disable/enable <site>")
-    print(f"{'='*50}")
+    """Interactive settings — pick a number to change."""
+    from ui import BCYAN, RESET, GREY, WHITE, BGREEN, YELLOW, _w, blank, sep
+
+    QUALITY_OPTIONS = ['360p', '480p', '720p', '1080p']
+
+    while True:
+        bw = cfg.get('bandwidth', 0)
+        q  = cfg.get('quality', '480p')
+        p  = cfg.get('parallel', 1)
+
+        blank()
+        _w(f'  {WHITE}SETTINGS{RESET}')
+        sep()
+        _w(f'  {GREY}[1]{RESET}  Quality     {BCYAN}{q}{RESET}')
+        _w(f'  {GREY}[2]{RESET}  Parallel    {BCYAN}{p} thread{"s" if p > 1 else ""}{RESET}')
+        _w(f'  {GREY}[3]{RESET}  Bandwidth   {BCYAN}{"unlimited" if not bw else f"{bw}KB/s"}{RESET}')
+        _w(f'  {GREY}[4]{RESET}  Save dir    {GREY}{BASE_DIR}{RESET}')
+        sep()
+        _w(f'  {GREY}pick a number to change, or Enter to go back{RESET}')
+
+        try:
+            choice = input('\n  › ').strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if not choice:
+            break
+
+        if choice == '1':
+            blank()
+            _w(f'  {WHITE}QUALITY{RESET}')
+            sep()
+            hints = {'360p': 'faster, smaller files', '480p': 'default',
+                     '720p': 'better quality', '1080p': 'best, largest files'}
+            for i, opt in enumerate(QUALITY_OPTIONS, 1):
+                marker = f'{BGREEN}←{RESET}' if opt == q else ''
+                _w(f'  {GREY}[{i}]{RESET}  {opt}  {GREY}{hints[opt]}{RESET}  {marker}')
+            sep()
+            try:
+                pick = input('\n  › ').strip()
+                if pick.isdigit() and 1 <= int(pick) <= len(QUALITY_OPTIONS):
+                    new_q = QUALITY_OPTIONS[int(pick) - 1]
+                    cfg['quality'] = new_q
+                    save_config(cfg)
+                    from ui import after_quality_change
+                    after_quality_change(new_q)
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+        elif choice == '2':
+            blank()
+            _w(f'  {WHITE}PARALLEL DOWNLOADS{RESET}')
+            sep()
+            for i, label, desc in [(1,'1 thread','one at a time (default)'),(2,'2 threads','two at once'),(3,'3 threads','three at once')]:
+                marker = f'{BGREEN}←{RESET}' if p == i else ''
+                _w(f'  {GREY}[{i}]{RESET}  {label}  {GREY}{desc}{RESET}  {marker}')
+            sep()
+            try:
+                pick = input('\n  › ').strip()
+                if pick in ('1', '2', '3'):
+                    cfg['parallel'] = int(pick)
+                    save_config(cfg)
+                    _w(f'\n  {BGREEN}✓  parallel → {pick} thread{"s" if int(pick) > 1 else ""}{RESET}')
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+        elif choice == '3':
+            blank()
+            _w(f'  {WHITE}BANDWIDTH LIMIT{RESET}')
+            sep()
+            _w(f'  {GREY}enter a limit in KB/s, or 0 for unlimited{RESET}')
+            _w(f'  {GREY}current: {"unlimited" if not bw else f"{bw}KB/s"}{RESET}')
+            sep()
+            try:
+                pick = input('\n  › ').strip()
+                if pick.isdigit():
+                    cfg['bandwidth'] = int(pick)
+                    save_config(cfg)
+                    label = 'unlimited' if not int(pick) else f'{pick}KB/s'
+                    _w(f'\n  {BGREEN}✓  bandwidth → {label}{RESET}')
+            except (EOFError, KeyboardInterrupt):
+                pass
 
 # ─── RESUME ───────────────────────────────────────────────────
 def handle_resume_command(session, cfg):

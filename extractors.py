@@ -1538,13 +1538,22 @@ def extract_social(url, session, ctx=None):
 
         # Single YouTube video
         fmt      = _yt_quality_prompt(quality)
-        vid_id   = re.search(r'(?:v=|youtu\.be/)([^&?/]+)', url)
-        slug     = vid_id.group(1) if vid_id else 'video'
         folder   = os.path.join(BASE_DIR, 'YouTube')
-        filename = safe_filename(f"{slug}.mp4")
         os.makedirs(folder, exist_ok=True)
-        safe_print(f"\n[*] Saving to: {folder}")
         out_template = os.path.join(folder, '%(title)s.%(ext)s')
+        # Fetch actual title for display
+        filename = 'video.mp4'
+        try:
+            import subprocess as _sp
+            r = _sp.run(['yt-dlp', '--get-title', '--no-warnings', url],
+                        capture_output=True, text=True, timeout=10,
+                        stdin=_sp.DEVNULL)
+            t = r.stdout.strip()
+            if t:
+                filename = safe_filename(t) + '.mp4'
+        except Exception:
+            pass
+        safe_print(f"\n[*] Saving to: {folder}")
         summary = DownloadSummary()
         download_social_ytdlp(url, folder, filename, summary,
                               current_process=cur_proc,
@@ -1604,8 +1613,8 @@ def process_link_queue(links, session, ctx=None):
             safe_print(f"{'─'*50}")
         extractor = detect_site(url)
         if not extractor:
-            safe_print(f"[!] Unsupported site: {url}")
-            safe_print(f"[!] Supported: {', '.join(SITE_MAP.keys())}")
+            from ui import after_unknown_url
+            after_unknown_url(url)
             continue
         try:
             extractor(url, session, ctx)

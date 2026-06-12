@@ -9,7 +9,7 @@ import requests
 
 from downloader import safe_print, UA_DESKTOP
 from ui import (search_start, search_site_found, search_results,
-                search_found_one, search_not_found, sep, plain)
+                search_found_one, search_not_found, after_search_not_found, sep, plain)
 
 # ─── SLUG PATTERNS ────────────────────────────────────────────
 
@@ -203,7 +203,7 @@ def search(raw_query, session=None):
         t.join(timeout=60)
 
     if not results:
-        search_not_found(raw_query)
+        after_search_not_found(raw_query)
         return None
 
     if len(results) == 1:

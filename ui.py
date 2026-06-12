@@ -98,27 +98,51 @@ def safe_print(*args, **kwargs):
 def print_splash(cfg, aria2c_ok=True, ytdlp_ok=True, free_gb=None):
     """Clear screen and draw the Anonrode startup splash."""
     os.system('clear')
-    q = cfg.get('quality', '480p')
-    p = cfg.get('parallel', 1)
-    width = min(TERM_WIDTH, 48)
+    q  = cfg.get('quality', '480p')
+    p  = cfg.get('parallel', 1)
+    W  = min(TERM_WIDTH - 4, 44)
+
+    def _sep():
+        _w(f'  {GREY}{"━" * W}{RESET}')
 
     _w()
-    _w(f'  {WHITE}{BOLD}{"ANONRODE":^{width-4}}{RESET}')
-    _w(f'  {GREY}{"download toolkit  ·  v3.0":^{width-4}}{RESET}')
+    _w(f'  {WHITE}{BOLD}A N O N R O D E{RESET}  {GREY}v3.0{RESET}')
+    _w()
+    _sep()
     _w()
 
-    # System checks
-    checks = []
-    checks.append(f'{BGREEN}✓{RESET} {GREY}aria2c{RESET}' if aria2c_ok else f'{RED}✗{RESET} {GREY}aria2c{RESET}')
-    checks.append(f'{BGREEN}✓{RESET} {GREY}yt-dlp{RESET}' if ytdlp_ok else f'{RED}✗{RESET} {GREY}yt-dlp{RESET}')
+    # ── Sites ──────────────────────────────────────────────────
+    _w(f'  {GREY}TV SERIES & MOVIES{RESET}')
+    _w(f'  {CYAN}NKiri{RESET}  ·  {CYAN}NaijaVault{RESET}  ·  {CYAN}PlutoMovies{RESET}')
+    _w(f'  {CYAN}9jaRocks{RESET}  ·  {CYAN}NaijaPrey{RESET}  ·  {CYAN}DramaKey{RESET}')
+    _w(f'  {CYAN}DramaRain{RESET}  ·  {CYAN}MyAsianTV{RESET}  ·  {CYAN}Anitaku{RESET}')
+    _w()
+    _w(f'  {GREY}SOCIAL & VIDEO{RESET}')
+    _w(f'  {CYAN}YouTube{RESET}  ·  {CYAN}Instagram{RESET}  ·  {CYAN}TikTok{RESET}')
+    _w(f'  {CYAN}Facebook{RESET}  ·  {CYAN}Pinterest{RESET}')
+    _w()
+    _sep()
+    _w()
+
+    # ── How to use ─────────────────────────────────────────────
+    _w(f'  {GREY}search{RESET} {WHITE}<show name>{RESET}    {GREY}find & download a show{RESET}')
+    _w(f'  {GREY}<paste link>{RESET}           {GREY}download directly{RESET}')
+    _w(f'  {GREY}settings{RESET}               {GREY}change quality & more{RESET}')
+    _w()
+    _sep()
+    _w()
+
+    # ── Status bar ─────────────────────────────────────────────
+    status_parts = []
+    gb_color = BGREEN if (free_gb or 0) > 2 else YELLOW if (free_gb or 0) > 0.5 else RED
     if free_gb is not None:
-        gb_color = BGREEN if free_gb > 2 else YELLOW if free_gb > 0.5 else RED
-        checks.append(f'{gb_color}{free_gb:.1f}GB{RESET} {GREY}free{RESET}')
-
-    _w('  ' + f'   '.join(checks))
-    _w()
-    _w(f'  {GREY}{"─" * (width - 4)}{RESET}')
-    _w(f'  {GREY}ready  ·  {q}  ·  {p} thread{"s" if p > 1 else ""}{RESET}')
+        status_parts.append(f'{gb_color}{free_gb:.1f}GB free{RESET}')
+    status_parts.append(f'{GREY}{q}{RESET}')
+    if not aria2c_ok:
+        status_parts.append(f'{YELLOW}aria2c missing{RESET}')
+    if not ytdlp_ok:
+        status_parts.append(f'{RED}yt-dlp missing{RESET}')
+    _w('  ' + f'  {GREY}·{RESET}  '.join(status_parts))
     _w()
 
 # ─── PROMPT ───────────────────────────────────────────────────
@@ -272,7 +296,52 @@ def search_not_found(query):
     warn(f'nothing found for: {query}')
     info('try different spelling or paste URL directly')
 
-# ─── PAUSE / STOP MESSAGES ────────────────────────────────────
+# ─── CONTEXT-AWARE MESSAGES ───────────────────────────────────
+
+def after_download_done(name, count, size_gb=None, elapsed=None):
+    """Smart message after a series/batch finishes."""
+    blank()
+    _w(f'  {BGREEN}✓  {name} — done{RESET}')
+    parts = []
+    if count:   parts.append(f'{count} episode{"s" if count != 1 else ""}')
+    if size_gb: parts.append(f'{size_gb:.1f}GB')
+    if elapsed:
+        m, s = divmod(int(elapsed), 60)
+        h, m = divmod(m, 60)
+        parts.append(f'{h}h {m}m' if h else f'{m}m {s}s')
+    if parts:
+        _w(f'  {GREY}{" · ".join(parts)}{RESET}')
+    _w()
+    _w(f'  {GREY}search another show, paste a link, or type{RESET} {WHITE}queue{RESET} {GREY}to batch download{RESET}')
+
+def after_search_not_found(query):
+    blank()
+    _w(f'  {RED}✗{RESET}  {GREY}nothing found for{RESET} {WHITE}{query}{RESET}')
+    _w(f'  {GREY}try different spelling, or paste a direct link from NaijaVault / PlutoMovies{RESET}')
+
+def after_link_expired():
+    blank()
+    _w(f'  {RED}✗  link expired{RESET}')
+    _w(f'  {GREY}go back to the series page and paste that URL instead{RESET}')
+
+def after_quality_change(new_q):
+    blank()
+    _w(f'  {BGREEN}✓  quality → {new_q}{RESET}')
+    size_hint = {
+        '360p':  '~300MB per 45min episode',
+        '480p':  '~500MB per 45min episode',
+        '720p':  '~900MB per 45min episode',
+        '1080p': '~1.5GB per 45min episode',
+    }
+    hint = size_hint.get(new_q)
+    if hint:
+        _w(f'  {GREY}heads up — {hint}{RESET}')
+
+def after_unknown_url(url):
+    blank()
+    _w(f'  {RED}✗  site not supported{RESET}')
+    _w(f'  {GREY}supported: NKiri, NaijaVault, PlutoMovies, DramaKey, YouTube, Instagram, TikTok, Pinterest and more{RESET}')
+    _w(f'  {GREY}try{RESET} {WHITE}search <title>{RESET} {GREY}to find the show instead{RESET}')
 
 def paused():
     blank()

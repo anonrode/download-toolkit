@@ -80,12 +80,13 @@ def save_history(history):
         pass
 
 def _media_scan(filepath):
-    """Trigger Android media scanner so file appears in Gallery/WhatsApp immediately."""
+    """Trigger Android media scanner on the file's folder so WhatsApp picks it up fast."""
     if not IS_ANDROID:
         return
     try:
+        folder = os.path.dirname(filepath)
         subprocess.Popen(
-            ['termux-media-scan', filepath],
+            ['termux-media-scan', '-r', folder],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL
         )
@@ -187,13 +188,6 @@ def show_resume_list():
 
 # ─── DOWNLOAD SUMMARY ─────────────────────────────────────────
 class DownloadSummary:
-    def __init__(self):
-        self.success     = 0
-        self.skipped     = 0
-        self.failed      = 0
-        self._lock       = threading.Lock()
-        self.failed_list = []
-
     def add_success(self):
         with self._lock:
             self.success += 1
@@ -208,18 +202,35 @@ class DownloadSummary:
             if name:
                 self.failed_list.append(name)
 
+    def __init__(self):
+        self._lock       = threading.Lock()
+        self.success     = 0
+        self.skipped     = 0
+        self.failed      = 0
+        self.failed_list = []
+        self.start_time  = time.time()
+
     def report(self, name=''):
-        from ui import print_summary
+        from ui import print_summary, after_download_done
         total = self.success + self.skipped + self.failed
         if total == 0:
             return
+        elapsed = time.time() - self.start_time
         print_summary(
             name=name or 'download',
             success=self.success,
             skipped=self.skipped,
             failed=self.failed,
             failed_list=self.failed_list if self.failed_list else None,
+            elapsed=elapsed,
         )
+        # Context-aware what-next message for multi-episode downloads
+        if total > 1 and self.failed == 0:
+            after_download_done(
+                name=name or 'download',
+                count=self.success,
+                elapsed=elapsed,
+            )
         if IS_ANDROID and total > 1:
             _notify(f"Done — {self.success}/{total} downloaded")
 
