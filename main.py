@@ -69,7 +69,7 @@ def setup_signal_handler():
                     proc.terminate()
                 except Exception:
                     pass
-            print('\n\n  [pause] Paused — press Enter to resume, Ctrl+C again to exit\n')
+            from ui import paused; paused()
         else:
             STOP   = True
             PAUSED = False
@@ -80,7 +80,7 @@ def setup_signal_handler():
                     proc.terminate()
                 except Exception:
                     pass
-            print('\n\n  [stop] Stopping...\n')
+            from ui import stopped; stopped()
 
     signal.signal(signal.SIGINT, handler)
 
@@ -99,7 +99,7 @@ def wait_if_paused():
             if PAUSED:
                 PAUSED = False
                 _CTRL_C_COUNT[0] = 0
-                print('  [resume] Resuming...\n')
+                from ui import resuming; resuming()
         except EOFError:
             STOP = True
             break
@@ -141,52 +141,57 @@ def save_queue(q):
         pass
 
 def queue_add(url):
+    from ui import success, info
     q = load_queue()
     if url not in q:
         q.append(url)
         save_queue(q)
-        print(f"[+] Added to queue: {url[:60]}")
-        print(f"[*] Queue: {len(q)} item(s) — type 'queue start' to begin")
+        success(f'added to queue: {url[:60]}')
+        info(f'queue: {len(q)} item(s)  —  type queue start to begin')
     else:
-        print(f"[*] Already in queue")
+        info('already in queue')
 
 def queue_list():
+    from ui import info, blank, sep, _w, GREY, RESET, WHITE, BCYAN
     q = load_queue()
     if not q:
-        print("[*] Queue is empty")
+        info('queue is empty — add URLs with: queue add <url>')
         return
-    print(f"\n{'='*50}")
-    print(f"  DOWNLOAD QUEUE ({len(q)} item(s))")
-    print(f"{'='*50}")
+    blank()
+    _w(f'  {WHITE}QUEUE{RESET}  {GREY}·  {len(q)} item(s){RESET}')
+    sep()
     for i, url in enumerate(q, 1):
-        print(f"  [{i}] {url[:65]}")
-    print(f"{'='*50}")
+        _w(f'  {GREY}[{i}]{RESET}  {BCYAN}{url[:65]}{RESET}')
+    sep()
 
 def queue_clear():
+    from ui import info
     save_queue([])
-    print("[*] Queue cleared")
+    info('queue cleared')
 
 def queue_remove(n):
+    from ui import success, warn
     q = load_queue()
     if 1 <= n <= len(q):
         removed = q.pop(n - 1)
         save_queue(q)
-        print(f"[-] Removed: {removed[:60]}")
+        success(f'removed: {removed[:60]}')
     else:
-        print(f"[!] Invalid index")
+        warn('invalid index')
 
 def queue_run(session, cfg):
+    from ui import info, success
     q = load_queue()
     if not q:
-        print("[*] Queue is empty — add URLs with 'queue add <url>'")
+        info('queue is empty — add URLs with: queue add <url>')
         return
-    print(f"\n[*] Starting queue — {len(q)} item(s)")
+    info(f'starting queue — {len(q)} item(s)')
     from extractors import process_link_queue
     ctx = _make_ctx(cfg)
     process_link_queue(q, session, ctx)
     if not STOP:
         save_queue([])
-        print("[✓] Queue complete — cleared")
+        success('queue complete — cleared')
 
 # ─── SETTINGS ─────────────────────────────────────────────────
 def handle_settings(parts, cfg):
@@ -199,28 +204,28 @@ def handle_settings(parts, cfg):
         if q in ('360p', '480p', '720p', '1080p', 'best'):
             cfg['quality'] = q
             save_config(cfg)
-            print(f"[ok] Quality: {q}")
+            from ui import success; success(f"quality set to {q}")
         else:
-            print("[!] Valid: 360p 480p 720p 1080p best")
+            from ui import warn; warn("valid options: 360p 480p 720p 1080p")
     elif key == 'parallel' and len(parts) >= 3:
         try:
             n = int(parts[2])
             if 1 <= n <= 3:
                 cfg['parallel'] = n
                 save_config(cfg)
-                print(f"[ok] Parallel: {n}")
+                from ui import success; success(f"parallel set to {n}")
             else:
-                print("[!] Parallel must be 1-3")
+                from ui import warn; warn("parallel must be 1, 2 or 3")
         except ValueError:
-            print("[!] Invalid number")
+            from ui import warn; warn("invalid number")
     elif key == 'bandwidth' and len(parts) >= 3:
         try:
             bw = int(parts[2])
             cfg['bandwidth'] = bw
             save_config(cfg)
-            print(f"[ok] Bandwidth: {'unlimited' if not bw else f'{bw}K/s'}")
+            from ui import success; success(f"bandwidth set to {'unlimited' if not bw else f'{bw}KB/s'}")
         except ValueError:
-            print("[!] Use KB/s number, e.g. 'settings bandwidth 500'")
+            from ui import warn; warn("enter a number in KB/s, e.g. settings bandwidth 500")
     elif key == 'disable' and len(parts) >= 3:
         site     = parts[2].lower()
         disabled = cfg.get('disabled_sites', [])
@@ -228,9 +233,9 @@ def handle_settings(parts, cfg):
             disabled.append(site)
             cfg['disabled_sites'] = disabled
             save_config(cfg)
-            print(f"[ok] Disabled: {site}")
+            from ui import success; success(f"disabled: {site}")
         else:
-            print(f"[*] Already disabled")
+            from ui import info; info("already disabled")
     elif key == 'enable' and len(parts) >= 3:
         site     = parts[2].lower()
         disabled = cfg.get('disabled_sites', [])
@@ -238,9 +243,9 @@ def handle_settings(parts, cfg):
             disabled.remove(site)
             cfg['disabled_sites'] = disabled
             save_config(cfg)
-            print(f"[ok] Enabled: {site}")
+            from ui import success; success(f"enabled: {site}")
         else:
-            print(f"[*] Not disabled")
+            from ui import info; info("not disabled")
     else:
         _show_settings(cfg)
     return cfg
@@ -344,7 +349,8 @@ def handle_resume_command(session, cfg):
     if choice == 0 or choice > len(urls):
         return
     url = urls[choice - 1]
-    print(f"\n[*] Resuming: {url[:60]}")
+    from ui import info
+    info(f'resuming: {url[:60]}')
     ctx = _make_ctx(cfg)
     process_link_queue([url], session, ctx)
 
@@ -361,7 +367,8 @@ def auto_update():
                 stdin=subprocess.DEVNULL
             )
             if result.returncode == 0 and 'Already up to date' not in result.stdout:
-                print("[ok] Auto-updated to latest version")
+                from ui import success
+                success('updated to latest version')
         except Exception:
             pass
     threading.Thread(target=_pull, daemon=True).start()
@@ -377,16 +384,16 @@ def setup_android():
         pass
     if not os.environ.get('TMUX'):
         if shutil.which('tmux'):
-            print("[*] Starting fresh tmux session...")
+            from ui import info; info("starting tmux session...")
             try:
                 subprocess.run(['tmux', 'kill-session', '-t', 'download'],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 os.execvp('tmux', ['tmux', 'new-session', '-s', 'download',
                                    sys.executable] + sys.argv)
             except Exception as e:
-                print(f"[!] tmux error: {e}")
+                from ui import warn; warn(f"tmux error: {e}")
         else:
-            print("[!] tmux not found — install with: pkg install tmux")
+            from ui import warn; warn("tmux not found — install with: pkg install tmux")
 
 # ─── BANNER ───────────────────────────────────────────────────
 def print_banner(cfg):
@@ -443,7 +450,8 @@ def main():
             prompt_line(cfg)
             raw = input('').strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n[*] Exiting...")
+            from ui import info
+            info('exiting...')
             break
 
         if not raw:
@@ -453,7 +461,8 @@ def main():
         parts = raw.split()
 
         if lower in ('exit', 'quit', 'q'):
-            print("[*] Goodbye")
+            from ui import info
+            info('goodbye')
             break
 
         elif lower == 'history':
@@ -468,17 +477,17 @@ def main():
                                          capture_output=True, text=True, timeout=5)
                 clipped = result.stdout.strip()
                 if clipped.startswith('http'):
-                    print(f"[*] From clipboard: {clipped[:70]}")
+                    from ui import info; info(f"from clipboard: {clipped[:70]}")
                     ctx = _make_ctx(cfg)
                     process_link_queue([clipped], session, ctx)
                 elif clipped:
-                    print(f"[!] Not a URL: {clipped[:60]}")
+                    from ui import warn; warn(f"not a URL: {clipped[:60]}")
                 else:
-                    print("[!] Clipboard is empty")
+                    from ui import warn; warn("clipboard is empty")
             except FileNotFoundError:
-                print("[!] termux-clipboard-get not found — pkg install termux-api")
+                from ui import warn; warn("termux-clipboard-get not found — pkg install termux-api")
             except Exception as e:
-                print(f"[!] Clipboard error: {e}")
+                from ui import warn; warn(f"clipboard error: {e}")
 
         elif lower.startswith('settings'):
             cfg = handle_settings(parts, cfg)
@@ -496,9 +505,9 @@ def main():
                 try:
                     queue_remove(int(parts[2]))
                 except ValueError:
-                    print("[!] Usage: queue remove <number>")
+                    from ui import warn; warn("usage: queue remove <number>")
             else:
-                print("[*] queue add <url> | list | start | clear | remove <n>")
+                from ui import info; info("usage: queue add <url> | list | start | clear | remove <n>")
 
         elif lower == 'index rebuild':
             rebuild_index_command()
@@ -508,20 +517,21 @@ def main():
             if query:
                 url = search(query, session)
                 if url:
-                    print(f"\n[*] Downloading: {url}")
+                    from ui import info
+                    info(f'downloading: {url[:60]}')
                     ctx = _make_ctx(cfg)
                     process_link_queue([url], session, ctx)
             else:
-                print("[!] Usage: search <title>")
+                from ui import warn; warn("usage: search <title>")
 
         elif raw.startswith('http'):
             urls = [u.strip() for u in raw.split() if u.strip().startswith('http')]
             if not urls:
-                print("[!] No valid URLs")
+                from ui import warn; warn("no valid URLs found")
                 continue
             ctx = _make_ctx(cfg)
             if len(urls) > 3:
-                print(f"[*] {len(urls)} URLs detected")
+                from ui import info; info(f"{len(urls)} URLs detected")
                 ans = input("  Start now or add to queue? [now/queue]: ").strip().lower()
                 if ans == 'queue':
                     for u in urls:
@@ -530,8 +540,9 @@ def main():
             process_link_queue(urls, session, ctx)
 
         else:
-            print(f"[!] Unknown: {raw[:40]}")
-            print("[*] Type 'search <title>', paste a URL, or 'settings'")
+            from ui import warn, info
+            warn(f'unknown command: {raw[:40]}')
+            info("type  search <title>  to find a show, or paste a URL")
 
 if __name__ == '__main__':
     main()

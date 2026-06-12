@@ -104,18 +104,20 @@ def log_download(name, url, filepath):
     _media_scan(filepath)
 
 def show_history():
+    from ui import _w, blank, sep, GREY, RESET, WHITE, BCYAN, BGREEN
     history = load_history()
     if not history:
-        print("[*] No download history yet")
+        from ui import info
+        info('no download history yet')
         return
-    print(f"\n{'='*50}")
-    print(f"  DOWNLOAD HISTORY")
-    print(f"{'='*50}")
+    blank()
+    _w(f'  {WHITE}DOWNLOAD HISTORY{RESET}')
+    sep()
     for name, entries in list(history.items())[-20:]:
-        print(f"\n  {name} ({len(entries)} file(s))")
+        _w(f'\n  {BCYAN}{name}{RESET}  {GREY}({len(entries)} file(s)){RESET}')
         for e in entries[-3:]:
-            print(f"    • {e['time']} — {os.path.basename(e['file'])}")
-    print(f"{'='*50}")
+            _w(f'    {GREY}·  {e["time"]}  —  {os.path.basename(e["file"])}{RESET}')
+    sep()
 
 # ─── RESUME STATE ─────────────────────────────────────────────
 def load_resume_state():
@@ -168,26 +170,35 @@ def is_episode_done_in_state(series_url, ep_filename):
     return False
 
 def show_resume_list():
+    from ui import _w, blank, sep, info, GREY, RESET, WHITE, BCYAN, YELLOW
     state = load_resume_state()
     if not state:
-        print("[*] No paused downloads found")
+        info('no paused downloads found')
         return False
-    print("\n" + "="*50)
-    print("  PAUSED DOWNLOADS")
-    print("="*50)
-    for i, (url, info) in enumerate(state.items(), 1):
-        name    = info.get('name', 'Unknown')
-        done    = len(info.get('done', []))
-        current = info.get('current', None)
-        status  = f"paused at: {current}" if current else f"{done} episode(s) done"
-        print(f"  [{i}] {name}")
-        print(f"       {status}")
-        print(f"       {url[:60]}")
-    print(f"{'='*50}")
+    blank()
+    _w(f'  {WHITE}PAUSED DOWNLOADS{RESET}')
+    sep()
+    for i, (url, inf) in enumerate(state.items(), 1):
+        name    = inf.get('name', 'Unknown')
+        done    = len(inf.get('done', []))
+        current = inf.get('current', None)
+        status  = f'paused at: {current}' if current else f'{done} episode(s) done'
+        _w(f'  {GREY}[{i}]{RESET}  {BCYAN}{name}{RESET}')
+        _w(f'       {YELLOW}{status}{RESET}')
+        _w(f'       {GREY}{url[:60]}{RESET}')
+    sep()
     return True
 
 # ─── DOWNLOAD SUMMARY ─────────────────────────────────────────
 class DownloadSummary:
+    def __init__(self):
+        self._lock       = threading.Lock()
+        self.success     = 0
+        self.skipped     = 0
+        self.failed      = 0
+        self.failed_list = []
+        self.start_time  = time.time()
+
     def add_success(self):
         with self._lock:
             self.success += 1
@@ -201,14 +212,6 @@ class DownloadSummary:
             self.failed += 1
             if name:
                 self.failed_list.append(name)
-
-    def __init__(self):
-        self._lock       = threading.Lock()
-        self.success     = 0
-        self.skipped     = 0
-        self.failed      = 0
-        self.failed_list = []
-        self.start_time  = time.time()
 
     def report(self, name=''):
         from ui import print_summary, after_download_done
@@ -242,7 +245,7 @@ class DownloadSummary:
 def _notify(message):
     try:
         subprocess.run(
-            ['termux-notification', '--title', 'Download Toolkit', '--content', message],
+            ['termux-notification', '--title', 'Anonrode', '--content', message],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
         )
     except Exception:
@@ -402,7 +405,8 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--header', f'Origin: {base_domain(referer)}',
                 '--allow-overwrite=true',
                 '--auto-file-renaming=false',
-                '--console-log-level=warn',
+                '--console-log-level=notice',
+                '--show-console-readout=true',
                 '--summary-interval=1',
                 '-d', folder,
                 '-o', filename,
@@ -413,28 +417,52 @@ def download_with_aria2c(url, folder, filename, summary,
 
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1
             )
             if current_process is not None:
                 current_process[0] = proc
 
-            # Parse aria2c progress lines: "[#abc 512KiB/856MiB(60%) CN:16 DL:3.8MiB ETA:2m14s]"
+            import select, sys as _sys
+
+            # aria2c writes progress to stderr as \r-terminated lines
+            # and info/errors to stdout as \n-terminated lines
+            # Read both streams
+            def _read_progress(stream):
+                buf = ''
+                while True:
+                    ch = stream.read(1)
+                    if not ch:
+                        break
+                    if ch in ('\r', '\n'):
+                        line = buf.strip()
+                        buf = ''
+                        if not line:
+                            continue
+                        pct_m = re.search(r'\((\d+)%\)', line)
+                        spd_m = re.search(r'DL:([0-9.]+)([KM])i?B', line)
+                        eta_m = re.search(r'ETA:([^\]|\s]+)', line)
+                        if pct_m:
+                            pct = float(pct_m.group(1))
+                            spd = None
+                            if spd_m:
+                                spd = float(spd_m.group(1))
+                                if spd_m.group(2) == 'K':
+                                    spd /= 1024
+                            eta = eta_m.group(1).strip() if eta_m else None
+                            progress.update(pct, spd, eta)
+                    else:
+                        buf += ch
+
+            import threading as _th
+            t = _th.Thread(target=_read_progress, args=(proc.stderr,), daemon=True)
+            t.start()
+
+            # drain stdout (errors/notices) silently
             for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                pct_m   = re.search(r'\((\d+)%\)', line)
-                spd_m   = re.search(r'DL:([0-9.]+)([KM])i?B', line)
-                eta_m   = re.search(r'ETA:([^\]]+)', line)
-                if pct_m:
-                    pct = float(pct_m.group(1))
-                    spd = None
-                    if spd_m:
-                        spd = float(spd_m.group(1))
-                        if spd_m.group(2) == 'K':
-                            spd /= 1024
-                    eta = eta_m.group(1).strip() if eta_m else None
-                    progress.update(pct, spd, eta)
+                pass
+
+            t.join(timeout=5)
 
             proc.wait()
             code = proc.returncode
@@ -599,7 +627,8 @@ def download_with_ytdlp(url, folder, filename, summary,
         cmd.append(url)
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1
         )
         if current_process is not None:
             current_process[0] = proc

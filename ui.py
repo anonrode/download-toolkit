@@ -35,49 +35,41 @@ TERM_WIDTH = shutil.get_terminal_size((60, 24)).columns
 _PRINT_LOCK = threading.Lock()
 
 def _w(text='', end='\n'):
-    """Raw write — always use within lock."""
-    sys.stdout.write(text + end)
-    sys.stdout.flush()
+    """Thread-safe write."""
+    with _PRINT_LOCK:
+        sys.stdout.write(text + end)
+        sys.stdout.flush()
 
 # ─── THEMED PRINTS ────────────────────────────────────────────
 
 def info(msg):
-    with _PRINT_LOCK:
-        _w(f'  {GREY}·{RESET}  {msg}')
+    _w(f'  {GREY}·{RESET}  {msg}')
 
 def success(msg):
-    with _PRINT_LOCK:
-        _w(f'  {BGREEN}✓{RESET}  {msg}')
+    _w(f'  {BGREEN}✓{RESET}  {msg}')
 
 def warn(msg):
-    with _PRINT_LOCK:
-        _w(f'  {YELLOW}!{RESET}  {msg}')
+    _w(f'  {YELLOW}!{RESET}  {msg}')
 
 def error(msg):
-    with _PRINT_LOCK:
-        _w(f'  {RED}✗{RESET}  {msg}')
+    _w(f'  {RED}✗{RESET}  {msg}')
 
 def downloading(msg):
-    with _PRINT_LOCK:
-        _w(f'  {BCYAN}↓{RESET}  {msg}')
+    _w(f'  {BCYAN}↓{RESET}  {msg}')
 
 def plain(msg):
-    with _PRINT_LOCK:
-        _w(f'  {msg}')
+    _w(f'  {msg}')
 
 def blank():
-    with _PRINT_LOCK:
-        _w()
+    _w()
 
 def sep():
-    with _PRINT_LOCK:
-        width = min(TERM_WIDTH - 4, 44)
-        _w(f'  {GREY}{"─" * width}{RESET}')
+    width = min(TERM_WIDTH - 4, 44)
+    _w(f'  {GREY}{"─" * width}{RESET}')
 
 # safe_print — drop-in replacement for the old one, routes through themed output
 def safe_print(*args, **kwargs):
     msg = ' '.join(str(a) for a in args)
-    # Route based on prefix
     if msg.strip().startswith('[✓]') or msg.strip().startswith('✓'):
         success(msg.replace('[✓]', '').replace('✓', '').strip())
     elif msg.strip().startswith('[✗]') or msg.strip().startswith('✗'):
@@ -89,9 +81,7 @@ def safe_print(*args, **kwargs):
     elif msg.strip().startswith('[*]'):
         info(msg.replace('[*]', '').strip())
     else:
-        with _PRINT_LOCK:
-            sys.stdout.write('  ' + msg + '\n')
-            sys.stdout.flush()
+        _w('  ' + msg)
 
 # ─── STARTUP SPLASH ───────────────────────────────────────────
 
@@ -152,8 +142,9 @@ def prompt_line(cfg):
     q = cfg.get('quality', '480p')
     p = cfg.get('parallel', 1)
     context = f'{GREY}{q} · {p}t{RESET}'
-    sys.stdout.write(f'\n  {context}  {BCYAN}›{RESET} ')
-    sys.stdout.flush()
+    with _PRINT_LOCK:
+        sys.stdout.write(f'\n  {context}  {BCYAN}›{RESET} ')
+        sys.stdout.flush()
 
 # ─── SERIES HEADER ────────────────────────────────────────────
 
@@ -166,22 +157,18 @@ def series_header(name, total, folder):
 # ─── EPISODE ROW ──────────────────────────────────────────────
 
 def ep_done(n, name, size_mb):
-    with _PRINT_LOCK:
-        size_str = f'{size_mb:.0f}MB' if size_mb else ''
-        _w(f'  {GREEN}✓{RESET}  {GREY}{name}{RESET}  {GREY}{DIM}{size_str}{RESET}')
+    size_str = f'{size_mb:.0f}MB' if size_mb else ''
+    _w(f'  {GREEN}✓{RESET}  {GREY}{name}{RESET}  {GREY}{DIM}{size_str}{RESET}')
 
 def ep_skipped(n, name):
-    with _PRINT_LOCK:
-        _w(f'  {GREY}={RESET}  {GREY}{DIM}{name}  already downloaded{RESET}')
+    _w(f'  {GREY}={RESET}  {GREY}{DIM}{name}  already downloaded{RESET}')
 
 def ep_failed(name):
-    with _PRINT_LOCK:
-        _w(f'  {RED}✗{RESET}  {RED}{name}{RESET}')
+    _w(f'  {RED}✗{RESET}  {RED}{name}{RESET}')
 
 def ep_start(n, total, name):
-    with _PRINT_LOCK:
-        counter = f'{GREY}[{n}/{total}]{RESET} ' if total else ''
-        _w(f'\n  {BCYAN}↓{RESET}  {counter}{WHITE}{name}{RESET}')
+    counter = f'{GREY}[{n}/{total}]{RESET} ' if total else ''
+    _w(f'\n  {BCYAN}↓{RESET}  {counter}{WHITE}{name}{RESET}')
 
 # ─── LIVE PROGRESS BAR ────────────────────────────────────────
 
@@ -209,19 +196,18 @@ class LiveProgress:
         if self._done:
             return
         with _PRINT_LOCK:
-            bar  = self._bar(pct)
+            bar     = self._bar(pct)
             pct_str = f'{YELLOW}{pct:3.0f}%{RESET}'
             spd_str = f'  {WHITE}{speed_mbs:.1f}MB/s{RESET}' if speed_mbs else ''
             eta_str = f'  {GREY}{eta}{RESET}' if eta else ''
-            line = f'\r     {bar}  {pct_str}{spd_str}{eta_str}   '
-            sys.stdout.write(line)
+            sys.stdout.write(f'\r     {bar}  {pct_str}{spd_str}{eta_str}   ')
             sys.stdout.flush()
             self._started = True
 
     def done(self, size_mb=None):
         self._done = True
         with _PRINT_LOCK:
-            bar     = self._bar(100)
+            bar      = self._bar(100)
             size_str = f'  {GREY}{size_mb:.0f}MB{RESET}' if size_mb else ''
             sys.stdout.write(f'\r     {bar}  {BGREEN}100%{RESET}{size_str}\n')
             sys.stdout.flush()
@@ -270,12 +256,10 @@ def search_start(query):
     sep()
 
 def search_site_found(site):
-    with _PRINT_LOCK:
-        _w(f'  {BGREEN}✓{RESET}  {GREY}{site}{RESET}')
+    _w(f'  {BGREEN}✓{RESET}  {GREY}{site}{RESET}')
 
 def search_site_miss(site):
-    with _PRINT_LOCK:
-        _w(f'  {GREY}·  {site}  —  not found{RESET}')
+    _w(f'  {GREY}·  {site}  —  not found{RESET}')
 
 def search_results(results):
     blank()
