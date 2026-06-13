@@ -687,7 +687,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
 
     if not has_ytdlp:
         if not _install_ytdlp():
-            safe_print(f"  [!] yt-dlp unavailable")
+            warn('yt-dlp unavailable')
             summary.add_failed(filename)
             return False
 
@@ -696,63 +696,88 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
     if not out_template:
         out_template = os.path.join(folder, base + '.%(ext)s')
 
-    # If caller already picked a quality, use it directly with a best fallback.
-    # Otherwise use the default auto chain.
-    if quality_override:
-        format_chain = [quality_override, 'bestvideo+bestaudio/best', 'best']
-        safe_print(f"  [↓] yt-dlp: {filename}")
-    else:
-        format_chain = [
-            'bestvideo[height<=720]+bestaudio/best[height<=720]',
-            'bestvideo[height<=480]+bestaudio/best[height<=480]',
-            'bestvideo[height<=360]+bestaudio/best[height<=360]',
-            'bestvideo+bestaudio/best',
-            'best',
+    fmt = quality_override or 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+
+    downloading(filename)
+    progress = LiveProgress(filename)
+
+    try:
+        cmd = [
+            'yt-dlp', '-f', fmt,
+            '--merge-output-format', 'mp4',
+            '-o', out_template,
+            '--no-playlist',
+            '--retries', '5', '--fragment-retries', '5',
+            '--no-warnings', '--progress', '--newline',
         ]
-        safe_print(f"  [↓] yt-dlp (720p auto): {filename}")
-
-    for fmt in format_chain:
-        try:
-            cmd = [
-                'yt-dlp', '-f', fmt,
-                '--merge-output-format', 'mp4',
-                '-o', out_template,
-                '--no-playlist',
-                '--retries', '3', '--fragment-retries', '3',
-                '--quiet', '--no-warnings', '--progress', '--newline',
+        if has_aria2c:
+            cmd += [
+                '--external-downloader', 'aria2c',
+                '--external-downloader-args',
+                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=30 '
+                '--timeout=120 --connect-timeout=60 --file-allocation=none --min-split-size=1M'
             ]
-            if has_aria2c:
-                cmd += [
-                    '--external-downloader', 'aria2c',
-                    '--external-downloader-args',
-                    'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=30 '
-                    '--timeout=120 --connect-timeout=60 --file-allocation=none --min-split-size=1M'
-                ]
-            cmd.append(url)
-            result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-            if result.returncode == 0:
-                for ext in ['mp4', 'mkv', 'webm']:
-                    p = os.path.join(folder, f"{base}.{ext}")
-                    if os.path.exists(p):
-                        size_mb = os.path.getsize(p) / (1024 * 1024)
-                        safe_print(f"  [✓] Done: {filename} ({size_mb:.1f}MB)")
-                        summary.add_success()
-                        log_download(filename, url, p)
-                        return True
-                safe_print(f"  [✓] Done: {filename}")
-                summary.add_success()
-                return True
-            err = result.stderr.lower()
-            if 'requested format not available' in err or 'format' in err:
-                continue
-            safe_print(f"  [✗] yt-dlp failed: {result.stderr[:100]}")
-            break
-        except Exception as e:
-            safe_print(f"  [!] yt-dlp error: {e}")
-            break
+        cmd.append(url)
 
-    summary.add_failed(filename)
-    return False
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1
+        )
+        if current_process is not None:
+            current_process[0] = proc
+
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if '[download]' in line:
+                pct_m = re.search(r'(\d+\.?\d*)%', line)
+                spd_m = re.search(r'at\s+([0-9.]+)([KMG])iB/s', line)
+                eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
+                if pct_m:
+                    pct = float(pct_m.group(1))
+                    spd = None
+                    if spd_m:
+                        spd = float(spd_m.group(1))
+                        unit = spd_m.group(2)
+                        if unit == 'K':
+                            spd /= 1024
+                        elif unit == 'G':
+                            spd *= 1024
+                    eta = eta_m.group(1) if eta_m else None
+                    progress.update(pct, spd, eta)
+            elif 'error' in line.lower() or 'warning' in line.lower():
+                warn(line)
+
+        proc.wait()
+        code = proc.returncode
+        if current_process is not None:
+            current_process[0] = None
+
+        if code == 0:
+            for ext in ['mp4', 'mkv', 'webm', 'm4a']:
+                p = os.path.join(folder, f'{base}.{ext}')
+                if os.path.exists(p):
+                    size_mb = os.path.getsize(p) / (1024 * 1024)
+                    progress.done(size_mb)
+                    summary.add_success()
+                    log_download(filename, url, p)
+                    return True
+            progress.done()
+            summary.add_success()
+            return True
+        else:
+            progress.fail()
+            error('yt-dlp failed — check the URL or try again')
+            summary.add_failed(filename)
+            return False
+
+    except Exception as e:
+        progress.fail()
+        error(f'yt-dlp error: {e}')
+        summary.add_failed(filename)
+        return False
 
 # ─── SMART DOWNLOAD FILE ──────────────────────────────────────
 def download_file(url, folder, filename, summary,

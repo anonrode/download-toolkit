@@ -21,6 +21,7 @@ from downloader import (
     find_direct_video, base_domain, is_streaming_link,
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP
 )
+from ui import LiveProgress, downloading, error, warn
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
 # Change here if a site moves — one place, everything updates.
@@ -1450,19 +1451,39 @@ def extract_social(url, session, ctx=None):
                 url
             ]
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True,
-                                    stdin=subprocess.DEVNULL)
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1
+            )
             cur_proc[0] = proc
+            progress = LiveProgress('pinterest')
             for line in proc.stdout:
-                safe_print(line.rstrip())
+                line = line.strip()
+                if not line:
+                    continue
+                if '[download]' in line:
+                    pct_m = re.search(r'(\d+\.?\d*)%', line)
+                    spd_m = re.search(r'at\s+([0-9.]+)([KMG])iB/s', line)
+                    eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
+                    if pct_m:
+                        pct = float(pct_m.group(1))
+                        spd = None
+                        if spd_m:
+                            spd = float(spd_m.group(1))
+                            if spd_m.group(2) == 'K': spd /= 1024
+                            elif spd_m.group(2) == 'G': spd *= 1024
+                        eta = eta_m.group(1) if eta_m else None
+                        progress.update(pct, spd, eta)
             proc.wait()
             if proc.returncode == 0:
+                progress.done()
                 summary.add_success()
             else:
+                progress.fail()
                 summary.add_failed('pinterest')
         except Exception as e:
-            safe_print(f"  [!] Error: {e}")
+            error(f'pinterest error: {e}')
             summary.add_failed('pinterest')
         summary.report()
         return
@@ -1519,19 +1540,52 @@ def extract_social(url, session, ctx=None):
             cmd.append(url)
             summary = DownloadSummary()
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True,
-                                        stdin=subprocess.DEVNULL)
+                proc = subprocess.Popen(
+                    cmd, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1
+                )
                 cur_proc[0] = proc
+                current_title = 'playlist'
+                progress = LiveProgress(current_title)
                 for line in proc.stdout:
-                    safe_print(line.rstrip())
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # yt-dlp announces each video: [download] Downloading item N of M
+                    title_m = re.search(r'Downloading item (\d+) of (\d+)', line)
+                    if title_m:
+                        n, total = title_m.group(1), title_m.group(2)
+                        current_title = f'video {n}/{total}'
+                        progress.fail()
+                        progress = LiveProgress(current_title)
+                        downloading(current_title)
+                        continue
+                    if '[download]' in line:
+                        pct_m = re.search(r'(\d+\.?\d*)%', line)
+                        spd_m = re.search(r'at\s+([0-9.]+)([KMG])iB/s', line)
+                        eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
+                        if pct_m:
+                            pct = float(pct_m.group(1))
+                            spd = None
+                            if spd_m:
+                                spd = float(spd_m.group(1))
+                                if spd_m.group(2) == 'K': spd /= 1024
+                                elif spd_m.group(2) == 'G': spd *= 1024
+                            eta = eta_m.group(1) if eta_m else None
+                            progress.update(pct, spd, eta)
+                            if pct >= 100:
+                                progress.done()
+                                progress = LiveProgress(current_title)
                 proc.wait()
                 if proc.returncode == 0:
+                    progress.done()
                     summary.add_success()
                 else:
+                    progress.fail()
                     summary.add_failed('playlist')
             except Exception as e:
-                safe_print(f"  [!] Error: {e}")
+                error(f'playlist error: {e}')
                 summary.add_failed('playlist')
             summary.report()
             return
