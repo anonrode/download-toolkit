@@ -21,6 +21,7 @@ from downloader import (
     find_direct_video, base_domain, is_streaming_link,
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP
 )
+from ui import LiveProgress, downloading, error, warn, info, after_unknown_url
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
 # Change here if a site moves — one place, everything updates.
@@ -50,9 +51,8 @@ SOCIAL_DOMAINS = [
 def safe_get(session, url, timeout=20, referer=None, retries=3):
     for attempt in range(retries):
         try:
-            if referer:
-                session.headers['Referer'] = referer
-            r = session.get(url, timeout=timeout)
+            headers = {'Referer': referer} if referer else {}
+            r = session.get(url, timeout=timeout, headers=headers)
             if not r.ok:
                 safe_print(f"  [!] HTTP {r.status_code}: {url[:60]}")
                 return None
@@ -201,20 +201,22 @@ def resolve_streamtape(url, session):
         r = safe_get(session, url, referer='https://watchadsontape.com/')
         if not r or r.status_code == 404:
             return None
-        for line in r.text.split('\n'):
-            if "getElementById('robotlink')" in line and 'substring' in line:
-                m = re.search(r"innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)", line.strip())
-                if m:
-                    base_s, raw = m.group(1), m.group(2)
-                    for n in re.findall(r'\.substring\((\d+)\)', line):
-                        raw = raw[int(n):]
-                    get_url = 'https:' + base_s + raw
-                    r2 = session.get(get_url, timeout=20, allow_redirects=False)
-                    loc = r2.headers.get('location')
-                    if loc:
-                        return loc
-                else:
-                    safe_print(f"  [!] Streamtape JS pattern not matched — site may have changed")
+        # Match across minified JS — don't rely on line breaks
+        m = re.search(
+            r"getElementById\('robotlink'\)[^;]*innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)",
+            r.text, re.DOTALL
+        )
+        if m:
+            base_s, raw = m.group(1), m.group(2)
+            for n in re.findall(r'\.substring\((\d+)\)', r.text[r.text.find("getElementById('robotlink')"):]):
+                raw = raw[int(n):]
+            get_url = 'https:' + base_s + raw
+            r2 = session.get(get_url, timeout=20, allow_redirects=False)
+            loc = r2.headers.get('location')
+            if loc:
+                return loc
+        else:
+            safe_print(f"  [!] Streamtape JS pattern not matched — site may have changed")
         return find_direct_video(r.text)
     except Exception as e:
         safe_print(f"  [!] Streamtape: {e}")
@@ -483,6 +485,19 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
         ep_name = ep_url.split('/')[-1].replace('.html', '')
         safe_print(f"\n[{i}/{len(links)}] {ep_name}")
 
+        # ── Early skip: check disk before hitting the file host ──
+        done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+        if not done:
+            done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+        if done:
+            safe_print(f"  [✓] Already downloaded — skipping")
+            summary.add_skipped()
+            # Still prefetch next so the queue stays warm
+            if i < len(links) and next_direct[0] is None:
+                pf.prefetch(links[i], session)
+                next_direct[0] = pf.get(timeout=60)
+            continue
+
         if next_direct[0] is not None:
             direct = next_direct[0]
             next_direct[0] = None
@@ -547,6 +562,19 @@ def extract_nkiri(url, session, ctx=None):
             _wait(ctx)
             ep_name = ep_url.split('/')[-1].replace('.html', '')
             safe_print(f"\n[{i}/{len(dw_links)}] {ep_name}")
+
+            # ── Early skip ──
+            done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+            if not done:
+                done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+            if done:
+                safe_print(f"  [✓] Already downloaded — skipping")
+                summary.add_skipped()
+                if i < len(dw_links) and next_direct[0] is None:
+                    pf.prefetch(dw_links[i], session)
+                    next_direct[0] = pf.get(timeout=60)
+                continue
+
             direct = next_direct[0] if next_direct[0] else resolve_downloadwella(ep_url, session)
             next_direct[0] = None
             if i < len(dw_links):
@@ -619,18 +647,31 @@ def extract_9jarocks(url, session, ctx=None):
         return
     soup = BeautifulSoup(r.text, 'html.parser')
     lf_links = list(dict.fromkeys(
-        a['href'] for a in soup.find_all('a', href=True)
+        (a.get_text(strip=True), a['href'])
+        for a in soup.find_all('a', href=True)
         if 'loadedfiles.org' in a['href']
     ))
     safe_print(f"[*] Found {len(lf_links)} file(s) — saving to: {folder}")
     summary = DownloadSummary()
 
-    for i, lf_url in enumerate(lf_links, 1):
+    for i, (label, lf_url) in enumerate(lf_links, 1):
         if _stopped(ctx):
             break
         _wait(ctx)
-        fname = lf_url.split('/')[-1][:60]
+        # Use anchor text as filename if available, else clean the URL slug
+        if label:
+            fname = safe_filename(label)
+        else:
+            slug_part = lf_url.rstrip('/').split('/')[-1]
+            fname = safe_filename(re.sub(r'[^\w\s.-]', '', slug_part))
         safe_print(f"\n[{i}/{len(lf_links)}] {fname}")
+        done, _ = already_downloaded(folder, fname + '.mp4')
+        if not done:
+            done, _ = already_downloaded(folder, fname + '.mkv')
+        if done:
+            safe_print(f"  [✓] Already downloaded — skipping")
+            summary.add_skipped()
+            continue
         direct = resolve_loadedfiles(lf_url, session)
         if direct:
             ext = 'mkv' if '.mkv' in direct else 'mp4'
@@ -670,6 +711,16 @@ def extract_naijaprey(url, session, ctx=None):
         _wait(ctx)
         ep_name = ep_url.rstrip('/').split('/')[-1]
         safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
+
+        # Early skip before hitting the intermediate page
+        done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+        if not done:
+            done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+        if done:
+            safe_print(f"  [✓] Already downloaded — skipping")
+            summary.add_skipped()
+            continue
+
         try:
             r2 = safe_get(session, ep_url, referer=f'https://www.{NAIJAPREY_DOMAIN}/')
             if not r2:
@@ -738,6 +789,11 @@ def extract_myasiantv(url, session, ctx=None):
         _wait(ctx)
         ep_name = ep_url.rstrip('/').split('/')[-1]
         safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
+        done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+        if done:
+            safe_print(f"  [✓] Already downloaded — skipping")
+            summary.add_skipped()
+            continue
         r = safe_get(session, ep_url, referer=bd + '/', timeout=30)
         if not r:
             safe_print(f"  [✗] Could not fetch episode page")
@@ -793,6 +849,11 @@ def extract_dramarain(url, session, ctx=None):
             _wait(ctx)
             fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
             safe_print(f"\n[{i}/{len(drip_links)}] {fname}")
+            done, _ = already_downloaded(folder, fname)
+            if done:
+                safe_print(f"  [✓] Already downloaded — skipping")
+                summary.add_skipped()
+                continue
             download_file(link, folder, fname, summary,
                           bandwidth_limit=bw, current_process=cur_proc,
                           stop_flag=stop, wait_fn=ctx.get('wait'))
@@ -810,6 +871,11 @@ def extract_dramarain(url, session, ctx=None):
             _wait(ctx)
             fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
             safe_print(f"\n[{i}/{len(dl_links)}] {fname}")
+            done, _ = already_downloaded(folder, fname)
+            if done:
+                safe_print(f"  [✓] Already downloaded — skipping")
+                summary.add_skipped()
+                continue
             if 'drip.waffi.cloud' in dl_url:
                 direct = dl_url
             else:
@@ -870,9 +936,9 @@ def extract_naijavault(url, session, ctx=None):
     if not format_a and not format_b:
         is_dl = (
             re.search('var downloadURL', r.text) or
-            re.search('vikingfile.com', r.text) or
-            re.search('lulacloud.com/d/', r.text) or
-            re.search('nj_download=', r.text)
+            re.search(r'vikingfile\.com', r.text) or
+            re.search(r'lulacloud\.com/d/', r.text) or
+            re.search(r'nj_download=', r.text)
         )
         if is_dl:
             page_title = soup.find('title')
@@ -888,30 +954,50 @@ def extract_naijavault(url, session, ctx=None):
     safe_print(f"[*] Found {total} episode(s) — Format A: {len(format_a)}, Format B: {len(format_b)}")
     safe_print(f"[*] Saving to: {folder}")
 
-    items   = []
     zip_hit = False
 
-    # ── Process Format A (/dl- pages) ─────────────────────────
+    def _resolve_and_download(ep_label, ep_name, direct):
+        """Download immediately after resolving — prevents token expiry."""
+        if not direct:
+            safe_print(f"  [\u2717] All resolvers failed")
+            summary.add_failed(ep_label)
+            return
+        ext   = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
+        fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
+        _wait(ctx)
+        download_file(direct, folder, safe_filename(fname), summary,
+                      series_url=url, series_name=name,
+                      bandwidth_limit=bw, current_process=cur_proc,
+                      stop_flag=stop, wait_fn=ctx.get('wait'))
+
+    # ── Process Format A (/dl- pages) — resolve & download immediately ──
     for i, (label, dl_url) in enumerate(format_a, 1):
         if _stopped(ctx) or zip_hit:
             break
         ep_label = clean_ep_name(label) or f"episode-{i}"
-        safe_print(f"\n[A {i}/{len(format_a)}] Extracting: {ep_label}")
+        safe_print(f"\n[A {i}/{len(format_a)}] {ep_label}")
+
+        # ── Early skip: check before hitting the dl page ──
+        done, _ = already_downloaded(folder, f"{ep_label}.mkv")
+        if not done:
+            done, _ = already_downloaded(folder, f"{ep_label}.mp4")
+        if done:
+            safe_print(f"  [✓] Already downloaded — skipping")
+            summary.add_skipped()
+            continue
 
         session.headers['Referer'] = url
         r2 = safe_get(session, dl_url, timeout=20)
         if not r2:
-            safe_print(f"  [x] Could not fetch dl page")
+            safe_print(f"  [\u2717] Could not fetch dl page")
             summary.add_failed(ep_label)
             continue
 
-        # Read var fileTitle for filename — most reliable
         ft_m    = re.search(r'var fileTitle\s*=\s*"([^"]+)"', r2.text)
         ep_name = safe_filename(ft_m.group(1)) if ft_m else safe_filename(f"{ep_label}.mkv")
 
-        # ZIP detection — download ZIP and stop
         if ep_name.lower().endswith('.zip'):
-            safe_print(f"  [*] ZIP found — downloading season archive")
+            safe_print(f"  [*] ZIP — downloading season archive")
             du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
             if du_m:
                 zip_url = du_m.group(1)
@@ -920,105 +1006,85 @@ def extract_naijavault(url, session, ctx=None):
                 elif 'lulacloud.com' in zip_url:
                     zip_url = resolve_lulacloud(zip_url, session) or zip_url
                 if zip_url:
-                    items = [(zip_url, ep_name)]
+                    _wait(ctx)
+                    download_file(zip_url, folder, ep_name, summary,
+                                  series_url=url, series_name=name,
+                                  bandwidth_limit=bw, current_process=cur_proc,
+                                  stop_flag=stop, wait_fn=ctx.get('wait'))
                     zip_hit = True
                     break
             continue
 
-        # Primary: var downloadURL (JS)
-        du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
+        direct = None
+        du_m   = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
         if du_m:
             cdn_url = du_m.group(1)
-            direct  = None
             if 'vikingfile.com' in cdn_url:
                 direct = resolve_vikingfile(cdn_url, session)
                 if not direct:
-                    # Fallback: check page for lulacloud
                     lc = re.search(r'https?://(?:www\.)?lulacloud\.com/d/\S+', r2.text)
                     if lc:
-                        direct = resolve_lulacloud(lc.group(0).rstrip('.,;)"\''), session)
+                        direct = resolve_lulacloud(lc.group(0).rstrip('.,;)\"\''), session)
             elif 'lulacloud.com' in cdn_url:
                 direct = resolve_lulacloud(cdn_url, session)
                 if not direct:
-                    # Fallback: check page for vikingfile
                     vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
                     if vf:
-                        direct = resolve_vikingfile(vf.group(0).rstrip('.,;)"\''), session)
-            elif 'cdn.filevault.com.ng' in cdn_url:
-                direct = cdn_url
+                        direct = resolve_vikingfile(vf.group(0).rstrip('.,;)\"\''), session)
             else:
                 direct = cdn_url
-            if direct:
-                ext = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
-                fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
-                items.append((direct, safe_filename(fname)))
-            else:
-                safe_print(f"  [x] All resolvers failed")
-                summary.add_failed(ep_label)
-            time.sleep(0.5)
-            continue
 
-        # Fallback: vikingfile anchor directly in page
-        vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
-        if vf:
-            direct = resolve_vikingfile(vf.group(0).rstrip('.,;)"\''), session)
-            if direct:
-                ext = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
-                fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
-                items.append((direct, safe_filename(fname)))
-                time.sleep(0.5)
-                continue
-            # Try lulacloud on same page
+        if not direct:
+            vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
+            if vf:
+                direct = resolve_vikingfile(vf.group(0).rstrip('.,;)\"\''), session)
+
+        if not direct:
             lc = re.search(r'https?://(?:www\.)?lulacloud\.com/d/\S+', r2.text)
             if lc:
-                direct = resolve_lulacloud(lc.group(0).rstrip('.,;)"\''), session)
-                if direct:
-                    ext = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
-                    fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
-                    items.append((direct, safe_filename(fname)))
-                    time.sleep(0.5)
-                    continue
+                direct = resolve_lulacloud(lc.group(0).rstrip('.,;)\"\''), session)
 
-        # nj_download redirect
-        nj_match = 'naijavault.com' in r2.text and 'nj_download=' in r2.text
-        if nj_match:
-            try:
-                rr  = session.get(re.search(r"https?://[^ 	]+nj_download=[^ 	<>]+", r2.text).group(0).rstrip('.,;)'), timeout=15, allow_redirects=False)
-                cdn = rr.headers.get('location')
-                if cdn and cdn.startswith('http'):
-                    ext = 'mkv' if '.mkv' in cdn else 'mp4'
-                    fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
-                    items.append((cdn, safe_filename(fname)))
-                    time.sleep(0.5)
-                    continue
-            except Exception as e:
-                safe_print(f"  [!] nj_download failed: {e}")
+        if not direct:
+            nj_m = re.search(r"https?://[^ \t]+nj_download=[^ \t<>]+", r2.text)
+            if nj_m and 'naijavault.com' in r2.text:
+                try:
+                    rr  = session.get(nj_m.group(0).rstrip('.,;)'), timeout=15, allow_redirects=False)
+                    cdn = rr.headers.get('location')
+                    if cdn and cdn.startswith('http'):
+                        direct = cdn
+                except Exception as e:
+                    safe_print(f"  [!] nj_download failed: {e}")
 
-        safe_print(f"  [x] No download URL found")
-        summary.add_failed(ep_label)
+        _resolve_and_download(ep_label, ep_name, direct)
         time.sleep(0.5)
 
-    # ── Process Format B (lulacloud direct) ───────────────────
+    # ── Process Format B (lulacloud direct) — resolve & download immediately ──
     if not zip_hit:
         for i, (label, lc_url) in enumerate(format_b, 1):
             if _stopped(ctx):
                 break
-            ep_label = clean_ep_name(label) or f"episode-{i}"
-            safe_print(f"\n[B {i}/{len(format_b)}] Extracting: {ep_label}")
+            ep_label  = clean_ep_name(label) or f"episode-{i}"
+            safe_print(f"\n[B {i}/{len(format_b)}] {ep_label}")
 
-            # Parse filename from URL slug
-            slug_part = lc_url.rstrip('/').split('/')[-1]
-            # Strip leading hash token (alphanumeric, 8+ chars before first hyphen)
-            fname_slug = re.sub(r'^[a-zA-Z0-9]{8,}-', '', slug_part)
-            # Fix extension suffix: -mkv → .mkv
+            slug_part  = lc_url.rstrip('/').split('/')[-1]
+            fname_slug = re.sub(r'^[a-f0-9]{8,}-', '', slug_part, flags=re.IGNORECASE)
             fname_slug = re.sub(r'-mkv$', '.mkv', fname_slug)
             fname_slug = re.sub(r'-mp4$', '.mp4', fname_slug)
             ep_name    = safe_filename(fname_slug or f"{ep_label}.mkv")
 
-            # Primary: lulacloud resolver
+            # ── Early skip ──
+            done, _ = already_downloaded(folder, ep_name)
+            if not done:
+                done, _ = already_downloaded(folder, f"{ep_label}.mkv")
+            if not done:
+                done, _ = already_downloaded(folder, f"{ep_label}.mp4")
+            if done:
+                safe_print(f"  [✓] Already downloaded — skipping")
+                summary.add_skipped()
+                continue
+
             direct = resolve_lulacloud(lc_url, session)
             if not direct:
-                # Fallback: fetch page, look for vikingfile or var downloadURL
                 r2 = safe_get(session, lc_url, timeout=20)
                 if r2:
                     du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
@@ -1029,39 +1095,21 @@ def extract_naijavault(url, session, ctx=None):
                         elif 'lulacloud.com' in cdn:
                             direct = resolve_lulacloud(cdn, session)
                         else:
-                            direct = cdn   # bare CDN URL — use directly
+                            direct = cdn
                     if not direct:
                         vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
                         if vf:
-                            direct = resolve_vikingfile(vf.group(0).rstrip('.,;)"\''), session)
+                            direct = resolve_vikingfile(vf.group(0).rstrip('.,;)\"\''), session)
                     if not direct:
                         fv = re.search(r'https?://cdn\.filevault\.com\.ng/[^\s"\'<>]+', r2.text)
                         if fv:
                             direct = fv.group(0)
 
-            if direct:
-                ext   = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
-                fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
-                items.append((direct, safe_filename(fname)))
-            else:
-                safe_print(f"  [x] All resolvers failed")
-                summary.add_failed(ep_label)
+            _resolve_and_download(ep_label, ep_name, direct)
             time.sleep(0.5)
 
-    # ── Download all resolved items ────────────────────────────
-    safe_print(f"\n[*] Downloading {len(items)} file(s)...")
-    for dl_url, dl_fname in items:
-        if _stopped(ctx):
-            break
-        _wait(ctx)
-        download_file(dl_url, folder, dl_fname, summary,
-                      series_url=url, series_name=name,
-                      bandwidth_limit=bw, current_process=cur_proc,
-                      stop_flag=stop, wait_fn=ctx.get('wait'))
 
-    if summary.failed == 0 and not _stopped(ctx):
-        mark_series_complete(url)
-    summary.report()
+    summary.report(name=name)
 
 def extract_anitaku(url, session, ctx=None):
     ctx  = ctx or {}
@@ -1274,13 +1322,24 @@ def extract_plutomovies(url, session, ctx=None):
         all_eps.sort(key=ep_sort)
         safe_print(f"  [*] Total: {len(all_eps)} episode(s)")
 
-        # Extract download links
-        items = []
+        # Resolve and download each episode immediately — don't batch all links first
+        # (PlutoMovies CDN tokens can expire before a 24-ep batch finishes resolving)
+        ep_count = 0
         for i, (ep_url, ep_name) in enumerate(all_eps, 1):
             if _stopped(ctx):
                 break
             _wait(ctx)
-            safe_print(f"\n  [{i}/{len(all_eps)}] Extracting: {ep_name}")
+            safe_print(f"\n  [{i}/{len(all_eps)}] {ep_name}")
+
+            # Early skip before hitting the episode page
+            done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+            if not done:
+                done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+            if done:
+                safe_print(f"  [✓] Already downloaded — skipping")
+                summary.add_skipped()
+                continue
+
             r3 = safe_get(session, ep_url, timeout=30)
             if not r3:
                 safe_print(f"  [✗] Could not fetch episode page")
@@ -1294,21 +1353,18 @@ def extract_plutomovies(url, session, ctx=None):
                 summary.add_failed(ep_name)
                 continue
             direct = resolve_plutomovies_dl(dl_link, session)
-            if direct:
-                ext = 'mkv' if 'mkv' in direct.lower() else 'mp4'
-                items.append((direct, safe_filename(f"{ep_name}.{ext}")))
-            else:
+            if not direct:
                 safe_print(f"  [✗] Could not resolve download link")
                 summary.add_failed(ep_name)
+                continue
+            ext = 'mkv' if 'mkv' in direct.lower() else 'mp4'
+            download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
+                          series_url=url, series_name=name,
+                          bandwidth_limit=bw, quality=quality,
+                          current_process=cur_proc,
+                          stop_flag=stop, wait_fn=ctx.get('wait'))
+            ep_count += 1
             time.sleep(0.5)
-
-        if items:
-            safe_print(f"\n  [*] Starting download of {len(items)} episode(s)...")
-            download_batch(items, folder, summary, parallel=parallel,
-                           series_url=url, series_name=name,
-                           bandwidth_limit=bw, quality=quality,
-                           current_process=cur_proc, stop_flag=stop,
-                           wait_fn=ctx.get('wait'))
 
     summary.report()
 
@@ -1341,21 +1397,32 @@ def _yt_quality_prompt(default_quality):
 
 
 def _yt_get_playlist_count(url):
-    """Return number of items in a YouTube playlist, or None on failure."""
+    """Return (count, title) for a YouTube playlist, or (None, None) on failure."""
     import shutil
     if not shutil.which('yt-dlp'):
-        return None
+        return None, None
     try:
+        # Single call — print both id and playlist_title for every item,
+        # then use line count for total and first title value for name
         result = subprocess.run(
-            ['yt-dlp', '--flat-playlist', '--print', 'id',
-             '--no-warnings', '--quiet', url],
-            capture_output=True, text=True, timeout=30,
+            ['yt-dlp', '--flat-playlist',
+             '--print', 'id',
+             '--print', 'playlist_title',
+             '--no-warnings', '--quiet',
+             '--no-check-certificates',
+             url],
+            capture_output=True, text=True, timeout=25,
             stdin=subprocess.DEVNULL
         )
-        ids = [l for l in result.stdout.strip().splitlines() if l.strip()]
-        return len(ids) if ids else None
+        lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
+        # Output alternates: id, playlist_title, id, playlist_title ...
+        ids    = lines[0::2]
+        titles = [t for t in lines[1::2] if t and t != 'NA']
+        count  = len(ids) if ids else None
+        title  = titles[0] if titles else None
+        return count, title
     except Exception:
-        return None
+        return None, None
 
 
 def _yt_playlist_items_prompt(count):
@@ -1382,10 +1449,14 @@ def _yt_playlist_items_prompt(count):
         try:
             r = input("  Range (e.g. 5-10): ").strip()
             parts = r.split('-')
-            int(parts[0]); int(parts[1])  # validate
+            if len(parts) != 2:
+                raise ValueError("need exactly two numbers")
+            start, end = int(parts[0]), int(parts[1])
+            if start >= end:
+                raise ValueError("start must be less than end")
             return r
         except Exception:
-            safe_print("  [!] Invalid range")
+            safe_print("  [!] Invalid range — use format: 5-10")
             return None
     if choice == '3':
         try:
@@ -1428,7 +1499,7 @@ def extract_social(url, session, ctx=None):
                 '-o', out_template,
                 '--yes-playlist',
                 '--retries', '3', '--fragment-retries', '3',
-                '--quiet', '--no-warnings', '--progress', '--newline',
+                '--no-warnings', '--progress', '--newline',
                 url
             ]
         else:
@@ -1446,30 +1517,50 @@ def extract_social(url, session, ctx=None):
                 '-o', out_template,
                 '--no-playlist',
                 '--retries', '3', '--fragment-retries', '3',
-                '--quiet', '--no-warnings', '--progress', '--newline',
+                '--no-warnings', '--progress', '--newline',
                 url
             ]
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True,
-                                    stdin=subprocess.DEVNULL)
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1
+            )
             cur_proc[0] = proc
+            progress = LiveProgress('pinterest')
             for line in proc.stdout:
-                safe_print(line.rstrip())
+                line = line.strip()
+                if not line:
+                    continue
+                if '[download]' in line:
+                    pct_m = re.search(r'(\d+\.?\d*)%', line)
+                    spd_m = re.search(r'at\s+([0-9.]+)([KMG])iB/s', line)
+                    eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
+                    if pct_m:
+                        pct = float(pct_m.group(1))
+                        spd = None
+                        if spd_m:
+                            spd = float(spd_m.group(1))
+                            if spd_m.group(2) == 'K': spd /= 1024
+                            elif spd_m.group(2) == 'G': spd *= 1024
+                        eta = eta_m.group(1) if eta_m else None
+                        progress.update(pct, spd, eta)
             proc.wait()
             if proc.returncode == 0:
+                progress.done()
                 summary.add_success()
             else:
+                progress.fail()
                 summary.add_failed('pinterest')
         except Exception as e:
-            safe_print(f"  [!] Error: {e}")
+            error(f'pinterest error: {e}')
             summary.add_failed('pinterest')
         summary.report()
         return
 
     # ── YouTube ────────────────────────────────────────────────
     if is_yt:
-        has_list    = 'list=' in url
+        has_list    = bool(re.search(r'[?&]list=', url))
         has_watch   = 'watch?v=' in url or 'youtu.be/' in url
 
         # Single video that is part of a playlist
@@ -1495,16 +1586,22 @@ def extract_social(url, session, ctx=None):
 
         # Pure playlist
         if has_list and not has_watch:
-            count       = _yt_get_playlist_count(url)
+            count, pl_title = _yt_get_playlist_count(url)
             items_sel   = _yt_playlist_items_prompt(count)
             if items_sel is None:
                 return
             fmt         = _yt_quality_prompt(quality)
-            list_id     = re.search(r'list=([^&]+)', url)
-            folder_name = safe_filename(list_id.group(1) if list_id else 'playlist')
+            list_id     = re.search(r'[?&]list=([^&]+)', url)
+            # Use playlist title as folder name if available, else list ID
+            if pl_title:
+                folder_name = safe_filename(pl_title)
+            elif list_id:
+                folder_name = safe_filename(list_id.group(1))
+            else:
+                folder_name = 'playlist'
             folder      = os.path.join(BASE_DIR, 'YouTube', folder_name)
             os.makedirs(folder, exist_ok=True)
-            safe_print(f"\n[*] Saving to: {folder}")
+            info(f'saving to: {folder}')
             out_template = os.path.join(folder, '%(playlist_index)s - %(title)s.%(ext)s')
             cmd = [
                 'yt-dlp', '-f', fmt,
@@ -1512,41 +1609,67 @@ def extract_social(url, session, ctx=None):
                 '-o', out_template,
                 '--yes-playlist',
                 '--retries', '3', '--fragment-retries', '3',
-                '--quiet', '--no-warnings', '--progress', '--newline',
+                '--no-warnings', '--progress', '--newline',
             ]
             if items_sel != 'all':
                 cmd += ['--playlist-items', items_sel]
             cmd.append(url)
-            summary = DownloadSummary()
+            summary  = DownloadSummary()
+            progress = None
+            proc     = None
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True,
-                                        stdin=subprocess.DEVNULL)
+                proc = subprocess.Popen(
+                    cmd, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1
+                )
                 cur_proc[0] = proc
                 for line in proc.stdout:
-                    safe_print(line.rstrip())
+                    line = line.strip()
+                    if not line:
+                        continue
+                    title_m = re.search(r'Downloading item (\d+) of (\d+)', line)
+                    if title_m:
+                        if progress:
+                            progress.done()
+                        n, total = title_m.group(1), title_m.group(2)
+                        label    = f'video {n}/{total}'
+                        progress = LiveProgress(label)
+                        continue
+                    if '[download]' in line and progress:
+                        pct_m = re.search(r'(\d+\.?\d*)%', line)
+                        spd_m = re.search(r'at\s+([0-9.]+)([KMG])iB/s', line)
+                        eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
+                        if pct_m:
+                            pct = float(pct_m.group(1))
+                            spd = None
+                            if spd_m:
+                                spd = float(spd_m.group(1))
+                                if spd_m.group(2) == 'K': spd /= 1024
+                                elif spd_m.group(2) == 'G': spd *= 1024
+                            progress.update(pct, spd, eta_m.group(1) if eta_m else None)
                 proc.wait()
                 if proc.returncode == 0:
+                    if progress: progress.done()
                     summary.add_success()
                 else:
+                    if progress: progress.fail()
                     summary.add_failed('playlist')
             except Exception as e:
-                safe_print(f"  [!] Error: {e}")
+                if progress: progress.fail()
+                error(f'playlist error: {e}')
                 summary.add_failed('playlist')
             summary.report()
             return
 
         # Single YouTube video
         fmt      = _yt_quality_prompt(quality)
-        vid_id   = re.search(r'(?:v=|youtu\.be/)([^&?/]+)', url)
-        slug     = vid_id.group(1) if vid_id else 'video'
         folder   = os.path.join(BASE_DIR, 'YouTube')
-        filename = safe_filename(f"{slug}.mp4")
         os.makedirs(folder, exist_ok=True)
-        safe_print(f"\n[*] Saving to: {folder}")
         out_template = os.path.join(folder, '%(title)s.%(ext)s')
+        info(f'saving to: {folder}')
         summary = DownloadSummary()
-        download_social_ytdlp(url, folder, filename, summary,
+        download_social_ytdlp(url, folder, 'video.mp4', summary,
                               current_process=cur_proc,
                               quality_override=fmt,
                               out_template=out_template)
@@ -1582,17 +1705,26 @@ SITE_MAP = {
     PLUTO_DOMAIN:      extract_plutomovies,
 }
 
-def detect_site(url):
+def detect_site(url, disabled=None):
+    try:
+        from urllib.parse import urlparse
+        netloc = urlparse(url).netloc.lower().lstrip('www.')
+    except Exception:
+        netloc = url
+    disabled = [d.lower() for d in (disabled or [])]
     for domain, extractor in SITE_MAP.items():
-        if domain in url:
+        if netloc == domain.lower() or netloc.endswith('.' + domain.lower()):
+            if any(d in domain.lower() for d in disabled):
+                return 'disabled'
             return extractor
     for domain in SOCIAL_DOMAINS:
-        if domain in url:
+        if netloc == domain or netloc.endswith('.' + domain):
             return extract_social
     return None
 
 def process_link_queue(links, session, ctx=None):
-    ctx = ctx or {}
+    ctx      = ctx or {}
+    disabled = ctx.get('disabled_sites', [])
     for i, url in enumerate(links, 1):
         if _stopped(ctx):
             safe_print("[*] Stopped by user")
@@ -1602,10 +1734,12 @@ def process_link_queue(links, session, ctx=None):
             safe_print(f"\n{'─'*50}")
             safe_print(f"  Queue [{i}/{len(links)}]: {url[:60]}")
             safe_print(f"{'─'*50}")
-        extractor = detect_site(url)
+        extractor = detect_site(url, disabled)
+        if extractor == 'disabled':
+            warn(f'site is disabled in settings — skipping')
+            continue
         if not extractor:
-            safe_print(f"[!] Unsupported site: {url}")
-            safe_print(f"[!] Supported: {', '.join(SITE_MAP.keys())}")
+            after_unknown_url(url)
             continue
         try:
             extractor(url, session, ctx)

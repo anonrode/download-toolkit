@@ -97,7 +97,24 @@ if [ -f "$HOME/.bashrc" ]; then
     fi
 fi
 
-echo 'tmux kill-session -t download 2>/dev/null; cd ~/download-toolkit && git pull -q && python main.py' > "$HOME/.bashrc"
+# .bashrc logic:
+# - If already inside a tmux session (e.g. the download session itself), do nothing
+# - If the 'download' tmux session already exists, attach to it (never kill a running download)
+# - Otherwise pull latest code and start a fresh session
+cat > "$HOME/.bashrc" << 'EOF'
+# Anonrode auto-launch
+if [ -n "$TMUX" ]; then
+    # Already inside tmux — shell is ready, do nothing
+    :
+elif tmux has-session -t download 2>/dev/null; then
+    # Session running — attach to it (download may be in progress)
+    tmux attach-session -t download
+else
+    # No session — pull latest and start fresh
+    cd ~/download-toolkit && git pull -q
+    tmux new-session -s download python main.py
+fi
+EOF
 ok "Auto-launch configured"
 
 # ─── DONE ─────────────────────────────────────────
