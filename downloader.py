@@ -374,7 +374,8 @@ def _update_ytdlp():
 
 # ─── DOWNLOAD BACKENDS ────────────────────────────────────────
 def download_with_aria2c(url, folder, filename, summary,
-                         bandwidth_limit=0, current_process=None, retries=3, stop_flag=None):
+                         bandwidth_limit=0, current_process=None,
+                         retries=3, stop_flag=None, parallel_mode=False):
     import shutil
     has_aria2c = shutil.which('aria2c') is not None
     if not has_aria2c:
@@ -389,7 +390,7 @@ def download_with_aria2c(url, folder, filename, summary,
     filepath      = os.path.join(folder, filename)
     referer       = get_referer_for_url(url)
 
-    progress = LiveProgress(filename)
+    progress = LiveProgress(filename, parallel=parallel_mode)
 
     for attempt in range(retries):
         try:
@@ -529,12 +530,12 @@ def download_with_aria2c(url, folder, filename, summary,
             return False
     return False
 
-def download_with_requests(url, folder, filename, summary, stop_flag=None):
+def download_with_requests(url, folder, filename, summary, stop_flag=None, parallel_mode=False):
     import requests
     filepath = os.path.join(folder, filename)
     os.makedirs(folder, exist_ok=True)
     downloading(filename)
-    progress = LiveProgress(filename)
+    progress = LiveProgress(filename, parallel=parallel_mode)
     try:
         s = make_session()
         r = s.get(url, stream=True, timeout=30,
@@ -601,7 +602,7 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None):
         return False
 
 def download_with_ytdlp(url, folder, filename, summary,
-                        quality=None, current_process=None, stop_flag=None):
+                        quality=None, current_process=None, stop_flag=None, parallel_mode=False):
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
     has_ffmpeg = shutil.which('ffmpeg') is not None
@@ -622,7 +623,7 @@ def download_with_ytdlp(url, folder, filename, summary,
     out_template = os.path.join(folder, base + '.%(ext)s')
     quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
 
-    progress = LiveProgress(filename)
+    progress = LiveProgress(filename, parallel=parallel_mode)
     try:
         cmd = [
             'yt-dlp',
@@ -811,14 +812,17 @@ def download_file(url, folder, filename, summary,
                   check_expiry=True, series_url=None, series_name=None,
                   bandwidth_limit=0, quality=None,
                   current_process=None, stop_flag=None, paused_flag=None,
-                  wait_fn=None):
+                  wait_fn=None, parallel_mode=False):
     """
     Smart downloader — handles resume state, expiry check, disk space,
     and routes to the right backend.
 
-    stop_flag:   list([False]) — set to True to abort
-    paused_flag: list([False]) — set to True to pause
-    wait_fn:     callable — blocks until unpaused
+    stop_flag:    list([False]) — set to True to abort
+    paused_flag:  list([False]) — set to True to pause
+    wait_fn:      callable — blocks until unpaused
+    parallel_mode: True when running inside download_batch with parallel>1
+                   — switches LiveProgress to static line mode to avoid
+                   interleaved \r corruption
     """
     # Disk space check before every episode
     if not assert_disk_space():
@@ -838,12 +842,12 @@ def download_file(url, folder, filename, summary,
         summary.add_skipped()
         return True
 
-    # Link expiry detection — re-extracts fresh link upstream if expired
+    # Link expiry detection
     if check_expiry and not is_streaming_link(url):
         _s = make_session()
         status = check_url_alive(url, _s)
         if status == 'expired':
-            safe_print(f"  [!] Link expired (403/404) — re-paste the series URL for fresh links")
+            safe_print(f"  [!] Link expired (404) — re-paste the series URL for fresh links")
             summary.add_failed(filename)
             return False
 
@@ -860,12 +864,14 @@ def download_file(url, folder, filename, summary,
         result = download_with_ytdlp(url, folder, filename, summary,
                                      quality=quality,
                                      current_process=current_process,
-                                     stop_flag=stop_flag)
+                                     stop_flag=stop_flag,
+                                     parallel_mode=parallel_mode)
     else:
         result = download_with_aria2c(url, folder, filename, summary,
                                       bandwidth_limit=bandwidth_limit,
                                       current_process=current_process,
-                                      stop_flag=stop_flag)
+                                      stop_flag=stop_flag,
+                                      parallel_mode=parallel_mode)
 
     if result and series_url:
         mark_episode_done(series_url, series_name or folder, filename)
@@ -913,24 +919,31 @@ def download_batch(items, folder, summary, parallel=1,
                           series_url=series_url, series_name=series_name,
                           bandwidth_limit=bandwidth_limit, quality=quality,
                           current_process=current_process,
-                          stop_flag=stop_flag, wait_fn=wait_fn)
+                          stop_flag=stop_flag, wait_fn=wait_fn,
+                          parallel_mode=False)
     else:
+        # Divide bandwidth evenly across threads so total stays within limit
+        per_thread_bw = (bandwidth_limit // parallel) if bandwidth_limit else 0
         with ThreadPoolExecutor(max_workers=parallel) as executor:
-            futures = {
-                executor.submit(
+            futures = {}
+            for url, filename in items:
+                # Each thread gets its own current_process slot so
+                # Ctrl+C can terminate ALL active subprocesses, not just one
+                thread_proc = [None]
+                f = executor.submit(
                     download_file,
                     url, folder, filename, summary,
                     check_expiry=True,
                     series_url=series_url,
                     series_name=series_name,
-                    bandwidth_limit=bandwidth_limit,
+                    bandwidth_limit=per_thread_bw,
                     quality=quality,
-                    current_process=current_process,
+                    current_process=thread_proc,
                     stop_flag=stop_flag,
                     wait_fn=wait_fn,
-                ): filename
-                for url, filename in items
-            }
+                    parallel_mode=True,
+                )
+                futures[f] = filename
             for future in as_completed(futures):
                 fname = futures[future]
                 try:

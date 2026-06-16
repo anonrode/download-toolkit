@@ -486,7 +486,7 @@ def main():
 
     from downloader import check_disk_space, show_history
     from extractors import process_link_queue
-    from search import search, rebuild_index_command
+    from search import search, fsearch, rebuild_index_command, clear_search_cache
 
     cfg     = load_config()
     session = make_session()
@@ -523,18 +523,24 @@ def main():
             blank()
             _w(f'  {WHITE}COMMANDS{RESET}')
             sep()
-            _w(f'  {BCYAN}search <title>{RESET}          {GREY}find a show on NKiri / DramaKey{RESET}')
-            _w(f'  {BCYAN}<url>{RESET}                   {GREY}paste any supported URL to download{RESET}')
-            _w(f'  {BCYAN}clip{RESET}                    {GREY}read URL from clipboard{RESET}')
-            _w(f'  {BCYAN}resume{RESET}                  {GREY}resume a paused series download{RESET}')
-            _w(f'  {BCYAN}history{RESET}                 {GREY}show download history{RESET}')
-            _w(f'  {BCYAN}queue add <url>{RESET}         {GREY}add URL to queue{RESET}')
-            _w(f'  {BCYAN}queue list{RESET}              {GREY}show queue{RESET}')
-            _w(f'  {BCYAN}queue start{RESET}             {GREY}start downloading queue{RESET}')
-            _w(f'  {BCYAN}queue remove <n>{RESET}        {GREY}remove item from queue{RESET}')
-            _w(f'  {BCYAN}queue clear{RESET}             {GREY}clear entire queue{RESET}')
-            _w(f'  {BCYAN}settings{RESET}                {GREY}view / change settings{RESET}')
-            _w(f'  {BCYAN}exit{RESET}                    {GREY}quit{RESET}')
+            _w(f'  {BCYAN}search <title>{RESET}                   {GREY}find a show on NKiri / DramaKey{RESET}')
+            _w(f'  {BCYAN}fsearch <title> [hint]{RESET}           {GREY}fast search — proven patterns first{RESET}')
+            _w(f'  {BCYAN}fsearch <title> korean{RESET}           {GREY}hint: prioritise korean patterns{RESET}')
+            _w(f'  {BCYAN}fsearch <title> chinese{RESET}          {GREY}hint: prioritise chinese patterns{RESET}')
+            _w(f'  {BCYAN}fsearch <title> thai{RESET}             {GREY}hint: prioritise thai patterns{RESET}')
+            _w(f'  {BCYAN}fsearch <title> nollywood{RESET}        {GREY}hint: prioritise nollywood patterns{RESET}')
+            _w(f'  {BCYAN}<url>{RESET}                            {GREY}paste any supported URL to download{RESET}')
+            _w(f'  {BCYAN}clip{RESET}                             {GREY}read URL from clipboard{RESET}')
+            _w(f'  {BCYAN}resume{RESET}                           {GREY}resume a paused series download{RESET}')
+            _w(f'  {BCYAN}history{RESET}                          {GREY}show download history{RESET}')
+            _w(f'  {BCYAN}queue add <url>{RESET}                  {GREY}add URL to queue{RESET}')
+            _w(f'  {BCYAN}queue list{RESET}                       {GREY}show queue{RESET}')
+            _w(f'  {BCYAN}queue start{RESET}                      {GREY}start downloading queue{RESET}')
+            _w(f'  {BCYAN}queue remove <n>{RESET}                 {GREY}remove item from queue{RESET}')
+            _w(f'  {BCYAN}queue clear{RESET}                      {GREY}clear entire queue{RESET}')
+            _w(f'  {BCYAN}settings{RESET}                         {GREY}view / change settings{RESET}')
+            _w(f'  {BCYAN}cache clear{RESET}                      {GREY}clear search result cache{RESET}')
+            _w(f'  {BCYAN}exit{RESET}                             {GREY}quit{RESET}')
             sep()
             _w(f'  {GREY}Ctrl+C once → pause    Ctrl+C twice → stop{RESET}')
             sep()
@@ -599,6 +605,20 @@ def main():
                     process_link_queue([url], session, ctx)
             else:
                 warn("usage: search <title>")
+
+        elif lower.startswith('fsearch ') or lower.startswith('fs '):
+            query = raw.split(' ', 1)[1].strip()
+            if query:
+                url = fsearch(query, session)
+                if url:
+                    info(f'downloading: {url[:60]}')
+                    ctx = _make_ctx(cfg)
+                    process_link_queue([url], session, ctx)
+            else:
+                warn("usage: fsearch <title> [korean|chinese|thai|nollywood]")
+
+        elif lower in ('cache clear', 'search cache clear'):
+            clear_search_cache()
 
         elif raw.startswith('http'):
             urls = [u.strip() for u in raw.split() if u.strip().startswith('http')]
