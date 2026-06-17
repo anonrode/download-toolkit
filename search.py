@@ -23,9 +23,6 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from downloader import safe_print, UA_DESKTOP, BASE_DIR
-from ui import (search_start, search_site_found, search_results,
-                search_found_one, search_not_found, after_search_not_found,
-                sep, plain, info, warn, success, GREY, RESET, BCYAN, BGREEN, YELLOW, WHITE)
 
 # ─── CACHE ────────────────────────────────────────────────────
 CACHE_FILE    = os.path.join(os.path.dirname(__file__), '.search_cache.json')
@@ -269,7 +266,7 @@ def _search_site(domain, wave1, wave2, base, season_slug, year,
                 cancel_event.set()
             with lock:
                 results.append((site_name, url))
-            search_site_found(site_name)
+            safe_print(f"  [✓] Found on {site_name}")
             return
 
         # Wave 1 missed — run wave 2 only if not cancelled
@@ -283,7 +280,7 @@ def _search_site(domain, wave1, wave2, base, season_slug, year,
     if url:
         with lock:
             results.append((site_name, url))
-        search_site_found(site_name)
+        safe_print(f"  [✓] Found on {site_name}")
 
 # ─── MAIN SEARCH ──────────────────────────────────────────────
 
@@ -296,7 +293,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
     # Check cache first
     cached = _cache_get(base)
     if cached:
-        safe_print(f"  {GREY}[cached]{RESET} {base}")
+        safe_print(f"  [cached] {base}")
         return cached
 
     results = []
@@ -335,18 +332,25 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
 
 def _present_results(results, raw_query):
     if not results:
-        after_search_not_found(raw_query)
+        safe_print(f"\n[!] Nothing found for: {raw_query}")
+        safe_print("[*] Try different spelling or paste URL directly")
         return None
 
     if len(results) == 1:
         site, url = results[0]
-        search_found_one(site, url)
+        print(f"\n  Found on {site}:")
+        print(f"  {url}")
         ans = input("\n  Download this? [Y/n]: ").strip().lower()
         if ans in ('', 'y', 'yes'):
             return url
         return None
 
-    search_results(results)
+    print()
+    print(f"  {'─'*46}")
+    for i, (site, url) in enumerate(results, 1):
+        print(f"  [{i}] {site}")
+        print(f"       {url}")
+    print(f"  {'─'*46}")
     try:
         choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(results)).strip())
     except (ValueError, EOFError):
@@ -366,7 +370,7 @@ def search(raw_query, session=None):
         site_filter = 'dramakey'
         query = query[:-9].strip()
 
-    search_start(query)
+    safe_print(f"\n[*] Searching: {query}")
     results = _run_search(query, site_filter=site_filter, fast=False, timeout=45)
     return _present_results(results, raw_query)
 
@@ -387,11 +391,11 @@ def fsearch(raw_query, session=None):
         query = query[:-9].strip()
 
     if hint:
-        safe_print(f"  {GREY}[fast · {hint}]{RESET} {query}")
+        safe_print(f"\n[*] Fast search ({hint}): {query}")
     else:
-        safe_print(f"  {GREY}[fast]{RESET} {query}")
+        safe_print(f"\n[*] Fast search: {query}")
 
-    search_start(query)
+    safe_print(f"\n[*] Searching: {query}")
     results = _run_search(query, site_filter=site_filter, fast=True, hint=hint, timeout=45)
     return _present_results(results, raw_query)
 
@@ -402,8 +406,8 @@ def clear_search_cache():
     try:
         if os.path.exists(CACHE_FILE):
             os.remove(CACHE_FILE)
-            success("search cache cleared")
+            safe_print("[✓] Search cache cleared")
         else:
-            info("no cache file found")
+            safe_print("[*] No cache file found")
     except Exception as e:
-        warn(f"could not clear cache: {e}")
+        safe_print(f"[!] Could not clear cache: {e}")

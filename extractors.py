@@ -19,9 +19,14 @@ from downloader import (
     DownloadSummary, download_file, download_batch, download_with_ytdlp,
     download_social_ytdlp, Prefetcher, safe_print, safe_filename,
     find_direct_video, base_domain, is_streaming_link,
-    mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP
+    mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
+    LiveProgress,
 )
-from ui import LiveProgress, downloading, error, warn, info, after_unknown_url
+
+def _info(msg):  safe_print(f"[*] {msg}")
+def _warn(msg):  safe_print(f"[!] {msg}")
+def _error(msg): safe_print(f"[✗] {msg}")
+def _dl(fname):  safe_print(f"  [↓] Downloading: {fname}")
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
 # Change here if a site moves — one place, everything updates.
@@ -1736,10 +1741,11 @@ def process_link_queue(links, session, ctx=None):
             safe_print(f"{'─'*50}")
         extractor = detect_site(url, disabled)
         if extractor == 'disabled':
-            warn(f'site is disabled in settings — skipping')
+            safe_print(f"[!] Site is disabled in settings — skipping: {url[:50]}")
             continue
         if not extractor:
-            after_unknown_url(url)
+            safe_print(f"[!] Unknown site: {url[:70]}")
+            safe_print("[*] Supported: NKiri, DramaKey, DramaRain, NaijaVault, 9jaRocks, NaijaPrey, MyAsianTV, Anitaku, PlutoMovies, YouTube, Instagram, TikTok, Facebook, Pinterest")
             continue
         try:
             extractor(url, session, ctx)
