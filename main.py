@@ -334,11 +334,7 @@ def auto_update():
                 stdin=subprocess.DEVNULL
             )
             if result.returncode == 0 and 'Already up to date' not in result.stdout:
-                print("[ok] Updated — restarting...")
-                sys.stdout.flush()
-                ytdlp_thread.join(timeout=2)
-                time.sleep(0.5)
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                print("[ok] Toolkit updated — restart to use latest version")
         except Exception:
             pass
 

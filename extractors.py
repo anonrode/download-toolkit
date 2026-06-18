@@ -23,10 +23,7 @@ from downloader import (
     LiveProgress,
 )
 
-def _info(msg):  safe_print(f"[*] {msg}")
-def _warn(msg):  safe_print(f"[!] {msg}")
-def _error(msg): safe_print(f"[✗] {msg}")
-def _dl(fname):  safe_print(f"  [↓] Downloading: {fname}")
+def _dl(fname): safe_print(f"  [↓] Downloading: {fname}")
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
 # Change here if a site moves — one place, everything updates.

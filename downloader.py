@@ -483,17 +483,14 @@ def download_with_aria2c(url, folder, filename, summary,
 
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 text=True, bufsize=1
             )
             if current_process is not None:
                 current_process[0] = proc
 
-            import select, sys as _sys
-
-            # aria2c writes progress to stderr as \r-terminated lines
-            # and info/errors to stdout as \n-terminated lines
-            # Read both streams
+            # aria2c writes \r progress readout to stderr
+            # Read character by character to catch \r-terminated lines
             def _read_progress(stream):
                 buf = ''
                 while True:
@@ -506,8 +503,8 @@ def download_with_aria2c(url, folder, filename, summary,
                         if not line:
                             continue
                         pct_m = re.search(r'\((\d+)%\)', line)
-                        spd_m = re.search(r'DL:([0-9.]+)([KM])i?B', line)
-                        eta_m = re.search(r'ETA:([^\]|\s]+)', line)
+                        spd_m = re.search(r'DL:([0-9.]+)([KMG])i?B', line)
+                        eta_m = re.search(r'ETA:([^\]\s]+)', line)
                         if pct_m:
                             pct = float(pct_m.group(1))
                             spd = None
@@ -515,6 +512,8 @@ def download_with_aria2c(url, folder, filename, summary,
                                 spd = float(spd_m.group(1))
                                 if spd_m.group(2) == 'K':
                                     spd /= 1024
+                                elif spd_m.group(2) == 'G':
+                                    spd *= 1024
                             eta = eta_m.group(1).strip() if eta_m else None
                             progress.update(pct, spd, eta)
                     else:
@@ -524,12 +523,8 @@ def download_with_aria2c(url, folder, filename, summary,
             t = _th.Thread(target=_read_progress, args=(proc.stderr,), daemon=True)
             t.start()
 
-            # drain stdout (errors/notices) silently
-            for line in proc.stdout:
-                pass
-
             proc.wait()
-            t.join(timeout=5)   # join AFTER proc finishes so we get all progress output
+            t.join(timeout=5)
             code = proc.returncode
             if current_process is not None:
                 current_process[0] = None
@@ -539,13 +534,13 @@ def download_with_aria2c(url, folder, filename, summary,
                     size = os.path.getsize(filepath)
                     if size < 100 * 1024:
                         progress.fail()
-                        safe_print(f"[✗] f'file too small ({size/1024:.0f}KB) — likely error page'")
+                        safe_print(f"[✗] file too small ({size/1024:.0f}KB) — likely error page")
                         try:
                             os.remove(filepath)
                         except Exception:
                             pass
                         if attempt < retries - 1:
-                            safe_print(f"[*] f'retrying ({attempt+2}/{retries})...'")
+                            safe_print(f"[*] retrying ({attempt+2}/{retries})...")
                             time.sleep(5)
                             continue
                         summary.add_failed(filename)
@@ -562,25 +557,25 @@ def download_with_aria2c(url, folder, filename, summary,
                     return True
                 else:
                     progress.fail()
-                    safe_print(f"[✗] 'file not found after download'")
+                    safe_print("[✗] file not found after download")
                     if attempt < retries - 1:
-                        safe_print(f"[*] f'retrying ({attempt+2}/{retries})...'")
+                        safe_print(f"[*] retrying ({attempt+2}/{retries})...")
                         time.sleep(5)
                         continue
                     summary.add_failed(filename)
                     return False
             else:
                 progress.fail()
-                safe_print(f"[✗] f'aria2c failed (code {code})'")
+                safe_print(f"[✗] aria2c failed (code {code})")
                 if attempt < retries - 1:
-                    safe_print(f"[*] f'retrying ({attempt+2}/{retries})...'")
+                    safe_print(f"[*] retrying ({attempt+2}/{retries})...")
                     time.sleep(5)
                     continue
                 summary.add_failed(filename)
                 return False
         except Exception as e:
             progress.fail()
-            safe_print(f"[✗] f'aria2c error: {e}'")
+            safe_print(f"[✗] aria2c error: {e}")
             summary.add_failed(filename)
             return False
     return False
@@ -589,7 +584,7 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
     import requests
     filepath = os.path.join(folder, filename)
     os.makedirs(folder, exist_ok=True)
-    safe_print(f"  [↓] Downloading: filename")
+    safe_print(f"  [↓] Downloading: {filename}")
     progress = LiveProgress(filename, parallel=parallel_mode)
     try:
         s = make_session()
@@ -597,12 +592,12 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
                   headers={**dict(s.headers), 'Referer': get_referer_for_url(url)})
         if r.status_code != 200:
             progress.fail()
-            safe_print(f"[!] f'HTTP {r.status_code}'")
+            safe_print(f"[!] HTTP {r.status_code}")
             summary.add_failed(filename)
             return False
         if 'text/html' in r.headers.get('content-type', ''):
             progress.fail()
-            safe_print(f"[!] 'got HTML instead of video'")
+            safe_print("[!] got HTML instead of video")
             summary.add_failed(filename)
             return False
         total      = int(r.headers.get('content-length', 0))
@@ -612,7 +607,7 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
             for chunk in r.iter_content(chunk_size=512 * 1024):
                 if stop_flag and stop_flag[0]:
                     progress.fail()
-                    safe_print(f"[!] 'stopped'")
+                    safe_print("[!] stopped")
                     try:
                         if os.path.exists(filepath):
                             os.remove(filepath)
@@ -637,7 +632,7 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
                     os.remove(filepath)
             except Exception:
                 pass
-            safe_print(f"[!] 'file too small — likely failed'")
+            safe_print("[!] file too small — likely failed")
             summary.add_failed(filename)
             return False
         size_mb = os.path.getsize(filepath) / (1024 * 1024)
@@ -652,7 +647,7 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
                 os.remove(filepath)
         except Exception:
             pass
-        safe_print(f"[✗] f'requests error: {e}'")
+        safe_print(f"[✗] requests error: {e}")
         summary.add_failed(filename)
         return False
 
@@ -665,11 +660,11 @@ def download_with_ytdlp(url, folder, filename, summary,
 
     if not has_ytdlp:
         if not _install_ytdlp():
-            safe_print(f"[!] 'yt-dlp unavailable'")
+            safe_print("[!] yt-dlp unavailable")
             summary.add_failed(filename)
             return False
     if not has_ffmpeg:
-        safe_print(f"[!] 'ffmpeg not found — install with: pkg install ffmpeg'")
+        safe_print("[!] ffmpeg not found — install with: pkg install ffmpeg")
         summary.add_failed(filename)
         return False
 
@@ -749,12 +744,12 @@ def download_with_ytdlp(url, folder, filename, summary,
             return True
         else:
             progress.fail()
-            safe_print(f"[✗] 'yt-dlp failed'")
+            safe_print("[✗] yt-dlp failed")
             summary.add_failed(filename)
             return False
     except Exception as e:
         progress.fail()
-        safe_print(f"[✗] f'yt-dlp error: {e}'")
+        safe_print(f"[✗] yt-dlp error: {e}")
         summary.add_failed(filename)
         return False
 
@@ -766,7 +761,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
 
     if not has_ytdlp:
         if not _install_ytdlp():
-            safe_print(f"[!] 'yt-dlp unavailable'")
+            safe_print("[!] yt-dlp unavailable")
             summary.add_failed(filename)
             return False
 
@@ -853,12 +848,12 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                 return True
         # All formats failed
         progress.fail()
-        safe_print(f"[✗] 'yt-dlp failed — no compatible format found'")
+        safe_print("[✗] yt-dlp failed — no compatible format found")
         summary.add_failed(filename)
         return False
     except Exception as e:
         progress.fail()
-        safe_print(f"[✗] f'yt-dlp error: {e}'")
+        safe_print(f"[✗] yt-dlp error: {e}")
         summary.add_failed(filename)
         return False
 
