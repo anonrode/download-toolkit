@@ -471,9 +471,8 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--header', f'Origin: {base_domain(referer)}',
                 '--allow-overwrite=true',
                 '--auto-file-renaming=false',
-                '--console-log-level=notice',
-                '--show-console-readout=true',
-                '--summary-interval=1',
+                '--console-log-level=warn',
+                '--summary-interval=0',
                 '-d', folder,
                 '-o', filename,
             ]
@@ -481,50 +480,11 @@ def download_with_aria2c(url, folder, filename, summary,
                 cmd += ['--max-download-limit', f'{bandwidth_limit}K']
             cmd.append(url)
 
-            proc = subprocess.Popen(
-                cmd, stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True, bufsize=1
-            )
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             if current_process is not None:
                 current_process[0] = proc
 
-            # aria2c writes \r progress readout to stderr
-            # Read character by character to catch \r-terminated lines
-            def _read_progress(stream):
-                buf = ''
-                while True:
-                    ch = stream.read(1)
-                    if not ch:
-                        break
-                    if ch in ('\r', '\n'):
-                        line = buf.strip()
-                        buf = ''
-                        if not line:
-                            continue
-                        pct_m = re.search(r'\((\d+)%\)', line)
-                        spd_m = re.search(r'DL:([0-9.]+)([KMG])i?B', line)
-                        eta_m = re.search(r'ETA:([^\]\s]+)', line)
-                        if pct_m:
-                            pct = float(pct_m.group(1))
-                            spd = None
-                            if spd_m:
-                                spd = float(spd_m.group(1))
-                                if spd_m.group(2) == 'K':
-                                    spd /= 1024
-                                elif spd_m.group(2) == 'G':
-                                    spd *= 1024
-                            eta = eta_m.group(1).strip() if eta_m else None
-                            progress.update(pct, spd, eta)
-                    else:
-                        buf += ch
-
-            import threading as _th
-            t = _th.Thread(target=_read_progress, args=(proc.stderr,), daemon=True)
-            t.start()
-
             proc.wait()
-            t.join(timeout=5)
             code = proc.returncode
             if current_process is not None:
                 current_process[0] = None
@@ -694,36 +654,9 @@ def download_with_ytdlp(url, folder, filename, summary,
                 '--connect-timeout=60 --file-allocation=none --min-split-size=1M'
             ]
         cmd.append(url)
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1
-        )
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
         if current_process is not None:
             current_process[0] = proc
-
-        for line in proc.stdout:
-            if stop_flag and stop_flag[0]:
-                proc.terminate()
-                break
-            line = line.strip()
-            if not line:
-                continue
-            if '[download]' in line:
-                pct_m = re.search(r'(\d+\.?\d*)%', line)
-                spd_m = re.search(r'at\s+([0-9.]+)([KM])iB/s', line)
-                eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
-                if pct_m:
-                    pct = float(pct_m.group(1))
-                    spd = None
-                    if spd_m:
-                        spd = float(spd_m.group(1))
-                        if spd_m.group(2) == 'K':
-                            spd /= 1024
-                        elif spd_m.group(2) == 'G':
-                            spd *= 1024
-                    eta = eta_m.group(1) if eta_m else None
-                    progress.update(pct, spd, eta)
 
         proc.wait()
         code = proc.returncode
@@ -802,30 +735,9 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                 '--timeout=120 --connect-timeout=60 --file-allocation=none --min-split-size=1M'
             ]
         cmd.append(url)
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1
-        )
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
         if current_process is not None:
             current_process[0] = proc
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            if '[download]' in line:
-                pct_m = re.search(r'(\d+\.?\d*)%', line)
-                spd_m = re.search(r'at\s+([0-9.]+)([KMG])iB/s', line)
-                eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
-                if pct_m:
-                    pct = float(pct_m.group(1))
-                    spd = None
-                    if spd_m:
-                        spd = float(spd_m.group(1))
-                        unit = spd_m.group(2)
-                        if unit == 'K': spd /= 1024
-                        elif unit == 'G': spd *= 1024
-                    progress.update(pct, spd, eta_m.group(1) if eta_m else None)
         proc.wait()
         if current_process is not None:
             current_process[0] = None

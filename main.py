@@ -341,10 +341,13 @@ def auto_update():
 # ─── ANDROID SETUP ────────────────────────────────────────────
 def setup_android():
     if not IS_ANDROID:
-        return
+        return None
+    wake_proc = None
     try:
-        subprocess.Popen(['termux-wake-lock'],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        wake_proc = subprocess.Popen(
+            ['termux-wake-lock'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
     except Exception:
         pass
     if not os.environ.get('TMUX'):
@@ -367,6 +370,7 @@ def setup_android():
                     print(f"[!] tmux error: {e}")
         else:
             print("[!] tmux not found — install with: pkg install tmux")
+    return wake_proc
 
 # ─── BANNER ───────────────────────────────────────────────────
 def print_banner(cfg):
@@ -416,8 +420,21 @@ def make_session():
 def main():
     global PAUSED, _CTRL_C_COUNT, STOP_FLAG
 
-    setup_android()
+    wake_proc = setup_android()
     auto_update()
+
+    def _release_wake_lock():
+        if wake_proc:
+            try:
+                wake_proc.terminate()
+            except Exception:
+                pass
+        try:
+            subprocess.run(['termux-wake-unlock'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=3)
+        except Exception:
+            pass
 
     from downloader import check_disk_space, show_history
     from extractors import process_link_queue
@@ -432,6 +449,7 @@ def main():
     while True:
         if STOP_FLAG[0]:
             print("\n[*] Exiting...")
+            _release_wake_lock()
             break
         PAUSED           = False
         _CTRL_C_COUNT[0] = 0
@@ -441,6 +459,7 @@ def main():
             raw = input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n[*] Exiting...")
+            _release_wake_lock()
             break
 
         if not raw:
@@ -451,6 +470,7 @@ def main():
 
         if lower in ('exit', 'quit', 'q'):
             print("[*] Goodbye")
+            _release_wake_lock()
             break
 
         elif lower in ('help', 'h', '?'):
