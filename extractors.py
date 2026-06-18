@@ -23,8 +23,6 @@ from downloader import (
     LiveProgress,
 )
 
-def _dl(fname): safe_print(f"  [↓] Downloading: {fname}")
-
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
 # Change here if a site moves — one place, everything updates.
 NKIRI_DOMAIN      = 'nkiri.com'
@@ -527,7 +525,32 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
 
     if summary.failed == 0 and not _stopped(ctx):
         mark_series_complete(url)
-    summary.report()
+    summary.report(name)
+
+    # Retry failed episodes if user wants
+    if summary.failed > 0 and not _stopped(ctx) and summary.prompt_retry():
+        retry_summary = DownloadSummary()
+        for failed_fname in summary.failed_list:
+            if _stopped(ctx):
+                break
+            safe_print(f"\n[*] Retrying: {failed_fname}")
+            ep_url = next((l for l in links if failed_fname.split('.')[0].lower() in l.lower()), None)
+            if not ep_url:
+                safe_print(f"  [!] Could not find episode URL for retry")
+                retry_summary.add_failed(failed_fname)
+                continue
+            direct = resolve_downloadwella(ep_url, session)
+            if direct:
+                ext = 'mkv' if '.mkv' in direct else 'mp4'
+                download_file(direct, folder, safe_filename(f"{failed_fname.rsplit('.',1)[0]}.{ext}"),
+                              retry_summary, series_url=url, series_name=name,
+                              bandwidth_limit=bw, quality=quality,
+                              current_process=cur_proc, stop_flag=stop,
+                              wait_fn=ctx.get('wait'))
+            else:
+                safe_print(f"  [✗] Could not extract link on retry")
+                retry_summary.add_failed(failed_fname)
+        retry_summary.report(f"{name} (retry)")
 
 # ─── SITE EXTRACTORS ──────────────────────────────────────────
 
@@ -1523,39 +1546,16 @@ def extract_social(url, session, ctx=None):
                 url
             ]
         try:
-            proc = subprocess.Popen(
-                cmd, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1
-            )
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             cur_proc[0] = proc
-            progress = LiveProgress('pinterest')
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                if '[download]' in line:
-                    pct_m = re.search(r'(\d+\.?\d*)%', line)
-                    spd_m = re.search(r'at\s+([0-9.]+)([KMG])iB/s', line)
-                    eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
-                    if pct_m:
-                        pct = float(pct_m.group(1))
-                        spd = None
-                        if spd_m:
-                            spd = float(spd_m.group(1))
-                            if spd_m.group(2) == 'K': spd /= 1024
-                            elif spd_m.group(2) == 'G': spd *= 1024
-                        eta = eta_m.group(1) if eta_m else None
-                        progress.update(pct, spd, eta)
             proc.wait()
+            cur_proc[0] = None
             if proc.returncode == 0:
-                progress.done()
                 summary.add_success()
             else:
-                progress.fail()
                 summary.add_failed('pinterest')
         except Exception as e:
-            error(f'pinterest error: {e}')
+            safe_print(f'[✗] Pinterest error: {e}')
             summary.add_failed('pinterest')
         summary.report()
         return
@@ -1603,7 +1603,7 @@ def extract_social(url, session, ctx=None):
                 folder_name = 'playlist'
             folder      = os.path.join(BASE_DIR, 'YouTube', folder_name)
             os.makedirs(folder, exist_ok=True)
-            info(f'saving to: {folder}')
+            safe_print(f'[*] Saving to: {folder}')
             out_template = os.path.join(folder, '%(playlist_index)s - %(title)s.%(ext)s')
             cmd = [
                 'yt-dlp', '-f', fmt,
@@ -1616,50 +1616,18 @@ def extract_social(url, session, ctx=None):
             if items_sel != 'all':
                 cmd += ['--playlist-items', items_sel]
             cmd.append(url)
-            summary  = DownloadSummary()
-            progress = None
-            proc     = None
+            summary = DownloadSummary()
             try:
-                proc = subprocess.Popen(
-                    cmd, stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1
-                )
+                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
                 cur_proc[0] = proc
-                for line in proc.stdout:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    title_m = re.search(r'Downloading item (\d+) of (\d+)', line)
-                    if title_m:
-                        if progress:
-                            progress.done()
-                        n, total = title_m.group(1), title_m.group(2)
-                        label    = f'video {n}/{total}'
-                        progress = LiveProgress(label)
-                        continue
-                    if '[download]' in line and progress:
-                        pct_m = re.search(r'(\d+\.?\d*)%', line)
-                        spd_m = re.search(r'at\s+([0-9.]+)([KMG])iB/s', line)
-                        eta_m = re.search(r'ETA\s+(\d+:\d+)', line)
-                        if pct_m:
-                            pct = float(pct_m.group(1))
-                            spd = None
-                            if spd_m:
-                                spd = float(spd_m.group(1))
-                                if spd_m.group(2) == 'K': spd /= 1024
-                                elif spd_m.group(2) == 'G': spd *= 1024
-                            progress.update(pct, spd, eta_m.group(1) if eta_m else None)
                 proc.wait()
+                cur_proc[0] = None
                 if proc.returncode == 0:
-                    if progress: progress.done()
                     summary.add_success()
                 else:
-                    if progress: progress.fail()
                     summary.add_failed('playlist')
             except Exception as e:
-                if progress: progress.fail()
-                error(f'playlist error: {e}')
+                safe_print(f'[✗] Playlist error: {e}')
                 summary.add_failed('playlist')
             summary.report()
             return
@@ -1669,7 +1637,7 @@ def extract_social(url, session, ctx=None):
         folder   = os.path.join(BASE_DIR, 'YouTube')
         os.makedirs(folder, exist_ok=True)
         out_template = os.path.join(folder, '%(title)s.%(ext)s')
-        info(f'saving to: {folder}')
+        safe_print(f'[*] Saving to: {folder}')
         summary = DownloadSummary()
         download_social_ytdlp(url, folder, 'video.mp4', summary,
                               current_process=cur_proc,

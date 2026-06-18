@@ -228,6 +228,27 @@ def is_episode_done_in_state(series_url, ep_filename):
         return ep_filename in state[series_url].get('done', [])
     return False
 
+def save_episode_size(series_url, ep_filename, expected_bytes):
+    """Store expected file size in resume state before download starts."""
+    try:
+        state = load_resume_state()
+        if series_url not in state:
+            state[series_url] = {'name': '', 'done': [], 'failed': [], 'current': None, 'sizes': {}}
+        if 'sizes' not in state[series_url]:
+            state[series_url]['sizes'] = {}
+        state[series_url]['sizes'][ep_filename] = expected_bytes
+        save_resume_state(state)
+    except Exception:
+        pass
+
+def get_episode_size(series_url, ep_filename):
+    """Retrieve stored expected size. Returns None if not stored."""
+    try:
+        state = load_resume_state()
+        return state.get(series_url, {}).get('sizes', {}).get(ep_filename)
+    except Exception:
+        return None
+
 def show_resume_list():
     state = load_resume_state()
     if not state:
@@ -292,6 +313,16 @@ class DownloadSummary:
             _notify(f"Done — {self.success}/{total} downloaded")
         return list(self.failed_list)
 
+    def prompt_retry(self):
+        """Ask user if they want to retry failed episodes. Returns True if yes."""
+        if not self.failed_list:
+            return False
+        try:
+            ans = input(f"\n  Retry {len(self.failed_list)} failed episode(s)? [y/N]: ").strip().lower()
+            return ans in ('y', 'yes')
+        except (EOFError, KeyboardInterrupt):
+            return False
+
     def offer_retry(self):
         """Return failed list so caller can retry them."""
         return list(self.failed_list)
@@ -307,26 +338,58 @@ def _notify(message):
         pass
 
 # ─── HELPERS ──────────────────────────────────────────────────
-def already_downloaded(folder, filename, min_mb=1.0):
+def fetch_expected_size(url, session=None):
+    """
+    GET Content-Length from server via HEAD request.
+    Returns size in bytes or None if unavailable.
+    """
+    try:
+        import requests as _req
+        s = session or _req.Session()
+        s.headers['User-Agent'] = UA_DESKTOP
+        r = s.head(url, timeout=10, allow_redirects=True)
+        cl = r.headers.get('Content-Length') or r.headers.get('content-length')
+        if cl and cl.isdigit():
+            return int(cl)
+    except Exception:
+        pass
+    return None
+
+def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
     """
     Check if a file already exists and is complete.
-    min_mb: minimum file size in MB to consider a file complete (default 1MB).
-    Social downloads (TikTok clips etc.) can be small, so callers can pass min_mb=0.1.
+    If series_url given and expected size is stored, compares exact size.
+    Falls back to min_mb threshold check if no size stored.
     """
     base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
     for ext in ['mp4', 'mkv', 'webm']:
         filepath = os.path.join(folder, f"{base}.{ext}")
         if os.path.exists(filepath):
-            size = os.path.getsize(filepath)
-            if size >= min_mb * 1024 * 1024:
-                return True, filepath
+            actual = os.path.getsize(filepath)
+            # Try exact size match first
+            expected = get_episode_size(series_url, filename) if series_url else None
+            if expected:
+                # Allow 1% tolerance for rounding differences
+                if actual >= expected * 0.99:
+                    return True, filepath
+                else:
+                    safe_print(f"  [!] Incomplete: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB — re-downloading")
+                    try:
+                        os.remove(filepath)
+                    except Exception:
+                        pass
+                    return False, None
             else:
-                safe_print(f"  [!] Incomplete file ({size/1024/1024:.1f} MB) — re-downloading")
-                try:
-                    os.remove(filepath)
-                except Exception as e:
-                    safe_print(f"  [!] Could not remove: {e}")
-                return False, None
+                # Fall back to minimum size threshold
+                if actual >= min_mb * 1024 * 1024:
+                    return True, filepath
+                else:
+                    safe_print(f"  [!] Incomplete file ({actual/(1024*1024):.1f}MB) — re-downloading")
+                    try:
+                        os.remove(filepath)
+                    except Exception as e:
+                        safe_print(f"  [!] Could not remove: {e}")
+                    return False, None
     return False, None
 
 def base_domain(url):
@@ -484,8 +547,13 @@ def download_with_aria2c(url, folder, filename, summary,
             if current_process is not None:
                 current_process[0] = proc
 
-            proc.wait()
-            code = proc.returncode
+            # Poll instead of blocking wait — allows stop_flag to interrupt
+            while proc.poll() is None:
+                if stop_flag and stop_flag[0]:
+                    proc.terminate()
+                    break
+                time.sleep(0.5)
+            code = proc.returncode if proc.returncode is not None else -1
             if current_process is not None:
                 current_process[0] = None
 
@@ -658,8 +726,12 @@ def download_with_ytdlp(url, folder, filename, summary,
         if current_process is not None:
             current_process[0] = proc
 
-        proc.wait()
-        code = proc.returncode
+        while proc.poll() is None:
+            if stop_flag and stop_flag[0]:
+                proc.terminate()
+                break
+            time.sleep(0.5)
+        code = proc.returncode if proc.returncode is not None else -1
         if current_process is not None:
             current_process[0] = None
 
@@ -738,10 +810,11 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
         if current_process is not None:
             current_process[0] = proc
-        proc.wait()
+        while proc.poll() is None:
+            time.sleep(0.5)
         if current_process is not None:
             current_process[0] = None
-        return proc.returncode
+        return proc.returncode if proc.returncode is not None else -1
 
     try:
         for fmt in format_chain:
@@ -791,7 +864,7 @@ def download_file(url, folder, filename, summary,
         summary.add_failed(filename)
         return False
 
-    done, _ = already_downloaded(folder, filename)
+    done, _ = already_downloaded(folder, filename, series_url=series_url)
     if done:
         safe_print(f"  [✓] Already downloaded — skipping")
         summary.add_skipped()
@@ -821,6 +894,16 @@ def download_file(url, folder, filename, summary,
 
     if series_url:
         mark_episode_current(series_url, series_name or folder, filename)
+
+    # Fetch and store expected file size before download starts
+    # so resume checks can verify completeness precisely
+    if series_url and not is_streaming_link(url):
+        expected = get_episode_size(series_url, filename)
+        if not expected:
+            expected = fetch_expected_size(url)
+            if expected:
+                save_episode_size(series_url, filename, expected)
+                safe_print(f"  [*] Expected size: {expected/(1024*1024):.1f} MB")
 
     if is_streaming_link(url):
         result = download_with_ytdlp(url, folder, filename, summary,

@@ -300,30 +300,32 @@ def auto_update():
     ytdlp_thread = threading.Thread(target=_update_ytdlp, daemon=True)
     ytdlp_thread.start()
 
+    def _get_commit():
+        try:
+            r = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                cwd=script_dir, capture_output=True,
+                text=True, timeout=5, stdin=subprocess.DEVNULL
+            )
+            return r.stdout.strip()
+        except Exception:
+            return ''
+
     if IS_ANDROID:
         try:
-            stamp_file = os.path.join(script_dir, '.last_run_commit')
-            def _get_commit():
-                r = subprocess.run(
-                    ['git', 'rev-parse', 'HEAD'],
-                    cwd=script_dir, capture_output=True,
-                    text=True, timeout=5, stdin=subprocess.DEVNULL
-                )
-                return r.stdout.strip()
-            current = _get_commit()
-            last = ''
-            if os.path.exists(stamp_file):
-                last = open(stamp_file).read().strip()
-            if current and current != last:
-                open(stamp_file, 'w').write(current)
-                if last:
-                    print("[ok] Updated — restarting...")
-                    sys.stdout.flush()
-                    ytdlp_thread.join(timeout=2)
-                    time.sleep(0.5)
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
-            elif current:
-                open(stamp_file, 'w').write(current)
+            before = _get_commit()
+            subprocess.run(
+                ['git', 'pull', '-q'],
+                cwd=script_dir, capture_output=True,
+                text=True, timeout=30, stdin=subprocess.DEVNULL
+            )
+            after = _get_commit()
+            if before and after and before != after:
+                print("[ok] Updated — restarting...")
+                sys.stdout.flush()
+                ytdlp_thread.join(timeout=2)
+                time.sleep(0.5)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception:
             pass
     else:

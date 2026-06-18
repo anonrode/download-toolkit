@@ -243,22 +243,20 @@ def _search_site(domain, wave1, wave2, base, season_slug, year,
     In normal mode: run all patterns (wave1+wave2) together.
     """
     if fast:
-        # Apply content hint — move matching pattern to front of wave1
         w1 = list(wave1)
+        w2 = list(wave2)
+
+        # Apply content hint — move matching pattern to front of wave1
         if hint and hint in CONTENT_HINTS:
             nkiri_pat, dk_pat = CONTENT_HINTS[hint]
             hint_pat = nkiri_pat if 'thenkiri' in domain else dk_pat
-            if hint_pat and hint_pat in w1:
-                w1.remove(hint_pat)
-                w1.insert(0, hint_pat)
-            elif hint_pat and hint_pat in wave2:
-                # Move from wave2 to front of wave1
-                w2 = [p for p in wave2 if p != hint_pat]
-                w1 = [hint_pat] + w1
-            else:
-                w2 = wave2
-        else:
-            w2 = wave2
+            if hint_pat:
+                if hint_pat in w1:
+                    w1.remove(hint_pat)
+                    w1.insert(0, hint_pat)
+                elif hint_pat in w2:
+                    w2.remove(hint_pat)
+                    w1.insert(0, hint_pat)
 
         url = _probe_patterns(domain, w1, base, season_slug, year)
         if url:
@@ -272,7 +270,7 @@ def _search_site(domain, wave1, wave2, base, season_slug, year,
         # Wave 1 missed — run wave 2 only if not cancelled
         if cancel_event and cancel_event.is_set():
             return
-        url = _probe_patterns(domain, wave2, base, season_slug, year, cancel_event)
+        url = _probe_patterns(domain, w2, base, season_slug, year, cancel_event)
     else:
         # Normal search — all patterns at once
         url = _probe_patterns(domain, wave1 + wave2, base, season_slug, year)
