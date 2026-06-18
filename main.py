@@ -388,7 +388,7 @@ def print_banner(cfg):
     except Exception:
         space_s = "unknown"
     print("╔══════════════════════════════════════════════╗")
-    print("║         DOWNLOAD TOOLKIT                     ║")
+    print("║              ANONRODE                        ║")
     print(f"║  Quality: {q:<6}   Parallel: {p}               ║")
     print(f"║  aria2c: {'✓' if aria2c_ok else '✗'}   yt-dlp: {'✓' if ytdlp_ok else '✗'}   Storage: {space_s:<10}║")
     print("╠══════════════════════════════════════════════╣")
