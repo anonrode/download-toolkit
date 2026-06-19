@@ -31,14 +31,16 @@ CACHE_TTL     = 86400  # 24 hours in seconds
 def _load_cache():
     try:
         if os.path.exists(CACHE_FILE):
-            return json.load(open(CACHE_FILE, encoding='utf-8'))
+            with open(CACHE_FILE, encoding='utf-8') as f:
+                return json.load(f)
     except Exception:
         pass
     return {}
 
 def _save_cache(cache):
     try:
-        json.dump(cache, open(CACHE_FILE, 'w', encoding='utf-8'), indent=2)
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=2)
     except Exception:
         pass
 
@@ -145,11 +147,12 @@ def _parse_content_hint(raw):
 
 # ─── LOW-LEVEL PROBE ──────────────────────────────────────────
 
-def _head_check(url, base_url):
+def _head_check(args):
+    url, domain = args
     s = requests.Session()
     s.headers.update({
         'User-Agent':      UA_DESKTOP,
-        'Referer':         base_url,
+        'Referer':         domain,
         'Accept':          'text/html,application/xhtml+xml,*/*;q=0.9',
         'Accept-Language': 'en-US,en;q=0.9',
         'Connection':      'keep-alive',
@@ -175,11 +178,6 @@ def _verify_403(url, base):
     return None
 
 def _probe_patterns(base_url, patterns, base, season_slug, year, cancel_event=None):
-    """
-    Fire patterns as HEAD requests in parallel.
-    If cancel_event is set and triggered, pending futures are cancelled.
-    Returns first confirmed URL or None.
-    """
     domain = base_url.rstrip('/')
     urls   = [
         domain + '/' + p.replace('{base}', base)
@@ -188,14 +186,13 @@ def _probe_patterns(base_url, patterns, base, season_slug, year, cancel_event=No
         for p in patterns
     ]
 
-    results_map  = {}
+    results_map    = {}
     candidates_403 = []
 
     with ThreadPoolExecutor(max_workers=12) as ex:
-        futures = {ex.submit(_head_check, url, domain): url for url in urls}
+        futures = {ex.submit(_head_check, (url, domain)): url for url in urls}
         for future in as_completed(futures):
             if cancel_event and cancel_event.is_set():
-                # Cancel remaining futures
                 for f in futures:
                     f.cancel()
                 break
@@ -393,7 +390,6 @@ def fsearch(raw_query, session=None):
     else:
         safe_print(f"\n[*] Fast search: {query}")
 
-    safe_print(f"\n[*] Searching: {query}")
     results = _run_search(query, site_filter=site_filter, fast=True, hint=hint, timeout=45)
     return _present_results(results, raw_query)
 

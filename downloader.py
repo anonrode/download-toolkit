@@ -14,9 +14,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─── SHARED STATE (imported from main) ────────────────────────
 # These are set by main.py and read here. Imported at call time
 # to avoid circular imports.
-def _globals():
-    import main as m
-    return m
 
 # ─── CONSTANTS ────────────────────────────────────────────────
 IS_ANDROID   = os.path.exists('/storage/emulated/0')
@@ -236,8 +233,10 @@ def save_episode_size(series_url, ep_filename, expected_bytes):
             state[series_url] = {'name': '', 'done': [], 'failed': [], 'current': None, 'sizes': {}}
         if 'sizes' not in state[series_url]:
             state[series_url]['sizes'] = {}
-        state[series_url]['sizes'][ep_filename] = expected_bytes
-        save_resume_state(state)
+        # Only save if not already stored — avoid overwriting with stale value
+        if ep_filename not in state[series_url]['sizes']:
+            state[series_url]['sizes'][ep_filename] = expected_bytes
+            save_resume_state(state)
     except Exception:
         pass
 
@@ -323,10 +322,6 @@ class DownloadSummary:
         except (EOFError, KeyboardInterrupt):
             return False
 
-    def offer_retry(self):
-        """Return failed list so caller can retry them."""
-        return list(self.failed_list)
-
 # ─── NOTIFICATION ─────────────────────────────────────────────
 def _notify(message):
     try:
@@ -340,16 +335,16 @@ def _notify(message):
 # ─── HELPERS ──────────────────────────────────────────────────
 def fetch_expected_size(url, session=None):
     """
-    GET Content-Length from server via HEAD request.
+    Get Content-Length from server via HEAD request.
     Returns size in bytes or None if unavailable.
     """
     try:
         import requests as _req
-        s = session or _req.Session()
+        s = _req.Session()
         s.headers['User-Agent'] = UA_DESKTOP
         r = s.head(url, timeout=10, allow_redirects=True)
         cl = r.headers.get('Content-Length') or r.headers.get('content-length')
-        if cl and cl.isdigit():
+        if cl and str(cl).isdigit():
             return int(cl)
     except Exception:
         pass
@@ -508,6 +503,13 @@ def download_with_aria2c(url, folder, filename, summary,
     filepath      = os.path.join(folder, filename)
     referer       = get_referer_for_url(url)
 
+    def _cleanup_session_file(sf):
+        try:
+            if os.path.exists(sf):
+                os.remove(sf)
+        except Exception:
+            pass
+
     progress = LiveProgress(filename, parallel=parallel_mode)
 
     for attempt in range(retries):
@@ -548,14 +550,22 @@ def download_with_aria2c(url, folder, filename, summary,
                 current_process[0] = proc
 
             # Poll instead of blocking wait — allows stop_flag to interrupt
+            stopped = False
             while proc.poll() is None:
                 if stop_flag and stop_flag[0]:
                     proc.terminate()
+                    stopped = True
                     break
                 time.sleep(0.5)
             code = proc.returncode if proc.returncode is not None else -1
             if current_process is not None:
                 current_process[0] = None
+
+            if stopped:
+                progress.fail()
+                _cleanup_session_file(session_file)
+                summary.add_failed(filename)
+                return False
 
             if code == 0:
                 if os.path.exists(filepath):
@@ -571,15 +581,12 @@ def download_with_aria2c(url, folder, filename, summary,
                             safe_print(f"[*] retrying ({attempt+2}/{retries})...")
                             time.sleep(5)
                             continue
+                        _cleanup_session_file(session_file)
                         summary.add_failed(filename)
                         return False
                     size_mb = size / (1024 * 1024)
                     progress.done(size_mb)
-                    try:
-                        if os.path.exists(session_file):
-                            os.remove(session_file)
-                    except Exception:
-                        pass
+                    _cleanup_session_file(session_file)
                     summary.add_success()
                     log_download(filename, url, filepath)
                     return True
@@ -590,6 +597,7 @@ def download_with_aria2c(url, folder, filename, summary,
                         safe_print(f"[*] retrying ({attempt+2}/{retries})...")
                         time.sleep(5)
                         continue
+                    _cleanup_session_file(session_file)
                     summary.add_failed(filename)
                     return False
             else:
@@ -599,13 +607,16 @@ def download_with_aria2c(url, folder, filename, summary,
                     safe_print(f"[*] retrying ({attempt+2}/{retries})...")
                     time.sleep(5)
                     continue
+                _cleanup_session_file(session_file)
                 summary.add_failed(filename)
                 return False
         except Exception as e:
             progress.fail()
+            _cleanup_session_file(session_file)
             safe_print(f"[✗] aria2c error: {e}")
             summary.add_failed(filename)
             return False
+    _cleanup_session_file(session_file)
     return False
 
 def download_with_requests(url, folder, filename, summary, stop_flag=None, parallel_mode=False):
@@ -759,7 +770,7 @@ def download_with_ytdlp(url, folder, filename, summary,
         return False
 
 def download_social_ytdlp(url, folder, filename, summary, current_process=None,
-                           quality_override=None, out_template=None):
+                           quality_override=None, out_template=None, stop_flag=None):
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
     has_aria2c = shutil.which('aria2c') is not None
@@ -811,6 +822,9 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
         if current_process is not None:
             current_process[0] = proc
         while proc.poll() is None:
+            if stop_flag and stop_flag[0]:
+                proc.terminate()
+                break
             time.sleep(0.5)
         if current_process is not None:
             current_process[0] = None
@@ -818,7 +832,11 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
 
     try:
         for fmt in format_chain:
+            if stop_flag and stop_flag[0]:
+                break
             code = _run_ytdlp(fmt)
+            if stop_flag and stop_flag[0]:
+                break
             if code == 0:
                 for ext in ['mp4', 'mkv', 'webm', 'm4a']:
                     p = os.path.join(folder, f'{base}.{ext}')

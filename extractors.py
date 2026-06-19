@@ -11,6 +11,7 @@ Returns nothing — drives download_file/download_batch directly.
 import os
 import re
 import time
+import subprocess
 import requests
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
@@ -327,8 +328,6 @@ def resolve_vikingfile(url, session):
                     time.sleep(2)
                 else:
                     raise
-        if not r1:
-            return None
 
         loc1 = r1.headers.get('location')
 
@@ -397,8 +396,6 @@ def resolve_lulacloud(url, session):
                     time.sleep(2)
                 else:
                     raise
-        if not r1:
-            return None
 
         loc = r1.headers.get('location')
         if loc:
@@ -797,8 +794,9 @@ def extract_myasiantv(url, session, ctx=None):
             return
         soup      = BeautifulSoup(r.text, 'html.parser')
         show_slug = re.sub(r'-\d{4}.*$', '', slug)
+        from urllib.parse import urljoin
         ep_links  = list(dict.fromkeys(
-            a['href'] for a in soup.find_all('a', href=True)
+            urljoin(bd, a['href']) for a in soup.find_all('a', href=True)
             if ('episode-' in a['href'] and show_slug in a['href']
                 and (bd in a['href'] or a['href'].startswith('/')))
         ))
@@ -1548,9 +1546,13 @@ def extract_social(url, session, ctx=None):
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             cur_proc[0] = proc
-            proc.wait()
+            while proc.poll() is None:
+                if stop and stop[0]:
+                    proc.terminate()
+                    break
+                time.sleep(0.5)
             cur_proc[0] = None
-            if proc.returncode == 0:
+            if proc.returncode == 0 and not (stop and stop[0]):
                 summary.add_success()
             else:
                 summary.add_failed('pinterest')
@@ -1620,9 +1622,13 @@ def extract_social(url, session, ctx=None):
             try:
                 proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
                 cur_proc[0] = proc
-                proc.wait()
+                while proc.poll() is None:
+                    if stop and stop[0]:
+                        proc.terminate()
+                        break
+                    time.sleep(0.5)
                 cur_proc[0] = None
-                if proc.returncode == 0:
+                if proc.returncode == 0 and not (stop and stop[0]):
                     summary.add_success()
                 else:
                     summary.add_failed('playlist')
@@ -1678,7 +1684,9 @@ SITE_MAP = {
 def detect_site(url, disabled=None):
     try:
         from urllib.parse import urlparse
-        netloc = urlparse(url).netloc.lower().lstrip('www.')
+        netloc = urlparse(url).netloc.lower()
+        if netloc.startswith('www.'):
+            netloc = netloc[4:]
     except Exception:
         netloc = url
     disabled = [d.lower() for d in (disabled or [])]
