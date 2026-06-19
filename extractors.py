@@ -462,10 +462,10 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
     soup = BeautifulSoup(r.text, 'html.parser')
     links = list(dict.fromkeys(
         a['href'] for a in soup.find_all('a', href=True)
-        if 'downloadwella.com' in a['href']
+        if 'downloadwella.com' in a['href'] or 'wetafiles.com' in a['href']
     ))
     if not links:
-        safe_print(f"[!] No downloadwella links found on page")
+        safe_print(f"[!] No downloadwella/wetafiles links found on page")
         diagnose_page(soup, url, "downloadwella.com links")
         return
 
@@ -480,6 +480,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
         _wait(ctx)
 
         ep_name = ep_url.split('/')[-1].replace('.html', '')
+        ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
         safe_print(f"\n[{i}/{len(links)}] {ep_name}")
 
         # ── Early skip: check disk before hitting the file host ──
@@ -570,10 +571,10 @@ def extract_nkiri(url, session, ctx=None):
         return
     soup = BeautifulSoup(r.text, 'html.parser')
 
-    # Priority 1: downloadwella links (most common across full catalogue)
+    # Priority 1: downloadwella/wetafiles links (most common across full catalogue)
     dw_links = list(dict.fromkeys(
         a['href'] for a in soup.find_all('a', href=True)
-        if 'downloadwella.com' in a['href']
+        if 'downloadwella.com' in a['href'] or 'wetafiles.com' in a['href']
     ))
     if dw_links:
         safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) — saving to: {folder}")
@@ -583,6 +584,7 @@ def extract_nkiri(url, session, ctx=None):
             if _stopped(ctx): break
             _wait(ctx)
             ep_name = ep_url.split('/')[-1].replace('.html', '')
+            ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
             safe_print(f"\n[{i}/{len(dw_links)}] {ep_name}")
 
             # ── Early skip ──
