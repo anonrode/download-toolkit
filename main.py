@@ -23,7 +23,8 @@ QUEUE_FILE  = os.path.join(BASE_DIR, '.queue.json')
 PAUSED          = False
 _CTRL_C_COUNT   = [0]
 CURRENT_PROCESS = [None]
-STOP_FLAG       = [False]
+STOP_FLAG       = [False]   # stops current batch — extractor loops check this
+EXIT_FLAG       = [False]   # exits entire script — REPL loop checks this
 
 # ─── CONFIG ───────────────────────────────────────────────────
 DEFAULT_CONFIG = {
@@ -54,31 +55,50 @@ def save_config(cfg):
 
 # ─── SIGNAL HANDLING (Ctrl+C) ─────────────────────────────────
 def setup_signal_handler():
-    global PAUSED, _CTRL_C_COUNT, CURRENT_PROCESS, STOP_FLAG
+    global PAUSED, _CTRL_C_COUNT, CURRENT_PROCESS, STOP_FLAG, EXIT_FLAG
 
     def handler(sig, frame):
         global PAUSED
         _CTRL_C_COUNT[0] += 1
         proc = CURRENT_PROCESS[0]
+
         if _CTRL_C_COUNT[0] == 1:
+            # Level 1 — pause
             PAUSED       = True
             STOP_FLAG[0] = False
             if proc:
                 try: proc.terminate()
                 except Exception: pass
             try:
-                sys.stdout.write('\n\n  [pause] Paused — press Enter to resume, Ctrl+C again to exit\n\n')
+                sys.stdout.write('\n\n  [pause] Paused — press Enter to resume, Ctrl+C again to stop batch\n\n')
                 sys.stdout.flush()
             except Exception:
                 pass
-        else:
+
+        elif _CTRL_C_COUNT[0] == 2:
+            # Level 2 — stop batch, back to prompt
             PAUSED       = False
             STOP_FLAG[0] = True
+            EXIT_FLAG[0] = False
             if proc:
                 try: proc.terminate()
                 except Exception: pass
             try:
-                sys.stdout.write('\n\n  [stop] Stopping...\n\n')
+                sys.stdout.write('\n\n  [stop] Batch stopped — back to prompt. Ctrl+C again to exit.\n\n')
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+        else:
+            # Level 3 — exit entirely
+            PAUSED       = False
+            STOP_FLAG[0] = True
+            EXIT_FLAG[0] = True
+            if proc:
+                try: proc.terminate()
+                except Exception: pass
+            try:
+                sys.stdout.write('\n\n  [exit] Exiting...\n\n')
                 sys.stdout.flush()
             except Exception:
                 pass
@@ -94,7 +114,7 @@ def wait_if_paused():
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
     except Exception:
         pass
-    while PAUSED and not STOP_FLAG[0]:
+    while PAUSED and not STOP_FLAG[0] and not EXIT_FLAG[0]:
         try:
             input()
             if PAUSED:
@@ -102,7 +122,7 @@ def wait_if_paused():
                 _CTRL_C_COUNT[0] = 0
                 print('  [resume] Resuming...\n')
         except EOFError:
-            STOP_FLAG[0] = True
+            EXIT_FLAG[0] = True
             break
 
 def _quality_str(q):
@@ -116,6 +136,7 @@ def _quality_str(q):
 def _make_ctx(cfg):
     return {
         'stop':            STOP_FLAG,
+        'exit':            EXIT_FLAG,
         'wait':            wait_if_paused,
         'bandwidth':       cfg.get('bandwidth', 0),
         'quality':         _quality_str(cfg.get('quality', '480p')),
@@ -295,10 +316,28 @@ def handle_resume_command(session, cfg):
 # ─── AUTO UPDATE ──────────────────────────────────────────────
 def auto_update():
     from downloader import _update_ytdlp
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir  = os.path.dirname(os.path.abspath(__file__))
+    stamp_file  = os.path.join(script_dir, '.last_pull')
+    pull_interval = 30 * 60  # 30 minutes in seconds
 
     ytdlp_thread = threading.Thread(target=_update_ytdlp, daemon=True)
     ytdlp_thread.start()
+
+    def _should_pull():
+        try:
+            if os.path.exists(stamp_file):
+                last = float(open(stamp_file).read().strip())
+                if time.time() - last < pull_interval:
+                    return False
+        except Exception:
+            pass
+        return True
+
+    def _stamp_pull():
+        try:
+            open(stamp_file, 'w').write(str(time.time()))
+        except Exception:
+            pass
 
     def _get_commit():
         try:
@@ -311,6 +350,9 @@ def auto_update():
         except Exception:
             return ''
 
+    if not _should_pull():
+        return  # pulled recently — skip entirely, start instantly
+
     if IS_ANDROID:
         try:
             before = _get_commit()
@@ -319,6 +361,7 @@ def auto_update():
                 cwd=script_dir, capture_output=True,
                 text=True, timeout=30, stdin=subprocess.DEVNULL
             )
+            _stamp_pull()
             after = _get_commit()
             if before and after and before != after:
                 print("[ok] Updated — restarting...")
@@ -335,6 +378,7 @@ def auto_update():
                 capture_output=True, text=True, timeout=30,
                 stdin=subprocess.DEVNULL
             )
+            _stamp_pull()
             if result.returncode == 0 and 'Already up to date' not in result.stdout:
                 print("[ok] Toolkit updated — restart to use latest version")
         except Exception:
@@ -420,7 +464,7 @@ def make_session():
 
 # ─── MAIN REPL ────────────────────────────────────────────────
 def main():
-    global PAUSED, _CTRL_C_COUNT, STOP_FLAG
+    global PAUSED, _CTRL_C_COUNT, STOP_FLAG, EXIT_FLAG
 
     wake_proc = setup_android()
     auto_update()
@@ -449,10 +493,11 @@ def main():
     print_banner(cfg)
 
     while True:
-        if STOP_FLAG[0]:
+        if EXIT_FLAG[0]:
             print("\n[*] Exiting...")
             _release_wake_lock()
             break
+        # Reset batch stop and pause between commands — not exit flag
         PAUSED           = False
         _CTRL_C_COUNT[0] = 0
         STOP_FLAG[0]     = False
@@ -493,9 +538,10 @@ def main():
             print(f"  queue clear                 clear entire queue")
             print(f"  settings                    view / change settings")
             print(f"  cache clear                 clear search result cache")
+            print(f"  update                      force update from GitHub")
             print(f"  exit                        quit")
             print(f"{'='*50}")
-            print(f"  Ctrl+C once = pause   Ctrl+C twice = stop")
+            print(f"  Ctrl+C once = pause   Ctrl+C twice = stop batch   Ctrl+C 3x = exit")
             print(f"{'='*50}")
 
         elif lower == 'history':
@@ -542,8 +588,39 @@ def main():
             else:
                 print("[*] queue add <url> | list | start | clear | remove <n>")
 
-        elif lower == 'index rebuild':
-            rebuild_index_command()
+        elif lower == 'update':
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            stamp_file = os.path.join(script_dir, '.last_pull')
+            print("[*] Checking for updates...")
+            try:
+                before = subprocess.run(
+                    ['git', 'rev-parse', 'HEAD'],
+                    cwd=script_dir, capture_output=True,
+                    text=True, timeout=5, stdin=subprocess.DEVNULL
+                ).stdout.strip()
+                subprocess.run(
+                    ['git', 'pull', '-q'],
+                    cwd=script_dir, capture_output=True,
+                    text=True, timeout=30, stdin=subprocess.DEVNULL
+                )
+                try:
+                    open(stamp_file, 'w').write(str(time.time()))
+                except Exception:
+                    pass
+                after = subprocess.run(
+                    ['git', 'rev-parse', 'HEAD'],
+                    cwd=script_dir, capture_output=True,
+                    text=True, timeout=5, stdin=subprocess.DEVNULL
+                ).stdout.strip()
+                if before and after and before != after:
+                    print("[ok] Updated — restarting...")
+                    sys.stdout.flush()
+                    time.sleep(0.5)
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                else:
+                    print("[*] Already up to date")
+            except Exception as e:
+                print(f"[!] Update failed: {e}")
 
         elif lower.startswith('search ') or lower.startswith('s '):
             query = raw.split(' ', 1)[1].strip()

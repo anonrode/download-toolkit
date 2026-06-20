@@ -53,7 +53,11 @@ def safe_get(session, url, timeout=20, referer=None, retries=3):
     for attempt in range(retries):
         try:
             headers = {'Referer': referer} if referer else {}
-            r = session.get(url, timeout=timeout, headers=headers)
+            try:
+                r = session.get(url, timeout=timeout, headers=headers, verify=False)
+            except TypeError:
+                # Some session types don't support verify= kwarg
+                r = session.get(url, timeout=timeout, headers=headers)
             if not r.ok:
                 safe_print(f"  [!] HTTP {r.status_code}: {url[:60]}")
                 return None
@@ -144,7 +148,11 @@ def resolve_downloadwella(url, session):
         data = {inp.get('name'): inp.get('value', '')
                 for inp in form.find_all('input') if inp.get('name')}
         data['method_free'] = 'Free Download'
-        r2 = session.post(url, data=data, timeout=20)
+        try:
+            r2 = session.post(url, data=data, timeout=20, verify=False)
+        except TypeError:
+            # Some session types don't support verify= kwarg
+            r2 = session.post(url, data=data, timeout=20)
         return find_direct_video(r2.text)
     except Exception as e:
         safe_print(f"  [!] Downloadwella: {e}")
