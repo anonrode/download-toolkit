@@ -308,8 +308,12 @@ class DownloadSummary:
             for f in self.failed_list:
                 print(f"    · {f}")
         print(f"{'='*50}")
-        if IS_ANDROID and total > 1:
-            _notify(f"Done — {self.success}/{total} downloaded")
+        if IS_ANDROID:
+            if self.failed == 0:
+                msg = f'{name} — {self.success}/{total} done ✓'
+            else:
+                msg = f'{name} — {self.success} done, {self.failed} failed'
+            _notify('Anonrode — Complete', msg)
         return list(self.failed_list)
 
     def prompt_retry(self):
@@ -323,14 +327,30 @@ class DownloadSummary:
             return False
 
 # ─── NOTIFICATION ─────────────────────────────────────────────
-def _notify(message):
+def _notify(title, message, vibrate=True):
+    if not IS_ANDROID:
+        return
     try:
-        subprocess.run(
-            ['termux-notification', '--title', 'Anonrode', '--content', message],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
-        )
+        cmd = [
+            'termux-notification',
+            '--title', title,
+            '--content', message,
+            '--id', '42',          # fixed ID so notifications replace each other
+            '--priority', 'high',
+        ]
+        if vibrate:
+            cmd += ['--vibrate', '500']
+        subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5)
     except Exception:
         pass
+
+def _notify_start(name, count):
+    """Notify when a batch download starts."""
+    if count > 1:
+        _notify('Anonrode — Downloading', f'{name} ({count} episodes)', vibrate=False)
+    else:
+        _notify('Anonrode — Downloading', name, vibrate=False)
 
 # ─── HELPERS ──────────────────────────────────────────────────
 def fetch_expected_size(url, session=None):

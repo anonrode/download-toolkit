@@ -21,7 +21,7 @@ from downloader import (
     download_social_ytdlp, Prefetcher, safe_print, safe_filename,
     find_direct_video, base_domain, is_streaming_link,
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
-    LiveProgress,
+    LiveProgress, _notify_start,
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
@@ -478,6 +478,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
         return
 
     safe_print(f"[*] Found {len(links)} episode(s) — saving to: {folder}")
+    _notify_start(name, len(links))
     summary = DownloadSummary()
     pf      = Prefetcher(resolve_downloadwella)
     next_direct = [None]
@@ -586,6 +587,7 @@ def extract_nkiri(url, session, ctx=None):
     ))
     if dw_links:
         safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) — saving to: {folder}")
+        _notify_start(name, len(dw_links))
         pf = Prefetcher(resolve_downloadwella)
         next_direct = [None]
         for i, ep_url in enumerate(dw_links, 1):
@@ -636,6 +638,7 @@ def extract_nkiri(url, session, ctx=None):
     ))
     if cdn_links:
         safe_print(f"[*] Found {len(cdn_links)} CDN link(s) — saving to: {folder}")
+        _notify_start(name, len(cdn_links))
         for i, cdn_url in enumerate(cdn_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
@@ -815,6 +818,7 @@ def extract_myasiantv(url, session, ctx=None):
             return
         ep_links.sort(key=lambda u: int(m.group(1)) if (m := re.search(r'episode-(\d+)', u)) else 0)
         safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
+    _notify_start(name, len(ep_links))
 
     for i, ep_url in enumerate(ep_links, 1):
         if _stopped(ctx):
@@ -877,6 +881,7 @@ def extract_dramarain(url, session, ctx=None):
                   if 'drip.waffi.cloud' in a['href']]
     if drip_links:
         safe_print(f"[*] Found {len(drip_links)} direct link(s) — saving to: {folder}")
+        _notify_start(name, len(drip_links))
         for i, (label, link) in enumerate(drip_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
@@ -899,6 +904,7 @@ def extract_dramarain(url, session, ctx=None):
                        [f'{DRAMARAIN_DOMAIN}/download', f'{DRAMAKEY_CC}/download', 'drip.waffi.cloud'])]
     if dl_links:
         safe_print(f"[*] Found {len(dl_links)} episode(s) — saving to: {folder}")
+        _notify_start(name, len(dl_links))
         for i, (label, dl_url) in enumerate(dl_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
