@@ -93,10 +93,10 @@ class LiveProgress:
 # ─── DISK SPACE ───────────────────────────────────────────────
 def get_free_space_gb():
     try:
-        if not hasattr(os, 'statvfs'):
-            return 999
-        stat = os.statvfs(BASE_DIR if IS_ANDROID else os.path.expanduser('~'))
-        return (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+        import shutil as _shutil
+        path = BASE_DIR if (IS_ANDROID and os.path.exists(BASE_DIR)) else os.path.expanduser('~')
+        usage = _shutil.disk_usage(path)
+        return usage.free / (1024 ** 3)
     except Exception:
         return 999
 
@@ -176,7 +176,9 @@ def show_history():
     print(f"{'='*50}")
 
 # ─── RESUME STATE ─────────────────────────────────────────────
-def load_resume_state():
+RESUME_LOCK = threading.Lock()
+
+def _load_resume_state_unlocked():
     try:
         os.makedirs(BASE_DIR, exist_ok=True)
         if os.path.exists(RESUME_FILE):
@@ -186,7 +188,7 @@ def load_resume_state():
         pass
     return {}
 
-def save_resume_state(state):
+def _save_resume_state_unlocked(state):
     try:
         os.makedirs(BASE_DIR, exist_ok=True)
         with open(RESUME_FILE, 'w') as f:
@@ -194,59 +196,72 @@ def save_resume_state(state):
     except Exception:
         pass
 
+def load_resume_state():
+    with RESUME_LOCK:
+        return _load_resume_state_unlocked()
+
+def save_resume_state(state):
+    with RESUME_LOCK:
+        _save_resume_state_unlocked(state)
+
 def mark_episode_done(series_url, series_name, ep_filename):
-    state = load_resume_state()
-    key = series_url
-    if key not in state:
-        state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
-    if ep_filename not in state[key]['done']:
-        state[key]['done'].append(ep_filename)
-    state[key]['current'] = None
-    save_resume_state(state)
+    with RESUME_LOCK:
+        state = _load_resume_state_unlocked()
+        key = series_url
+        if key not in state:
+            state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
+        if ep_filename not in state[key]['done']:
+            state[key]['done'].append(ep_filename)
+        state[key]['current'] = None
+        _save_resume_state_unlocked(state)
 
 def mark_episode_current(series_url, series_name, ep_filename):
-    state = load_resume_state()
-    key = series_url
-    if key not in state:
-        state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
-    state[key]['current'] = ep_filename
-    state[key]['name'] = series_name
-    save_resume_state(state)
+    with RESUME_LOCK:
+        state = _load_resume_state_unlocked()
+        key = series_url
+        if key not in state:
+            state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
+        state[key]['current'] = ep_filename
+        state[key]['name'] = series_name
+        _save_resume_state_unlocked(state)
 
 def mark_series_complete(series_url):
-    state = load_resume_state()
-    if series_url in state:
-        del state[series_url]
-        save_resume_state(state)
+    with RESUME_LOCK:
+        state = _load_resume_state_unlocked()
+        if series_url in state:
+            del state[series_url]
+            _save_resume_state_unlocked(state)
 
 def is_episode_done_in_state(series_url, ep_filename):
-    state = load_resume_state()
-    if series_url in state:
-        return ep_filename in state[series_url].get('done', [])
-    return False
+    with RESUME_LOCK:
+        state = _load_resume_state_unlocked()
+        if series_url in state:
+            return ep_filename in state[series_url].get('done', [])
+        return False
 
 def save_episode_size(series_url, ep_filename, expected_bytes):
     """Store expected file size in resume state before download starts."""
-    try:
-        state = load_resume_state()
-        if series_url not in state:
-            state[series_url] = {'name': '', 'done': [], 'failed': [], 'current': None, 'sizes': {}}
-        if 'sizes' not in state[series_url]:
-            state[series_url]['sizes'] = {}
-        # Only save if not already stored — avoid overwriting with stale value
-        if ep_filename not in state[series_url]['sizes']:
-            state[series_url]['sizes'][ep_filename] = expected_bytes
-            save_resume_state(state)
-    except Exception:
-        pass
+    with RESUME_LOCK:
+        try:
+            state = _load_resume_state_unlocked()
+            if series_url not in state:
+                state[series_url] = {'name': '', 'done': [], 'failed': [], 'current': None, 'sizes': {}}
+            if 'sizes' not in state[series_url]:
+                state[series_url]['sizes'] = {}
+            if ep_filename not in state[series_url]['sizes']:
+                state[series_url]['sizes'][ep_filename] = expected_bytes
+                _save_resume_state_unlocked(state)
+        except Exception:
+            pass
 
 def get_episode_size(series_url, ep_filename):
     """Retrieve stored expected size. Returns None if not stored."""
-    try:
-        state = load_resume_state()
-        return state.get(series_url, {}).get('sizes', {}).get(ep_filename)
-    except Exception:
-        return None
+    with RESUME_LOCK:
+        try:
+            state = _load_resume_state_unlocked()
+            return state.get(series_url, {}).get('sizes', {}).get(ep_filename)
+        except Exception:
+            return None
 
 def show_resume_list():
     state = load_resume_state()
@@ -457,8 +472,23 @@ def find_direct_video(text):
 
 def make_session():
     import requests
-    s = requests.Session()
-    s.headers.update({'User-Agent': UA_DESKTOP})
+    from requests.adapters import HTTPAdapter
+    import ssl
+    try:
+        # Disable SSL verification at session level — works on all platforms
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode    = ssl.CERT_NONE
+        adapter = HTTPAdapter()
+        adapter.init_poolmanager(10, 10, ssl_context=ctx)
+        s = requests.Session()
+        s.headers.update({'User-Agent': UA_DESKTOP})
+        s.mount('https://', adapter)
+        s.verify = False
+    except Exception:
+        s = requests.Session()
+        s.headers.update({'User-Agent': UA_DESKTOP})
+        s.verify = False
     return s
 
 # ─── TOOL INSTALLERS ──────────────────────────────────────────
@@ -647,8 +677,12 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
     progress = LiveProgress(filename, parallel=parallel_mode)
     try:
         s = make_session()
-        r = s.get(url, stream=True, timeout=30,
-                  headers={**dict(s.headers), 'Referer': get_referer_for_url(url)})
+        try:
+            r = s.get(url, stream=True, timeout=30, verify=False,
+                      headers={**dict(s.headers), 'Referer': get_referer_for_url(url)})
+        except TypeError:
+            r = s.get(url, stream=True, timeout=30,
+                      headers={**dict(s.headers), 'Referer': get_referer_for_url(url)})
         if r.status_code != 200:
             progress.fail()
             safe_print(f"[!] HTTP {r.status_code}")

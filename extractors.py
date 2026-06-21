@@ -480,55 +480,105 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
     safe_print(f"[*] Found {len(links)} episode(s) — saving to: {folder}")
     _notify_start(name, len(links))
     summary = DownloadSummary()
-    pf      = Prefetcher(resolve_downloadwella)
-    next_direct = [None]
 
-    for i, ep_url in enumerate(links, 1):
+    # Split links into batches of `parallel` size
+    # For each batch: resolve all links simultaneously, then download simultaneously
+    batch_size = max(1, parallel)
+    batches    = [links[i:i+batch_size] for i in range(0, len(links), batch_size)]
+    ep_index   = 0
+
+    for batch in batches:
         if _stopped(ctx):
             break
         _wait(ctx)
 
-        ep_name = ep_url.split('/')[-1].replace('.html', '')
-        ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
-        safe_print(f"\n[{i}/{len(links)}] {ep_name}")
+        # Filter out already-downloaded episodes in this batch
+        to_process = []
+        for ep_url in batch:
+            ep_index += 1
+            ep_name = ep_url.split('/')[-1].replace('.html', '')
+            ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
+            safe_print(f"\n[{ep_index}/{len(links)}] {ep_name}")
+            done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
+            if not done:
+                done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
+            if done:
+                safe_print(f"  [✓] Already downloaded — skipping")
+                summary.add_skipped()
+            else:
+                to_process.append((ep_url, ep_name))
 
-        # ── Early skip: check disk before hitting the file host ──
-        done, _ = already_downloaded(folder, f"{ep_name}.mp4")
-        if not done:
-            done, _ = already_downloaded(folder, f"{ep_name}.mkv")
-        if done:
-            safe_print(f"  [✓] Already downloaded — skipping")
-            summary.add_skipped()
-            # Still prefetch next so the queue stays warm
-            if i < len(links) and next_direct[0] is None:
-                pf.prefetch(links[i], session)
-                next_direct[0] = pf.get(timeout=60)
+        if not to_process:
             continue
 
-        if next_direct[0] is not None:
-            direct = next_direct[0]
-            next_direct[0] = None
-        else:
+        if len(to_process) == 1 or batch_size == 1:
+            # Single episode — use existing sequential flow
+            ep_url, ep_name = to_process[0]
             direct = resolve_downloadwella(ep_url, session)
-
-        if i < len(links):
-            pf.prefetch(links[i], session)
-
-        if direct:
-            ext   = 'mkv' if '.mkv' in direct else 'mp4'
-            fname = safe_filename(f"{ep_name}.{ext}")
-            download_file(direct, folder, fname, summary,
-                          series_url=url, series_name=name,
-                          bandwidth_limit=bw, quality=quality,
-                          current_process=cur_proc,
-                          stop_flag=stop, wait_fn=ctx.get('wait'))
-            if i < len(links):
-                next_direct[0] = pf.get(timeout=60)
+            if direct:
+                ext   = 'mkv' if '.mkv' in direct else 'mp4'
+                fname = safe_filename(f"{ep_name}.{ext}")
+                download_file(direct, folder, fname, summary,
+                              series_url=url, series_name=name,
+                              bandwidth_limit=bw, quality=quality,
+                              current_process=cur_proc,
+                              stop_flag=stop, wait_fn=ctx.get('wait'))
+            else:
+                safe_print(f"  [✗] Could not extract link")
+                summary.add_failed(ep_name)
         else:
-            safe_print(f"  [✗] Could not extract link")
-            summary.add_failed(ep_name)
-            if i < len(links):
-                next_direct[0] = pf.get(timeout=60)
+            # Multiple episodes — resolve all in parallel, then download in parallel
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            # Step 1: Resolve all links in batch simultaneously
+            safe_print(f"\n  [*] Resolving {len(to_process)} link(s)...")
+            resolved = {}
+            with ThreadPoolExecutor(max_workers=len(to_process)) as ex:
+                futures = {
+                    ex.submit(resolve_downloadwella, ep_url, session): (ep_url, ep_name)
+                    for ep_url, ep_name in to_process
+                }
+                for f in as_completed(futures):
+                    ep_url, ep_name = futures[f]
+                    try:
+                        direct = f.result()
+                        resolved[(ep_url, ep_name)] = direct
+                    except Exception:
+                        resolved[(ep_url, ep_name)] = None
+
+            # Step 2: Download all resolved links in parallel
+            items = []
+            for (ep_url, ep_name), direct in resolved.items():
+                if direct:
+                    ext = 'mkv' if '.mkv' in direct else 'mp4'
+                    items.append((direct, safe_filename(f"{ep_name}.{ext}"), ep_name))
+                else:
+                    safe_print(f"  [✗] Could not extract link: {ep_name}")
+                    summary.add_failed(ep_name)
+
+            if items:
+                per_thread_bw = (bw // len(items)) if bw else 0
+                with ThreadPoolExecutor(max_workers=len(items)) as ex:
+                    thread_futures = {}
+                    for direct, fname, ep_name in items:
+                        thread_proc = [None]
+                        f = ex.submit(
+                            download_file,
+                            direct, folder, fname, summary,
+                            series_url=url, series_name=name,
+                            bandwidth_limit=per_thread_bw, quality=quality,
+                            current_process=thread_proc,
+                            stop_flag=stop, wait_fn=ctx.get('wait'),
+                            parallel_mode=True,
+                        )
+                        thread_futures[f] = ep_name
+                    for f in as_completed(thread_futures):
+                        ep_name = thread_futures[f]
+                        try:
+                            f.result()
+                        except Exception as e:
+                            safe_print(f"  [✗] Thread error for {ep_name}: {e}")
+                            summary.add_failed(ep_name)
 
     if summary.failed == 0 and not _stopped(ctx):
         mark_series_complete(url)
@@ -541,7 +591,8 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
             if _stopped(ctx):
                 break
             safe_print(f"\n[*] Retrying: {failed_fname}")
-            ep_url = next((l for l in links if failed_fname.split('.')[0].lower() in l.lower()), None)
+            stem = re.sub(r'\.(mkv|mp4)$', '', failed_fname, flags=re.IGNORECASE).lower()
+            ep_url = next((l for l in links if stem in l.lower().replace('.html', '')), None)
             if not ep_url:
                 safe_print(f"  [!] Could not find episode URL for retry")
                 retry_summary.add_failed(failed_fname)
@@ -549,7 +600,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
             direct = resolve_downloadwella(ep_url, session)
             if direct:
                 ext = 'mkv' if '.mkv' in direct else 'mp4'
-                download_file(direct, folder, safe_filename(f"{failed_fname.rsplit('.',1)[0]}.{ext}"),
+                download_file(direct, folder, safe_filename(f"{stem}.{ext}"),
                               retry_summary, series_url=url, series_name=name,
                               bandwidth_limit=bw, quality=quality,
                               current_process=cur_proc, stop_flag=stop,
@@ -588,47 +639,116 @@ def extract_nkiri(url, session, ctx=None):
     if dw_links:
         safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) — saving to: {folder}")
         _notify_start(name, len(dw_links))
-        pf = Prefetcher(resolve_downloadwella)
-        next_direct = [None]
-        for i, ep_url in enumerate(dw_links, 1):
+
+        batch_size = max(1, parallel)
+        batches    = [dw_links[i:i+batch_size] for i in range(0, len(dw_links), batch_size)]
+        ep_index   = 0
+
+        for batch in batches:
             if _stopped(ctx): break
             _wait(ctx)
-            ep_name = ep_url.split('/')[-1].replace('.html', '')
-            ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
-            safe_print(f"\n[{i}/{len(dw_links)}] {ep_name}")
 
-            # ── Early skip ──
-            done, _ = already_downloaded(folder, f"{ep_name}.mp4")
-            if not done:
-                done, _ = already_downloaded(folder, f"{ep_name}.mkv")
-            if done:
-                safe_print(f"  [✓] Already downloaded — skipping")
-                summary.add_skipped()
-                if i < len(dw_links) and next_direct[0] is None:
-                    pf.prefetch(dw_links[i], session)
-                    next_direct[0] = pf.get(timeout=60)
+            to_process = []
+            for ep_url in batch:
+                ep_index += 1
+                ep_name = ep_url.split('/')[-1].replace('.html', '')
+                ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
+                safe_print(f"\n[{ep_index}/{len(dw_links)}] {ep_name}")
+                done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+                if not done:
+                    done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+                if done:
+                    safe_print(f"  [✓] Already downloaded — skipping")
+                    summary.add_skipped()
+                else:
+                    to_process.append((ep_url, ep_name))
+
+            if not to_process:
                 continue
 
-            direct = next_direct[0] if next_direct[0] else resolve_downloadwella(ep_url, session)
-            next_direct[0] = None
-            if i < len(dw_links):
-                pf.prefetch(dw_links[i], session)
-            if direct:
-                ext = 'mkv' if '.mkv' in direct else 'mp4'
-                download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
-                              series_url=url, series_name=name,
-                              bandwidth_limit=bw, current_process=cur_proc,
-                              stop_flag=stop, wait_fn=ctx.get('wait'))
-                if i < len(dw_links):
-                    next_direct[0] = pf.get(timeout=60)
+            if len(to_process) == 1 or batch_size == 1:
+                ep_url, ep_name = to_process[0]
+                direct = resolve_downloadwella(ep_url, session)
+                if direct:
+                    ext = 'mkv' if '.mkv' in direct else 'mp4'
+                    download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
+                                  series_url=url, series_name=name,
+                                  bandwidth_limit=bw, current_process=cur_proc,
+                                  stop_flag=stop, wait_fn=ctx.get('wait'))
+                else:
+                    safe_print(f"  [✗] Could not extract link")
+                    summary.add_failed(ep_name)
             else:
-                safe_print(f"  [x] Could not extract link")
-                summary.add_failed(ep_name)
-                if i < len(dw_links):
-                    next_direct[0] = pf.get(timeout=60)
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                safe_print(f"\n  [*] Resolving {len(to_process)} link(s)...")
+                resolved = {}
+                with ThreadPoolExecutor(max_workers=len(to_process)) as ex:
+                    futures = {
+                        ex.submit(resolve_downloadwella, ep_url, session): (ep_url, ep_name)
+                        for ep_url, ep_name in to_process
+                    }
+                    for f in as_completed(futures):
+                        ep_url, ep_name = futures[f]
+                        try:
+                            resolved[(ep_url, ep_name)] = f.result()
+                        except Exception:
+                            resolved[(ep_url, ep_name)] = None
+
+                items = []
+                for (ep_url, ep_name), direct in resolved.items():
+                    if direct:
+                        ext = 'mkv' if '.mkv' in direct else 'mp4'
+                        items.append((direct, safe_filename(f"{ep_name}.{ext}")))
+                    else:
+                        safe_print(f"  [✗] Could not extract link: {ep_name}")
+                        summary.add_failed(ep_name)
+
+                if items:
+                    per_thread_bw = (bw // len(items)) if bw else 0
+                    with ThreadPoolExecutor(max_workers=len(items)) as ex:
+                        tfutures = {}
+                        for direct, fname in items:
+                            thread_proc = [None]
+                            tfutures[ex.submit(
+                                download_file,
+                                direct, folder, fname, summary,
+                                series_url=url, series_name=name,
+                                bandwidth_limit=per_thread_bw, quality=quality,
+                                current_process=thread_proc,
+                                stop_flag=stop, wait_fn=ctx.get('wait'),
+                                parallel_mode=True,
+                            )] = fname
+                        for f in as_completed(tfutures):
+                            try:
+                                f.result()
+                            except Exception as e:
+                                safe_print(f"  [!] Thread error: {e}")
+                                summary.add_failed(tfutures[f])
+
         if summary.failed == 0 and not _stopped(ctx):
             mark_series_complete(url)
-        summary.report()
+        summary.report(name)
+        if summary.failed > 0 and not _stopped(ctx) and summary.prompt_retry():
+            retry_summary = DownloadSummary()
+            for failed_fname in summary.failed_list:
+                if _stopped(ctx): break
+                safe_print(f"\n[*] Retrying: {failed_fname}")
+                stem = re.sub(r'\.(mkv|mp4)$', '', failed_fname, flags=re.IGNORECASE).lower()
+                ep_url = next((l for l in dw_links
+                               if stem in l.lower().replace('.html', '')), None)
+                if not ep_url:
+                    retry_summary.add_failed(failed_fname)
+                    continue
+                direct = resolve_downloadwella(ep_url, session)
+                if direct:
+                    ext = 'mkv' if '.mkv' in direct else 'mp4'
+                    download_file(direct, folder, safe_filename(f"{stem}.{ext}"),
+                                  retry_summary, series_url=url, series_name=name,
+                                  bandwidth_limit=bw, current_process=cur_proc,
+                                  stop_flag=stop, wait_fn=ctx.get('wait'))
+                else:
+                    retry_summary.add_failed(failed_fname)
+            retry_summary.report(f"{name} (retry)")
         return
 
     # Priority 2: direct CDN links (newer posts)
