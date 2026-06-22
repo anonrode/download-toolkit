@@ -63,7 +63,6 @@ def setup_signal_handler():
         proc = CURRENT_PROCESS[0]
 
         if _CTRL_C_COUNT[0] == 1:
-            # Level 1 — pause
             PAUSED       = True
             STOP_FLAG[0] = False
             if proc:
@@ -76,7 +75,6 @@ def setup_signal_handler():
                 pass
 
         elif _CTRL_C_COUNT[0] == 2:
-            # Level 2 — stop batch, back to prompt
             PAUSED       = False
             STOP_FLAG[0] = True
             EXIT_FLAG[0] = False
@@ -90,7 +88,6 @@ def setup_signal_handler():
                 pass
 
         else:
-            # Level 3 — exit entirely
             PAUSED       = False
             STOP_FLAG[0] = True
             EXIT_FLAG[0] = True
@@ -103,7 +100,33 @@ def setup_signal_handler():
             except Exception:
                 pass
 
+    def sigterm_handler(sig, frame):
+        """Called when Android kills Termux from notification or app switcher."""
+        proc = CURRENT_PROCESS[0]
+        if proc:
+            try: proc.terminate()
+            except Exception: pass
+        # Release wake lock so Termux foreground service stops
+        try:
+            subprocess.run(['termux-wake-unlock'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=3)
+        except Exception:
+            pass
+        # Kill tmux session so next open starts fresh
+        try:
+            subprocess.run(['tmux', 'kill-session', '-t', 'download'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=3)
+        except Exception:
+            pass
+        sys.exit(0)
+
     signal.signal(signal.SIGINT, handler)
+    try:
+        signal.signal(signal.SIGTERM, sigterm_handler)
+    except Exception:
+        pass
 
 def wait_if_paused():
     global PAUSED, _CTRL_C_COUNT

@@ -759,21 +759,25 @@ def extract_nkiri(url, session, ctx=None):
     if cdn_links:
         safe_print(f"[*] Found {len(cdn_links)} CDN link(s) — saving to: {folder}")
         _notify_start(name, len(cdn_links))
-        for i, cdn_url in enumerate(cdn_links, 1):
-            if _stopped(ctx): break
-            _wait(ctx)
+        items = []
+        for cdn_url in cdn_links:
             fname = cdn_url.split('/')[-1]
             fname = re.sub(r'\.\([^)]+\)\.[a-z0-9]+\.mkv$', '.mkv', fname, flags=re.IGNORECASE)
             fname = safe_filename(fname)
-            safe_print(f"\n[{i}/{len(cdn_links)}] {fname}")
-            download_file(cdn_url, folder, fname, summary,
-                          series_url=url, series_name=name,
-                          bandwidth_limit=bw, current_process=cur_proc,
-                          stop_flag=stop, wait_fn=ctx.get('wait'))
-            time.sleep(0.5)
+            done, _ = already_downloaded(folder, fname, series_url=url)
+            if done:
+                summary.add_skipped()
+            else:
+                items.append((cdn_url, fname))
+        if items:
+            download_batch(items, folder, summary, parallel=parallel,
+                           series_url=url, series_name=name,
+                           bandwidth_limit=bw, quality=quality,
+                           current_process=cur_proc, stop_flag=stop,
+                           wait_fn=ctx.get('wait'))
         if summary.failed == 0 and not _stopped(ctx):
             mark_series_complete(url)
-        summary.report()
+        summary.report(name)
         return
 
     safe_print("[!] No download links found")

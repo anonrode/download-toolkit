@@ -472,23 +472,8 @@ def find_direct_video(text):
 
 def make_session():
     import requests
-    from requests.adapters import HTTPAdapter
-    import ssl
-    try:
-        # Disable SSL verification at session level — works on all platforms
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode    = ssl.CERT_NONE
-        adapter = HTTPAdapter()
-        adapter.init_poolmanager(10, 10, ssl_context=ctx)
-        s = requests.Session()
-        s.headers.update({'User-Agent': UA_DESKTOP})
-        s.mount('https://', adapter)
-        s.verify = False
-    except Exception:
-        s = requests.Session()
-        s.headers.update({'User-Agent': UA_DESKTOP})
-        s.verify = False
+    s = requests.Session()
+    s.headers.update({'User-Agent': UA_DESKTOP})
     return s
 
 # ─── TOOL INSTALLERS ──────────────────────────────────────────
@@ -588,6 +573,7 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--auto-file-renaming=false',
                 '--console-log-level=warn',
                 '--summary-interval=0',
+                '--check-certificate=false',
                 '-d', folder,
                 '-o', filename,
             ]
