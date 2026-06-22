@@ -9,6 +9,9 @@ import json
 import time
 import threading
 import subprocess
+import tempfile
+import hashlib
+from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─── SHARED STATE (imported from main) ────────────────────────
@@ -20,17 +23,129 @@ IS_ANDROID   = os.path.exists('/storage/emulated/0')
 BASE_DIR     = '/storage/emulated/0/Anon' if IS_ANDROID else os.path.join(os.path.expanduser('~'), 'Downloads', 'Anon')
 LOG_FILE     = os.path.join(BASE_DIR, '.download_history.json')
 RESUME_FILE  = os.path.join(BASE_DIR, '.resume_state.json')
+RECEIPT_FILE = os.path.join(BASE_DIR, '.download_receipts.json')
 DIAG_LOG     = os.path.join(BASE_DIR, '.diag.log')
 
 UA_DESKTOP   = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 PRINT_LOCK   = threading.Lock()
+STATE_LOCK   = threading.Lock()
 
 def safe_print(*args, **kwargs):
     with PRINT_LOCK:
         print(*args, **kwargs)
 
-# ─── INLINE LIVE PROGRESS ─────────────────────────────────────
+# ─── ATOMIC FILE WRITES (Safe state persistence) ─────────────────
+def _atomic_write_json(filepath, data):
+    """Write JSON atomically: temp file → rename."""
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(filepath), prefix='.tmp_')
+        try:
+            with os.fdopen(temp_fd, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(temp_path, filepath)  # Atomic rename
+            return True
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+            raise
+    except Exception as e:
+        safe_print(f"  [!] Failed to write {filepath}: {e}")
+        return False
+
+def _atomic_read_json(filepath, default=None):
+    """Read JSON safely, return default if corrupted."""
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        safe_print(f"  [!] Corrupted JSON: {filepath}, resetting")
+    return default or {}
+
+# ─── DOWNLOAD RECEIPT SYSTEM (Single source of truth) ─────────────
+class DownloadReceipt:
+    """Track per-episode download state precisely."""
+    
+    @staticmethod
+    def load_all():
+        """Load all receipts."""
+        return _atomic_read_json(RECEIPT_FILE, {})
+    
+    @staticmethod
+    def save_all(receipts):
+        """Save all receipts atomically."""
+        with STATE_LOCK:
+            _atomic_write_json(RECEIPT_FILE, receipts)
+    
+    @staticmethod
+    def get_receipt(episode_url):
+        """Get receipt for one episode, return status."""
+        receipts = DownloadReceipt.load_all()
+        return receipts.get(episode_url, {})
+    
+    @staticmethod
+    def mark_in_progress(episode_url, filename, expected_size=0):
+        """Mark episode as being downloaded."""
+        with STATE_LOCK:
+            receipts = DownloadReceipt.load_all()
+            receipts[episode_url] = {
+                'status': 'in-progress',
+                'filename': filename,
+                'expected_size': expected_size,
+                'timestamp': time.time()
+            }
+            DownloadReceipt.save_all(receipts)
+    
+    @staticmethod
+    def mark_complete(episode_url, filepath, actual_size):
+        """Mark episode as fully downloaded."""
+        with STATE_LOCK:
+            receipts = DownloadReceipt.load_all()
+            receipts[episode_url] = {
+                'status': 'done',
+                'filepath': filepath,
+                'filename': os.path.basename(filepath),
+                'expected_size': 0,
+                'actual_size': actual_size,
+                'timestamp': time.time()
+            }
+            DownloadReceipt.save_all(receipts)
+    
+    @staticmethod
+    def mark_failed(episode_url):
+        """Mark episode as failed."""
+        with STATE_LOCK:
+            receipts = DownloadReceipt.load_all()
+            if episode_url in receipts:
+                receipts[episode_url]['status'] = 'failed'
+                DownloadReceipt.save_all(receipts)
+    
+    @staticmethod
+    def mark_partial(episode_url, filepath, actual_size, expected_size):
+        """Mark episode as partially downloaded."""
+        with STATE_LOCK:
+            receipts = DownloadReceipt.load_all()
+            receipts[episode_url] = {
+                'status': 'partial',
+                'filepath': filepath,
+                'filename': os.path.basename(filepath),
+                'actual_size': actual_size,
+                'expected_size': expected_size,
+                'timestamp': time.time()
+            }
+            DownloadReceipt.save_all(receipts)
+    
+    @staticmethod
+    def is_complete(episode_url):
+        """Check if episode is fully downloaded."""
+        receipt = DownloadReceipt.get_receipt(episode_url)
+        return receipt.get('status') == 'done'
+
+
 class LiveProgress:
     """
     Single-line \r progress display.
@@ -179,22 +294,10 @@ def show_history():
 RESUME_LOCK = threading.Lock()
 
 def _load_resume_state_unlocked():
-    try:
-        os.makedirs(BASE_DIR, exist_ok=True)
-        if os.path.exists(RESUME_FILE):
-            with open(RESUME_FILE, 'r') as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {}
+    return _atomic_read_json(RESUME_FILE, {})
 
 def _save_resume_state_unlocked(state):
-    try:
-        os.makedirs(BASE_DIR, exist_ok=True)
-        with open(RESUME_FILE, 'w') as f:
-            json.dump(state, f, indent=2)
-    except Exception:
-        pass
+    _atomic_write_json(RESUME_FILE, state)
 
 def load_resume_state():
     with RESUME_LOCK:
@@ -387,39 +490,65 @@ def fetch_expected_size(url, session=None):
 
 def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
     """
-    Check if a file already exists and is complete.
-    If series_url given and expected size is stored, compares exact size.
-    Falls back to min_mb threshold check if no size stored.
+    Check if file is complete using receipt system (primary) + filesystem check (fallback).
+    Returns: (is_complete, filepath)
+    
+    Priority:
+    1. If series_url: check receipt system for "done" status
+    2. Else: check filesystem for file existence and size
     """
+    # Try receipt system first if we have series_url
+    if series_url:
+        if DownloadReceipt.is_complete(series_url):
+            receipt = DownloadReceipt.get_receipt(series_url)
+            path = receipt.get('filepath')
+            if path and os.path.exists(path):
+                safe_print(f"  [✓] Already downloaded (receipt verified)")
+                return True, path
+            # Receipt says done but file missing — clean up receipt and re-download
+            DownloadReceipt.mark_failed(series_url)
+    
+    # Fallback: filesystem check
     base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
     for ext in ['mp4', 'mkv', 'webm']:
         filepath = os.path.join(folder, f"{base}.{ext}")
         if os.path.exists(filepath):
             actual = os.path.getsize(filepath)
-            # Try exact size match first
             expected = get_episode_size(series_url, filename) if series_url else None
+            
             if expected:
-                # Allow 1% tolerance for rounding differences
+                # Verify against expected size (allow 1% tolerance)
                 if actual >= expected * 0.99:
+                    safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
+                    if series_url:
+                        DownloadReceipt.mark_complete(series_url, filepath, actual)
                     return True, filepath
                 else:
+                    # Incomplete
                     safe_print(f"  [!] Incomplete: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB — re-downloading")
                     try:
                         os.remove(filepath)
                     except Exception:
                         pass
+                    if series_url:
+                        DownloadReceipt.mark_partial(series_url, filepath, actual, expected)
                     return False, None
             else:
-                # Fall back to minimum size threshold
-                if actual >= min_mb * 1024 * 1024:
+                # No expected size: use min threshold (be conservative: 5MB minimum)
+                min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
+                if actual >= min_bytes:
+                    safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
+                    if series_url:
+                        DownloadReceipt.mark_complete(series_url, filepath, actual)
                     return True, filepath
                 else:
-                    safe_print(f"  [!] Incomplete file ({actual/(1024*1024):.1f}MB) — re-downloading")
+                    safe_print(f"  [!] File too small ({actual/(1024*1024):.1f}MB) — likely incomplete or corrupted")
                     try:
                         os.remove(filepath)
                     except Exception as e:
                         safe_print(f"  [!] Could not remove: {e}")
                     return False, None
+    
     return False, None
 
 def base_domain(url):
@@ -664,7 +793,7 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
     try:
         s = make_session()
         try:
-            r = s.get(url, stream=True, timeout=30, verify=False,
+            r = s.get(url, stream=True, timeout=30,
                       headers={**dict(s.headers), 'Referer': get_referer_for_url(url)})
         except TypeError:
             r = s.get(url, stream=True, timeout=30,
@@ -976,8 +1105,19 @@ def download_file(url, folder, filename, summary,
                                       stop_flag=stop_flag,
                                       parallel_mode=parallel_mode)
 
+    # Mark receipt if successful
     if result and series_url:
+        # Find the actual downloaded file and record it
+        base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
+        for ext in ['mp4', 'mkv', 'webm', 'm4a']:
+            p = os.path.join(folder, f'{base}.{ext}')
+            if os.path.exists(p):
+                actual_size = os.path.getsize(p)
+                DownloadReceipt.mark_complete(series_url, p, actual_size)
+                break
         mark_episode_done(series_url, series_name or folder, filename)
+    elif not result and series_url:
+        DownloadReceipt.mark_failed(series_url)
 
     return result
 

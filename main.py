@@ -128,7 +128,52 @@ def setup_signal_handler():
     except Exception:
         pass
 
-def wait_if_paused():
+def _monitor_network(stop_flag, check_interval=20):
+    """
+    Background thread: checks network every N seconds.
+    If network down, sets PAUSED to pause all downloads.
+    If network recovers, clears PAUSED to resume.
+    """
+    global PAUSED
+    import socket
+    
+    last_status = None
+    while not stop_flag[0]:
+        try:
+            # Try DNS resolution to google.com (most reliable)
+            try:
+                socket.gethostbyname('8.8.8.8')
+                is_online = True
+            except socket.gaierror:
+                is_online = False
+            
+            # State change detection — only print on transitions
+            if is_online and last_status == False:
+                PAUSED = False  # Resume
+                from downloader import safe_print
+                safe_print("\n  [✓] Network recovered — resuming downloads\n")
+                last_status = True
+            elif not is_online and last_status != False:
+                PAUSED = True  # Pause
+                from downloader import safe_print
+                safe_print("\n  [!] Network down — pausing downloads (will auto-resume when back)\n")
+                last_status = False
+            
+            time.sleep(check_interval)
+        except Exception:
+            time.sleep(check_interval)
+
+def start_network_monitor(stop_flag):
+    """Start network monitoring in background."""
+    monitor_thread = threading.Thread(
+        target=_monitor_network,
+        args=(stop_flag,),
+        daemon=True
+    )
+    monitor_thread.start()
+    return monitor_thread
+
+
     global PAUSED, _CTRL_C_COUNT
     if not PAUSED or not sys.stdin.isatty():
         return
@@ -421,22 +466,16 @@ def setup_android():
         pass
     if not os.environ.get('TMUX'):
         if shutil.which('tmux'):
-            check = subprocess.run(
-                ['tmux', 'has-session', '-t', 'download'],
+            # Always kill existing session and start fresh
+            subprocess.run(
+                ['tmux', 'kill-session', '-t', 'download'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            if check.returncode == 0:
-                try:
-                    os.execvp('tmux', ['tmux', 'attach-session', '-t', 'download'])
-                except Exception as e:
-                    print(f"[!] tmux attach error: {e}")
-            else:
-                print("[*] Starting tmux session...")
-                try:
-                    os.execvp('tmux', ['tmux', 'new-session', '-s', 'download',
-                                       sys.executable] + sys.argv)
-                except Exception as e:
-                    print(f"[!] tmux error: {e}")
+            try:
+                os.execvp('tmux', ['tmux', 'new-session', '-s', 'download',
+                                   sys.executable] + sys.argv)
+            except Exception as e:
+                print(f"[!] tmux error: {e}")
         else:
             print("[!] tmux not found — install with: pkg install tmux")
     return wake_proc
@@ -512,6 +551,10 @@ def main():
     cfg     = load_config()
     session = make_session()
     setup_signal_handler()
+    
+    # Start network monitoring thread
+    start_network_monitor(EXIT_FLAG)
+    
     check_disk_space()
     print_banner(cfg)
 

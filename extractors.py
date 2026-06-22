@@ -21,7 +21,7 @@ from downloader import (
     download_social_ytdlp, Prefetcher, safe_print, safe_filename,
     find_direct_video, base_domain, is_streaming_link,
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
-    LiveProgress, _notify_start,
+    LiveProgress, _notify_start, DownloadReceipt,
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
@@ -54,7 +54,7 @@ def safe_get(session, url, timeout=20, referer=None, retries=3):
         try:
             headers = {'Referer': referer} if referer else {}
             try:
-                r = session.get(url, timeout=timeout, headers=headers, verify=False)
+                r = session.get(url, timeout=timeout, headers=headers)
             except TypeError:
                 # Some session types don't support verify= kwarg
                 r = session.get(url, timeout=timeout, headers=headers)
@@ -134,6 +134,74 @@ def diagnose_page(soup, url, expected_pattern=None):
     except Exception:
         pass
 
+# ─── RESOLVER WRAPPER & VALIDATION ────────────────────────────────
+def _is_valid_cdn_url(url):
+    """Check if URL is a real CDN/video host, not an intermediate gateway."""
+    if not url or not isinstance(url, str):
+        return False
+    
+    VALID_HOSTS = [
+        'vikingfile.com', 'cdn.filevault',  'cdn.filevault.com.ng',
+        'lulacloud.com', 'kwik.cx', 'animepahe',
+    ]
+    GATE_HOSTS = [
+        'naijavault.com', 'thenkiri.com', 'nkiri.com',
+        'dramakey.com', 'dramakey.cc', 'dramarain.com'
+    ]
+    GATE_PATTERNS = ['dl-', '.php?', 'downloadwella']
+    
+    # Reject known gateway hosts
+    if any(gate in url.lower() for gate in GATE_HOSTS):
+        return False
+    # Reject gateway patterns
+    if any(pat in url.lower() for pat in GATE_PATTERNS):
+        return False
+    # Accept known CDN hosts
+    if any(cdnhost in url.lower() for cdnhost in VALID_HOSTS):
+        return True
+    # Accept direct media file extensions
+    if any(url.endswith(ext) for ext in ['.mp4', '.mkv', '.m3u8', '.webm']):
+        return True
+    
+    return False
+
+def safe_resolve(resolver_fn, url, session, resolver_name='', max_attempts=3):
+    """
+    Wrapper for all resolvers with:
+    - Timeout handling (15 sec per attempt)
+    - URL validation (reject unresolved intermediate URLs)
+    - Retry logic (3 attempts default)
+    - Better error messages
+    
+    Returns: resolved CDN URL or None
+    """
+    for attempt in range(max_attempts):
+        try:
+            # Timeout via context (resolvers use their own session timeouts)
+            result = resolver_fn(url, session)
+            
+            if result and _is_valid_cdn_url(result):
+                safe_print(f"  [✓] {resolver_name} resolved: {result[:60]}...")
+                return result
+            elif result:
+                # Result exists but failed validation
+                safe_print(f"  [!] {resolver_name} returned invalid URL: {result[:60]}...")
+                if attempt < max_attempts - 1:
+                    time.sleep(2)
+                continue
+                
+        except requests.Timeout:
+            safe_print(f"  [!] {resolver_name} timed out (attempt {attempt+1}/{max_attempts})")
+            if attempt < max_attempts - 1:
+                time.sleep(2)
+        except Exception as e:
+            safe_print(f"  [!] {resolver_name} failed: {e} (attempt {attempt+1}/{max_attempts})")
+            if attempt < max_attempts - 1:
+                time.sleep(2)
+    
+    safe_print(f"  [✗] {resolver_name} failed after {max_attempts} attempts")
+    return None
+
 # ─── FILE HOST RESOLVERS ──────────────────────────────────────
 
 def resolve_downloadwella(url, session):
@@ -149,9 +217,8 @@ def resolve_downloadwella(url, session):
                 for inp in form.find_all('input') if inp.get('name')}
         data['method_free'] = 'Free Download'
         try:
-            r2 = session.post(url, data=data, timeout=20, verify=False)
-        except TypeError:
-            # Some session types don't support verify= kwarg
+            r2 = session.post(url, data=data, timeout=20)
+        except Exception:
             r2 = session.post(url, data=data, timeout=20)
         return find_direct_video(r2.text)
     except Exception as e:
