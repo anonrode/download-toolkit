@@ -175,16 +175,20 @@ def setup_signal_handler():
 def _monitor_network(stop_flag, check_interval=20):
     """
     Background thread: checks network every N seconds.
-    If network down, sets PAUSED to pause all downloads.
-    If network recovers, clears PAUSED to resume.
+    DEBOUNCED: requires 2 consecutive checks to confirm state change.
+    Prevents rapid pause/resume flapping on flaky connections.
     """
     global PAUSED
     import socket
     
-    last_status = None
+    last_was_online = None  # None = unknown, True = online, False = offline
+    fail_count = 0
+    success_count = 0
+    DEBOUNCE_THRESHOLD = 2
+    
     while not stop_flag[0]:
         try:
-            # Try TCP connection to Google DNS — actually tests network
+            # Try TCP connection to Google DNS
             try:
                 sock = socket.create_connection(('8.8.8.8', 53), timeout=3)
                 sock.close()
@@ -192,17 +196,25 @@ def _monitor_network(stop_flag, check_interval=20):
             except OSError:
                 is_online = False
             
-            # State change detection — only print on transitions
-            if is_online and last_status == False:
-                PAUSED = False  # Resume
-                from downloader import safe_print
-                safe_print("\n  [✓] Network recovered — resuming downloads\n")
-                last_status = True
-            elif not is_online and last_status != False:
-                PAUSED = True  # Pause
-                from downloader import safe_print
-                safe_print("\n  [!] Network down — pausing downloads (will auto-resume when back)\n")
-                last_status = False
+            # Accumulate success/fail counts — only transition after threshold
+            if is_online:
+                fail_count = 0
+                success_count += 1
+                # Transition: 2+ successes and we were not online
+                if success_count >= DEBOUNCE_THRESHOLD and last_was_online != True:
+                    PAUSED = False
+                    from downloader import safe_print
+                    safe_print("\n  [✓] Network recovered — resuming downloads\n")
+                    last_was_online = True
+            else:
+                success_count = 0
+                fail_count += 1
+                # Transition: 2+ failures and we were online
+                if fail_count >= DEBOUNCE_THRESHOLD and last_was_online != False:
+                    PAUSED = True
+                    from downloader import safe_print
+                    safe_print("\n  [!] Network down — pausing downloads (will auto-resume when back)\n")
+                    last_was_online = False
             
             time.sleep(check_interval)
         except Exception:

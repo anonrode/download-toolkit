@@ -659,8 +659,17 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
                         DownloadReceipt.mark_partial(ep_key, filepath, actual, expected)
                     return False, None
             else:
-                # No expected size: be conservative with deletion
-                # Only delete if REALLY tiny (corruption indicator)
+                # No expected size stored — check receipt to see if download was in progress
+                if ep_key:
+                    receipt = DownloadReceipt.get_receipt(ep_key)
+                    # Only treat as incomplete if receipt explicitly says so
+                    # Empty receipt (no prior download attempt) falls through to size heuristic
+                    if receipt.get('status') and receipt.get('status') != 'done':
+                        safe_print(f"  [*] File may be incomplete ({actual/(1024*1024):.1f}MB) — will retry")
+                        return False, None
+                
+                # No receipt or receipt is done: use file size heuristic
+                # Only mark as complete if file meets minimum threshold
                 min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
                 if actual >= min_bytes:
                     safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
