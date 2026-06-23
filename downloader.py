@@ -25,6 +25,7 @@ LOG_FILE     = os.path.join(BASE_DIR, '.download_history.json')
 RESUME_FILE  = os.path.join(BASE_DIR, '.resume_state.json')
 RECEIPT_FILE = os.path.join(BASE_DIR, '.download_receipts.json')
 DIAG_LOG     = os.path.join(BASE_DIR, '.diag.log')
+PROGRESS_LOG = os.path.join(BASE_DIR, '.download.log')  # NEW: Download progress log
 
 UA_DESKTOP   = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -144,6 +145,33 @@ class DownloadReceipt:
         """Check if episode is fully downloaded."""
         receipt = DownloadReceipt.get_receipt(episode_url)
         return receipt.get('status') == 'done'
+
+    @staticmethod
+    def mark_paused(episode_url, filepath, progress_bytes, expected_size):
+        """Mark episode as paused (for resumable downloads)."""
+        with STATE_LOCK:
+            receipts = DownloadReceipt.load_all()
+            receipts[episode_url] = {
+                'status': 'paused',
+                'filepath': filepath,
+                'filename': os.path.basename(filepath),
+                'progress_bytes': progress_bytes,
+                'expected_size': expected_size,
+                'timestamp': time.time()
+            }
+            DownloadReceipt.save_all(receipts)
+    
+    @staticmethod
+    def get_paused_download(episode_url):
+        """Get paused download info (for resuming)."""
+        receipt = DownloadReceipt.get_receipt(episode_url)
+        if receipt.get('status') == 'paused':
+            return {
+                'filepath': receipt.get('filepath'),
+                'progress_bytes': receipt.get('progress_bytes', 0),
+                'expected_size': receipt.get('expected_size', 0)
+            }
+        return None
 
 
 class LiveProgress:
@@ -290,7 +318,81 @@ def show_history():
             print(f"    ·  {e['time']}  —  {os.path.basename(e['file'])}")
     print(f"{'='*50}")
 
-# ─── RESUME STATE ─────────────────────────────────────────────
+# ─── PROGRESS LOGGING ─────────────────────────────────────────
+def log_progress(filename, url, status, size_mb=None, reason=None, speed_mbps=None, duration_sec=None, retries=0):
+    """Log download progress to .download.log for history and debugging."""
+    try:
+        os.makedirs(BASE_DIR, exist_ok=True)
+        log_entry = {
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'filename': filename,
+            'url': url[:80],  # Truncate long URLs
+            'status': status,  # 'success', 'failed', 'paused', 'resumed'
+        }
+        if size_mb is not None:
+            log_entry['size_mb'] = round(size_mb, 1)
+        if speed_mbps is not None:
+            log_entry['speed_mbps'] = round(speed_mbps, 1)
+        if duration_sec is not None:
+            log_entry['duration_sec'] = duration_sec
+        if reason is not None:
+            log_entry['reason'] = reason
+        if retries > 0:
+            log_entry['retries'] = retries
+        
+        with open(PROGRESS_LOG, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry) + '\n')
+    except Exception:
+        pass
+
+# ─── ERROR CATEGORIZATION ─────────────────────────────────────
+def categorize_error(exception, status_code=None):
+    """
+    Categorize download/network errors.
+    Returns: (category, should_retry, description)
+    
+    Categories:
+      - 'transient': retry (timeout, connection reset, 5xx)
+      - 'permanent': don't retry (404, 410, bad URL)
+      - 'rate_limit': retry with backoff (429, 503)
+      - 'auth': don't retry (401, 403 — unless verified)
+      - 'unknown': retry cautiously
+    """
+    err_str = str(exception).lower()
+    
+    # Network timeouts — always transient
+    if any(x in err_str for x in ['timeout', 'timed out', 'read timed out']):
+        return ('transient', True, 'Network timeout — will retry')
+    
+    # Connection errors — transient
+    if any(x in err_str for x in ['connection reset', 'connection refused', 'broken pipe', 'remote end closed']):
+        return ('transient', True, 'Connection reset — will retry')
+    
+    # DNS failures — transient
+    if any(x in err_str for x in ['getaddrinfo failed', 'name resolution', 'no address']):
+        return ('transient', True, 'DNS failure — will retry')
+    
+    # HTTP status codes
+    if status_code:
+        if status_code == 404 or status_code == 410:
+            return ('permanent', False, f'Link expired ({status_code}) — skip')
+        if status_code == 401:
+            return ('auth', False, '401 Unauthorized — auth required')
+        if status_code == 403:
+            return ('auth', False, '403 Forbidden — may need verification')
+        if status_code == 429:
+            return ('rate_limit', True, '429 Too Many Requests — back off and retry')
+        if status_code >= 500 and status_code < 600:
+            return ('transient', True, f'{status_code} Server error — will retry')
+        if status_code >= 400 and status_code < 500:
+            return ('permanent', False, f'{status_code} Client error — skip')
+        if status_code == 200:
+            return ('success', False, 'OK')
+    
+    # Generic fallback
+    return ('unknown', True, 'Unknown error — will retry')
+
+
 RESUME_LOCK = threading.Lock()
 
 def _load_resume_state_unlocked():
@@ -652,8 +754,19 @@ def _update_ytdlp():
 # ─── DOWNLOAD BACKENDS ────────────────────────────────────────
 def download_with_aria2c(url, folder, filename, summary,
                          bandwidth_limit=0, current_process=None,
-                         retries=3, stop_flag=None, parallel_mode=False):
+                         retries=3, stop_flag=None, parallel_mode=False,
+                         series_url=None, config=None):
+    """
+    Smart downloader with resumable downloads support.
+    
+    If a partial file exists:
+      - Check receipt system
+      - Use aria2c's --continue flag to resume from byte offset
+      - Much faster than starting over
+    """
     import shutil
+    config = config or {}  # Config dict with resolver_timeout, etc.
+    
     has_aria2c = shutil.which('aria2c') is not None
     if not has_aria2c:
         if not _install_aria2c():
@@ -666,6 +779,17 @@ def download_with_aria2c(url, folder, filename, summary,
     session_file  = os.path.join(folder, f'.aria2_{safe_fname}.txt')
     filepath      = os.path.join(folder, filename)
     referer       = get_referer_for_url(url)
+    
+    # Check if this is a resumed download
+    is_resuming = False
+    if series_url:
+        paused_info = DownloadReceipt.get_paused_download(series_url)
+        if paused_info and os.path.exists(paused_info['filepath']):
+            current_size = os.path.getsize(paused_info['filepath'])
+            expected_size = paused_info.get('expected_size', 0)
+            if expected_size > 0 and current_size < expected_size:
+                is_resuming = True
+                safe_print(f"  [*] Resuming from {current_size/(1024*1024):.1f}MB of {expected_size/(1024*1024):.1f}MB")
 
     def _cleanup_session_file(sf):
         try:
@@ -675,15 +799,16 @@ def download_with_aria2c(url, folder, filename, summary,
             pass
 
     progress = LiveProgress(filename, parallel=parallel_mode)
+    start_time = time.time()
 
     for attempt in range(retries):
         try:
             cmd = [
                 'aria2c',
-                '-c',
+                '-c',  # Continue/resume support (key for resumable downloads!)
                 '--max-tries=0',
                 '--retry-wait=30',
-                '--timeout=120',
+                '--timeout=' + str(config.get('download_timeout', 120)),
                 '--connect-timeout=60',
                 '--lowest-speed-limit=0',
                 '--save-session', session_file,

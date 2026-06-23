@@ -202,6 +202,25 @@ def safe_resolve(resolver_fn, url, session, resolver_name='', max_attempts=3):
     safe_print(f"  [✗] {resolver_name} failed after {max_attempts} attempts")
     return None
 
+def try_resolver_chain(resolvers, url, session):
+    """
+    Try a chain of resolvers in order. Return first valid result.
+    
+    resolvers: list of (resolver_fn, name) tuples
+    
+    Example:
+      try_resolver_chain([
+          (resolve_lulacloud, 'LulaCloud'),
+          (resolve_vikingfile, 'VikingFile'),
+          (resolve_downloadwella, 'Downloadwella'),
+      ], url, session)
+    """
+    for resolver_fn, resolver_name in resolvers:
+        result = safe_resolve(resolver_fn, url, session, resolver_name)
+        if result:
+            return result
+    return None
+
 # ─── FILE HOST RESOLVERS ──────────────────────────────────────
 
 def resolve_downloadwella(url, session):

@@ -28,10 +28,33 @@ EXIT_FLAG       = [False]   # exits entire script — REPL loop checks this
 
 # ─── CONFIG ───────────────────────────────────────────────────
 DEFAULT_CONFIG = {
-    'quality':        '480p',
-    'parallel':       1,
-    'bandwidth':      0,
-    'disabled_sites': [],
+    # Download settings
+    'quality':              '480p',
+    'parallel':             1,
+    'bandwidth':            0,
+    'disabled_sites':       [],
+    
+    # Network monitoring
+    'network_check_interval': 20,      # Check network every N seconds
+    
+    # Resolver settings
+    'resolver_timeout':     15,         # Max seconds per resolver attempt
+    'resolver_retries':     3,          # Max attempts per resolver
+    'resolver_backoff_sec': 2,          # Wait between resolver retries
+    
+    # Download settings
+    'download_retries':     3,          # Max attempts per download
+    'download_timeout':     120,        # HTTP timeout in seconds
+    'min_file_size_mb':     5,          # Minimum file size to consider complete
+    'resumable_downloads':  True,       # Resume from byte offset on reconnect
+    
+    # Parallel download settings
+    'parallel_mode':        'queue',    # 'queue' (recommended) or 'thread' (legacy)
+    'resolver_threads':     4,          # Parallel resolvers when using queue mode
+    
+    # Logging
+    'enable_progress_log':  True,       # Log downloads to .download.log
+    'log_level':            'info',     # 'debug', 'info', 'warn'
 }
 
 def load_config():
@@ -173,7 +196,7 @@ def start_network_monitor(stop_flag):
     monitor_thread.start()
     return monitor_thread
 
-
+def wait_if_paused():
     global PAUSED, _CTRL_C_COUNT
     if not PAUSED or not sys.stdin.isatty():
         return
