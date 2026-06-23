@@ -26,40 +26,12 @@ CURRENT_PROCESS = [None]
 STOP_FLAG       = [False]   # stops current batch — extractor loops check this
 EXIT_FLAG       = [False]   # exits entire script — REPL loop checks this
 
-# Track current download so we can mark_paused() on Ctrl+C
-CURRENT_SERIES_URL   = [None]
-CURRENT_FILEPATH     = [None]
-CURRENT_EXPECTED_SIZE = [0]
-
 # ─── CONFIG ───────────────────────────────────────────────────
 DEFAULT_CONFIG = {
-    # Download settings
-    'quality':              '480p',
-    'parallel':             1,
-    'bandwidth':            0,
-    'disabled_sites':       [],
-    
-    # Network monitoring
-    'network_check_interval': 20,      # Check network every N seconds
-    
-    # Resolver settings
-    'resolver_timeout':     15,         # Max seconds per resolver attempt
-    'resolver_retries':     3,          # Max attempts per resolver
-    'resolver_backoff_sec': 2,          # Wait between resolver retries
-    
-    # Download settings
-    'download_retries':     3,          # Max attempts per download
-    'download_timeout':     120,        # HTTP timeout in seconds
-    'min_file_size_mb':     5,          # Minimum file size to consider complete
-    'resumable_downloads':  True,       # Resume from byte offset on reconnect
-    
-    # Parallel download settings
-    'parallel_mode':        'queue',    # 'queue' (recommended) or 'thread' (legacy)
-    'resolver_threads':     4,          # Parallel resolvers when using queue mode
-    
-    # Logging
-    'enable_progress_log':  True,       # Log downloads to .download.log
-    'log_level':            'info',     # 'debug', 'info', 'warn'
+    'quality':        '480p',
+    'parallel':       1,
+    'bandwidth':      0,
+    'disabled_sites': [],
 }
 
 def load_config():
@@ -84,7 +56,6 @@ def save_config(cfg):
 # ─── SIGNAL HANDLING (Ctrl+C) ─────────────────────────────────
 def setup_signal_handler():
     global PAUSED, _CTRL_C_COUNT, CURRENT_PROCESS, STOP_FLAG, EXIT_FLAG
-    global CURRENT_SERIES_URL, CURRENT_FILEPATH, CURRENT_EXPECTED_SIZE
 
     def handler(sig, frame):
         global PAUSED
@@ -97,21 +68,6 @@ def setup_signal_handler():
             if proc:
                 try: proc.terminate()
                 except Exception: pass
-            
-            # Mark download as paused in receipt system
-            if CURRENT_SERIES_URL[0] and CURRENT_FILEPATH[0]:
-                try:
-                    from downloader import DownloadReceipt
-                    progress_bytes = os.path.getsize(CURRENT_FILEPATH[0]) if os.path.exists(CURRENT_FILEPATH[0]) else 0
-                    DownloadReceipt.mark_paused(
-                        CURRENT_SERIES_URL[0],
-                        CURRENT_FILEPATH[0],
-                        progress_bytes,
-                        CURRENT_EXPECTED_SIZE[0]
-                    )
-                except Exception:
-                    pass
-            
             try:
                 sys.stdout.write('\n\n  [pause] Paused — press Enter to resume, Ctrl+C again to stop batch\n\n')
                 sys.stdout.flush()
@@ -171,64 +127,6 @@ def setup_signal_handler():
         signal.signal(signal.SIGTERM, sigterm_handler)
     except Exception:
         pass
-
-def _monitor_network(stop_flag, check_interval=20):
-    """
-    Background thread: checks network every N seconds.
-    DEBOUNCED: requires 2 consecutive checks to confirm state change.
-    Prevents rapid pause/resume flapping on flaky connections.
-    """
-    global PAUSED
-    import socket
-    
-    last_was_online = None  # None = unknown, True = online, False = offline
-    fail_count = 0
-    success_count = 0
-    DEBOUNCE_THRESHOLD = 2
-    
-    while not stop_flag[0]:
-        try:
-            # Try TCP connection to Google DNS
-            try:
-                sock = socket.create_connection(('8.8.8.8', 53), timeout=3)
-                sock.close()
-                is_online = True
-            except OSError:
-                is_online = False
-            
-            # Accumulate success/fail counts — only transition after threshold
-            if is_online:
-                fail_count = 0
-                success_count += 1
-                # Transition: 2+ successes and we were not online
-                if success_count >= DEBOUNCE_THRESHOLD and last_was_online != True:
-                    PAUSED = False
-                    from downloader import safe_print
-                    safe_print("\n  [✓] Network recovered — resuming downloads\n")
-                    last_was_online = True
-            else:
-                success_count = 0
-                fail_count += 1
-                # Transition: 2+ failures and we were online
-                if fail_count >= DEBOUNCE_THRESHOLD and last_was_online != False:
-                    PAUSED = True
-                    from downloader import safe_print
-                    safe_print("\n  [!] Network down — pausing downloads (will auto-resume when back)\n")
-                    last_was_online = False
-            
-            time.sleep(check_interval)
-        except Exception:
-            time.sleep(check_interval)
-
-def start_network_monitor(stop_flag):
-    """Start network monitoring in background."""
-    monitor_thread = threading.Thread(
-        target=_monitor_network,
-        args=(stop_flag,),
-        daemon=True
-    )
-    monitor_thread.start()
-    return monitor_thread
 
 def wait_if_paused():
     global PAUSED, _CTRL_C_COUNT
@@ -331,12 +229,12 @@ def queue_run(session, cfg):
     print(f"\n[*] Starting queue — {len(q)} item(s)")
     from extractors import process_link_queue
     ctx = _make_ctx(cfg)
-    completed = set()
+    completed = []
     for url in q:
         if STOP_FLAG[0]:
             break
         process_link_queue([url], session, ctx)
-        completed.add(url)
+        completed.append(url)
     remaining = [u for u in q if u not in completed]
     save_queue(remaining)
     if not remaining:
@@ -523,16 +421,22 @@ def setup_android():
         pass
     if not os.environ.get('TMUX'):
         if shutil.which('tmux'):
-            # Always kill existing session and start fresh
-            subprocess.run(
-                ['tmux', 'kill-session', '-t', 'download'],
+            check = subprocess.run(
+                ['tmux', 'has-session', '-t', 'download'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            try:
-                os.execvp('tmux', ['tmux', 'new-session', '-s', 'download',
-                                   sys.executable] + sys.argv)
-            except Exception as e:
-                print(f"[!] tmux error: {e}")
+            if check.returncode == 0:
+                try:
+                    os.execvp('tmux', ['tmux', 'attach-session', '-t', 'download'])
+                except Exception as e:
+                    print(f"[!] tmux attach error: {e}")
+            else:
+                print("[*] Starting tmux session...")
+                try:
+                    os.execvp('tmux', ['tmux', 'new-session', '-s', 'download',
+                                       sys.executable] + sys.argv)
+                except Exception as e:
+                    print(f"[!] tmux error: {e}")
         else:
             print("[!] tmux not found — install with: pkg install tmux")
     return wake_proc
@@ -608,11 +512,6 @@ def main():
     cfg     = load_config()
     session = make_session()
     setup_signal_handler()
-    
-    # Network monitoring disabled — socket operations block on Android/Termux
-    # Downloads will continue uninterrupted without pause/resume checks
-    # start_network_monitor(EXIT_FLAG)
-    
     check_disk_space()
     print_banner(cfg)
 
