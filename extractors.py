@@ -910,9 +910,9 @@ def extract_9jarocks(url, session, ctx=None):
             slug_part = lf_url.rstrip('/').split('/')[-1]
             fname = safe_filename(re.sub(r'[^\w\s.-]', '', slug_part))
         safe_print(f"\n[{i}/{len(lf_links)}] {fname}")
-        done, _ = already_downloaded(folder, fname + '.mp4')
+        done, _ = already_downloaded(folder, fname + '.mp4', series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, fname + '.mkv')
+            done, _ = already_downloaded(folder, fname + '.mkv', series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -921,6 +921,7 @@ def extract_9jarocks(url, session, ctx=None):
         if direct:
             ext = 'mkv' if '.mkv' in direct else 'mp4'
             download_file(direct, folder, safe_filename(f"{fname}.{ext}"), summary,
+                          series_url=url, series_name=name,
                           bandwidth_limit=bw, current_process=cur_proc,
                           stop_flag=stop, wait_fn=ctx.get('wait'))
         else:
@@ -1017,7 +1018,6 @@ def extract_myasiantv(url, session, ctx=None):
             return
         soup      = BeautifulSoup(r.text, 'html.parser')
         show_slug = re.sub(r'-\d{4}.*$', '', slug)
-        from urllib.parse import urljoin
         ep_links  = list(dict.fromkeys(
             urljoin(bd, a['href']) for a in soup.find_all('a', href=True)
             if ('episode-' in a['href'] and show_slug in a['href']
@@ -1036,7 +1036,7 @@ def extract_myasiantv(url, session, ctx=None):
         _wait(ctx)
         ep_name = ep_url.rstrip('/').split('/')[-1]
         safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
-        done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+        done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -1058,6 +1058,7 @@ def extract_myasiantv(url, session, ctx=None):
         direct = resolve_embed(src, session)
         if direct:
             download_file(direct, folder, safe_filename(f"{ep_name}.mp4"), summary,
+                          series_url=url, series_name=name,
                           bandwidth_limit=bw, quality=quality,
                           current_process=cur_proc, stop_flag=stop, wait_fn=ctx.get('wait'))
         else:
@@ -1097,12 +1098,13 @@ def extract_dramarain(url, session, ctx=None):
             _wait(ctx)
             fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
             safe_print(f"\n[{i}/{len(drip_links)}] {fname}")
-            done, _ = already_downloaded(folder, fname)
+            done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
                 continue
             download_file(link, folder, fname, summary,
+                          series_url=url, series_name=name,
                           bandwidth_limit=bw, current_process=cur_proc,
                           stop_flag=stop, wait_fn=ctx.get('wait'))
         summary.report()
@@ -1120,7 +1122,7 @@ def extract_dramarain(url, session, ctx=None):
             _wait(ctx)
             fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
             safe_print(f"\n[{i}/{len(dl_links)}] {fname}")
-            done, _ = already_downloaded(folder, fname)
+            done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
@@ -1132,6 +1134,7 @@ def extract_dramarain(url, session, ctx=None):
                 direct = resolve_drip_waffi(dl_url, session)
             if direct:
                 download_file(direct, folder, fname, summary,
+                              series_url=url, series_name=name,
                               bandwidth_limit=bw, current_process=cur_proc,
                               stop_flag=stop, wait_fn=ctx.get('wait'))
             else:
@@ -1701,7 +1704,7 @@ def _yt_playlist_items_prompt(count):
             if len(parts) != 2:
                 raise ValueError("need exactly two numbers")
             start, end = int(parts[0]), int(parts[1])
-            if start >= end:
+            if start > end:
                 raise ValueError("start must be less than end")
             return r
         except Exception:

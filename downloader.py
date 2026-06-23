@@ -50,7 +50,7 @@ def _atomic_write_json(filepath, data):
         except Exception:
             try:
                 os.unlink(temp_path)
-            except:
+            except Exception:
                 pass
             raise
     except Exception as e:
@@ -275,8 +275,7 @@ def load_history():
 def save_history(history):
     try:
         os.makedirs(BASE_DIR, exist_ok=True)
-        with open(LOG_FILE, 'w') as f:
-            json.dump(history, f, indent=2)
+        _atomic_write_json(LOG_FILE, history)
     except Exception:
         pass
 
@@ -596,21 +595,38 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
     Returns: (is_complete, filepath)
     
     Priority:
-    1. If series_url: check receipt system for "done" status
-    2. Else: check filesystem for file existence and size
+    1. If series_url: check receipt for "paused" status FIRST (don't delete paused files!)
+    2. If series_url: check receipt for "done" status
+    3. Else: check filesystem for file existence and size
     """
-    # Try receipt system first if we have series_url
-    if series_url:
-        if DownloadReceipt.is_complete(series_url):
-            receipt = DownloadReceipt.get_receipt(series_url)
+    # Per-episode receipt key: series_url + filename avoids all episodes sharing one slot
+    ep_key = f"{series_url}:{filename}" if series_url else None
+
+    # CRITICAL: Check receipt for "paused" FIRST (before any file checks)
+    if ep_key:
+        receipt = DownloadReceipt.get_receipt(ep_key)
+        
+        # If paused: return paused info WITHOUT deleting the file
+        if receipt.get('status') == 'paused':
+            filepath = receipt.get('filepath')
+            if filepath and os.path.exists(filepath):
+                actual = os.path.getsize(filepath)
+                expected = receipt.get('expected_size', 0)
+                safe_print(f"  [*] Paused: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB")
+                return False, None  # Not complete, but don't delete!
+            # File missing but receipt says paused - clear it
+            DownloadReceipt.mark_failed(ep_key)
+        
+        # If done: return complete
+        if receipt.get('status') == 'done':
             path = receipt.get('filepath')
             if path and os.path.exists(path):
                 safe_print(f"  [✓] Already downloaded (receipt verified)")
                 return True, path
             # Receipt says done but file missing — clean up receipt and re-download
-            DownloadReceipt.mark_failed(series_url)
+            DownloadReceipt.mark_failed(ep_key)
     
-    # Fallback: filesystem check
+    # Fallback: filesystem check (for files without receipt records)
     base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
     for ext in ['mp4', 'mkv', 'webm']:
         filepath = os.path.join(folder, f"{base}.{ext}")
@@ -622,28 +638,37 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
                 # Verify against expected size (allow 1% tolerance)
                 if actual >= expected * 0.99:
                     safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
-                    if series_url:
-                        DownloadReceipt.mark_complete(series_url, filepath, actual)
+                    if ep_key:
+                        DownloadReceipt.mark_complete(ep_key, filepath, actual)
                     return True, filepath
                 else:
-                    # Incomplete
+                    # Incomplete file — only delete if genuinely broken, NOT paused
+                    # Check again if receipt says paused (shouldn't reach here but be safe)
+                    if ep_key:
+                        receipt = DownloadReceipt.get_receipt(ep_key)
+                        if receipt.get('status') == 'paused':
+                            safe_print(f"  [*] Resuming: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB")
+                            return False, None  # Don't delete!
+                    
                     safe_print(f"  [!] Incomplete: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB — re-downloading")
                     try:
                         os.remove(filepath)
                     except Exception:
                         pass
-                    if series_url:
-                        DownloadReceipt.mark_partial(series_url, filepath, actual, expected)
+                    if ep_key:
+                        DownloadReceipt.mark_partial(ep_key, filepath, actual, expected)
                     return False, None
             else:
-                # No expected size: use min threshold (be conservative: 5MB minimum)
+                # No expected size: be conservative with deletion
+                # Only delete if REALLY tiny (corruption indicator)
                 min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
                 if actual >= min_bytes:
                     safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
-                    if series_url:
-                        DownloadReceipt.mark_complete(series_url, filepath, actual)
+                    if ep_key:
+                        DownloadReceipt.mark_complete(ep_key, filepath, actual)
                     return True, filepath
                 else:
+                    # File too small - likely corrupted, safe to delete
                     safe_print(f"  [!] File too small ({actual/(1024*1024):.1f}MB) — likely incomplete or corrupted")
                     try:
                         os.remove(filepath)
@@ -780,15 +805,14 @@ def download_with_aria2c(url, folder, filename, summary,
     filepath      = os.path.join(folder, filename)
     referer       = get_referer_for_url(url)
     
-    # Check if this is a resumed download
-    is_resuming = False
+    # Check if this is a resumed download (for user-facing print only)
     if series_url:
-        paused_info = DownloadReceipt.get_paused_download(series_url)
+        ep_key = f"{series_url}:{filename}"
+        paused_info = DownloadReceipt.get_paused_download(ep_key)
         if paused_info and os.path.exists(paused_info['filepath']):
             current_size = os.path.getsize(paused_info['filepath'])
             expected_size = paused_info.get('expected_size', 0)
             if expected_size > 0 and current_size < expected_size:
-                is_resuming = True
                 safe_print(f"  [*] Resuming from {current_size/(1024*1024):.1f}MB of {expected_size/(1024*1024):.1f}MB")
 
     def _cleanup_session_file(sf):
@@ -917,12 +941,8 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
     progress = LiveProgress(filename, parallel=parallel_mode)
     try:
         s = make_session()
-        try:
-            r = s.get(url, stream=True, timeout=30,
-                      headers={**dict(s.headers), 'Referer': get_referer_for_url(url)})
-        except TypeError:
-            r = s.get(url, stream=True, timeout=30,
-                      headers={**dict(s.headers), 'Referer': get_referer_for_url(url)})
+        r = s.get(url, stream=True, timeout=30,
+                  headers={**dict(s.headers), 'Referer': get_referer_for_url(url)})
         if r.status_code != 200:
             progress.fail()
             safe_print(f"[!] HTTP {r.status_code}")
@@ -1233,16 +1253,18 @@ def download_file(url, folder, filename, summary,
     # Mark receipt if successful
     if result and series_url:
         # Find the actual downloaded file and record it
+        ep_key = f"{series_url}:{filename}"
         base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
         for ext in ['mp4', 'mkv', 'webm', 'm4a']:
             p = os.path.join(folder, f'{base}.{ext}')
             if os.path.exists(p):
                 actual_size = os.path.getsize(p)
-                DownloadReceipt.mark_complete(series_url, p, actual_size)
+                DownloadReceipt.mark_complete(ep_key, p, actual_size)
                 break
         mark_episode_done(series_url, series_name or folder, filename)
     elif not result and series_url:
-        DownloadReceipt.mark_failed(series_url)
+        ep_key = f"{series_url}:{filename}"
+        DownloadReceipt.mark_failed(ep_key)
 
     return result
 

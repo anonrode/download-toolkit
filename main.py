@@ -26,6 +26,11 @@ CURRENT_PROCESS = [None]
 STOP_FLAG       = [False]   # stops current batch — extractor loops check this
 EXIT_FLAG       = [False]   # exits entire script — REPL loop checks this
 
+# Track current download so we can mark_paused() on Ctrl+C
+CURRENT_SERIES_URL   = [None]
+CURRENT_FILEPATH     = [None]
+CURRENT_EXPECTED_SIZE = [0]
+
 # ─── CONFIG ───────────────────────────────────────────────────
 DEFAULT_CONFIG = {
     # Download settings
@@ -79,6 +84,7 @@ def save_config(cfg):
 # ─── SIGNAL HANDLING (Ctrl+C) ─────────────────────────────────
 def setup_signal_handler():
     global PAUSED, _CTRL_C_COUNT, CURRENT_PROCESS, STOP_FLAG, EXIT_FLAG
+    global CURRENT_SERIES_URL, CURRENT_FILEPATH, CURRENT_EXPECTED_SIZE
 
     def handler(sig, frame):
         global PAUSED
@@ -91,6 +97,21 @@ def setup_signal_handler():
             if proc:
                 try: proc.terminate()
                 except Exception: pass
+            
+            # Mark download as paused in receipt system
+            if CURRENT_SERIES_URL[0] and CURRENT_FILEPATH[0]:
+                try:
+                    from downloader import DownloadReceipt
+                    progress_bytes = os.path.getsize(CURRENT_FILEPATH[0]) if os.path.exists(CURRENT_FILEPATH[0]) else 0
+                    DownloadReceipt.mark_paused(
+                        CURRENT_SERIES_URL[0],
+                        CURRENT_FILEPATH[0],
+                        progress_bytes,
+                        CURRENT_EXPECTED_SIZE[0]
+                    )
+                except Exception:
+                    pass
+            
             try:
                 sys.stdout.write('\n\n  [pause] Paused — press Enter to resume, Ctrl+C again to stop batch\n\n')
                 sys.stdout.flush()
@@ -163,11 +184,12 @@ def _monitor_network(stop_flag, check_interval=20):
     last_status = None
     while not stop_flag[0]:
         try:
-            # Try DNS resolution to google.com (most reliable)
+            # Try TCP connection to Google DNS — actually tests network
             try:
-                socket.gethostbyname('8.8.8.8')
+                sock = socket.create_connection(('8.8.8.8', 53), timeout=3)
+                sock.close()
                 is_online = True
-            except socket.gaierror:
+            except OSError:
                 is_online = False
             
             # State change detection — only print on transitions
@@ -297,12 +319,12 @@ def queue_run(session, cfg):
     print(f"\n[*] Starting queue — {len(q)} item(s)")
     from extractors import process_link_queue
     ctx = _make_ctx(cfg)
-    completed = []
+    completed = set()
     for url in q:
         if STOP_FLAG[0]:
             break
         process_link_queue([url], session, ctx)
-        completed.append(url)
+        completed.add(url)
     remaining = [u for u in q if u not in completed]
     save_queue(remaining)
     if not remaining:

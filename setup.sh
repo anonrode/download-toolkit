@@ -91,7 +91,20 @@ info "Setting up auto-launch..."
 # Backup existing .bashrc if it has content beyond our launcher
 if [ -f "$HOME/.bashrc" ]; then
     existing=$(cat "$HOME/.bashrc")
-    if [ "$existing" != 'tmux kill-session -t download 2>/dev/null; cd ~/download-toolkit && git pull -q && python main.py' ] && [ -n "$existing" ]; then
+    our_content=$(cat << 'CHECKEOF'
+# Anonrode auto-launch
+if [ -n "$TMUX" ]; then
+    # Already inside tmux — shell is ready, do nothing
+    :
+else
+    # Kill any existing session and start fresh
+    tmux kill-session -t download 2>/dev/null
+    cd ~/download-toolkit && git pull -q
+    tmux new-session -s download python main.py
+fi
+CHECKEOF
+)
+    if [ "$existing" != "$our_content" ] && [ -n "$existing" ]; then
         cp "$HOME/.bashrc" "$HOME/.bashrc.backup"
         info "Existing .bashrc backed up to .bashrc.backup"
     fi
