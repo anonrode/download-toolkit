@@ -609,8 +609,9 @@ def main():
     session = make_session()
     setup_signal_handler()
     
-    # Start network monitoring thread
-    start_network_monitor(EXIT_FLAG)
+    # Network monitoring disabled — socket operations block on Android/Termux
+    # Downloads will continue uninterrupted without pause/resume checks
+    # start_network_monitor(EXIT_FLAG)
     
     check_disk_space()
     print_banner(cfg)

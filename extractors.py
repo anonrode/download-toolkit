@@ -740,9 +740,9 @@ def extract_nkiri(url, session, ctx=None):
                 ep_name = ep_url.split('/')[-1].replace('.html', '')
                 ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
                 safe_print(f"\n[{ep_index}/{len(dw_links)}] {ep_name}")
-                done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+                done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
                 if not done:
-                    done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+                    done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
                 if done:
                     safe_print(f"  [✓] Already downloaded — skipping")
                     summary.add_skipped()
@@ -959,9 +959,9 @@ def extract_naijaprey(url, session, ctx=None):
         safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
 
         # Early skip before hitting the intermediate page
-        done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+        done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+            done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -1230,9 +1230,9 @@ def extract_naijavault(url, session, ctx=None):
         safe_print(f"\n[A {i}/{len(format_a)}] {ep_label}")
 
         # ── Early skip: check before hitting the dl page ──
-        done, _ = already_downloaded(folder, f"{ep_label}.mkv")
+        done, _ = already_downloaded(folder, f"{ep_label}.mkv", series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, f"{ep_label}.mp4")
+            done, _ = already_downloaded(folder, f"{ep_label}.mp4", series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -1325,11 +1325,11 @@ def extract_naijavault(url, session, ctx=None):
             ep_name    = safe_filename(fname_slug or f"{ep_label}.mkv")
 
             # ── Early skip ──
-            done, _ = already_downloaded(folder, ep_name)
+            done, _ = already_downloaded(folder, ep_name, series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_label}.mkv")
+                done, _ = already_downloaded(folder, f"{ep_label}.mkv", series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_label}.mp4")
+                done, _ = already_downloaded(folder, f"{ep_label}.mp4", series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
@@ -1449,7 +1449,7 @@ def extract_anitaku(url, session, ctx=None):
             _wait(ctx)
             ep_name = safe_filename(ep_url.rstrip('/').split('/')[-1])
             safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
-            done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+            done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
@@ -1584,9 +1584,9 @@ def extract_plutomovies(url, session, ctx=None):
             safe_print(f"\n  [{i}/{len(all_eps)}] {ep_name}")
 
             # Early skip before hitting the episode page
-            done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+            done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+                done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
