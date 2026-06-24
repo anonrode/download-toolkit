@@ -21,7 +21,7 @@ from downloader import (
     download_social_ytdlp, Prefetcher, safe_print, safe_filename,
     find_direct_video, base_domain, is_streaming_link,
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
-    LiveProgress, _notify_start,
+    LiveProgress, _notify_start, DownloadReceipt,
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
@@ -54,7 +54,7 @@ def safe_get(session, url, timeout=20, referer=None, retries=3):
         try:
             headers = {'Referer': referer} if referer else {}
             try:
-                r = session.get(url, timeout=timeout, headers=headers, verify=False)
+                r = session.get(url, timeout=timeout, headers=headers)
             except TypeError:
                 # Some session types don't support verify= kwarg
                 r = session.get(url, timeout=timeout, headers=headers)
@@ -134,6 +134,93 @@ def diagnose_page(soup, url, expected_pattern=None):
     except Exception:
         pass
 
+# ─── RESOLVER WRAPPER & VALIDATION ────────────────────────────────
+def _is_valid_cdn_url(url):
+    """Check if URL is a real CDN/video host, not an intermediate gateway."""
+    if not url or not isinstance(url, str):
+        return False
+    
+    VALID_HOSTS = [
+        'vikingfile.com', 'cdn.filevault',  'cdn.filevault.com.ng',
+        'lulacloud.com', 'kwik.cx', 'animepahe',
+    ]
+    GATE_HOSTS = [
+        'naijavault.com', 'thenkiri.com', 'nkiri.com',
+        'dramakey.com', 'dramakey.cc', 'dramarain.com'
+    ]
+    GATE_PATTERNS = ['dl-', '.php?', 'downloadwella']
+    
+    # Reject known gateway hosts
+    if any(gate in url.lower() for gate in GATE_HOSTS):
+        return False
+    # Reject gateway patterns
+    if any(pat in url.lower() for pat in GATE_PATTERNS):
+        return False
+    # Accept known CDN hosts
+    if any(cdnhost in url.lower() for cdnhost in VALID_HOSTS):
+        return True
+    # Accept direct media file extensions
+    if any(url.endswith(ext) for ext in ['.mp4', '.mkv', '.m3u8', '.webm']):
+        return True
+    
+    return False
+
+def safe_resolve(resolver_fn, url, session, resolver_name='', max_attempts=3):
+    """
+    Wrapper for all resolvers with:
+    - Timeout handling (15 sec per attempt)
+    - URL validation (reject unresolved intermediate URLs)
+    - Retry logic (3 attempts default)
+    - Better error messages
+    
+    Returns: resolved CDN URL or None
+    """
+    for attempt in range(max_attempts):
+        try:
+            # Timeout via context (resolvers use their own session timeouts)
+            result = resolver_fn(url, session)
+            
+            if result and _is_valid_cdn_url(result):
+                safe_print(f"  [✓] {resolver_name} resolved: {result[:60]}...")
+                return result
+            elif result:
+                # Result exists but failed validation
+                safe_print(f"  [!] {resolver_name} returned invalid URL: {result[:60]}...")
+                if attempt < max_attempts - 1:
+                    time.sleep(2)
+                continue
+                
+        except requests.Timeout:
+            safe_print(f"  [!] {resolver_name} timed out (attempt {attempt+1}/{max_attempts})")
+            if attempt < max_attempts - 1:
+                time.sleep(2)
+        except Exception as e:
+            safe_print(f"  [!] {resolver_name} failed: {e} (attempt {attempt+1}/{max_attempts})")
+            if attempt < max_attempts - 1:
+                time.sleep(2)
+    
+    safe_print(f"  [✗] {resolver_name} failed after {max_attempts} attempts")
+    return None
+
+def try_resolver_chain(resolvers, url, session):
+    """
+    Try a chain of resolvers in order. Return first valid result.
+    
+    resolvers: list of (resolver_fn, name) tuples
+    
+    Example:
+      try_resolver_chain([
+          (resolve_lulacloud, 'LulaCloud'),
+          (resolve_vikingfile, 'VikingFile'),
+          (resolve_downloadwella, 'Downloadwella'),
+      ], url, session)
+    """
+    for resolver_fn, resolver_name in resolvers:
+        result = safe_resolve(resolver_fn, url, session, resolver_name)
+        if result:
+            return result
+    return None
+
 # ─── FILE HOST RESOLVERS ──────────────────────────────────────
 
 def resolve_downloadwella(url, session):
@@ -149,9 +236,8 @@ def resolve_downloadwella(url, session):
                 for inp in form.find_all('input') if inp.get('name')}
         data['method_free'] = 'Free Download'
         try:
-            r2 = session.post(url, data=data, timeout=20, verify=False)
-        except TypeError:
-            # Some session types don't support verify= kwarg
+            r2 = session.post(url, data=data, timeout=20)
+        except Exception:
             r2 = session.post(url, data=data, timeout=20)
         return find_direct_video(r2.text)
     except Exception as e:
@@ -654,9 +740,9 @@ def extract_nkiri(url, session, ctx=None):
                 ep_name = ep_url.split('/')[-1].replace('.html', '')
                 ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
                 safe_print(f"\n[{ep_index}/{len(dw_links)}] {ep_name}")
-                done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+                done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
                 if not done:
-                    done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+                    done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
                 if done:
                     safe_print(f"  [✓] Already downloaded — skipping")
                     summary.add_skipped()
@@ -824,9 +910,9 @@ def extract_9jarocks(url, session, ctx=None):
             slug_part = lf_url.rstrip('/').split('/')[-1]
             fname = safe_filename(re.sub(r'[^\w\s.-]', '', slug_part))
         safe_print(f"\n[{i}/{len(lf_links)}] {fname}")
-        done, _ = already_downloaded(folder, fname + '.mp4')
+        done, _ = already_downloaded(folder, fname + '.mp4', series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, fname + '.mkv')
+            done, _ = already_downloaded(folder, fname + '.mkv', series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -835,6 +921,7 @@ def extract_9jarocks(url, session, ctx=None):
         if direct:
             ext = 'mkv' if '.mkv' in direct else 'mp4'
             download_file(direct, folder, safe_filename(f"{fname}.{ext}"), summary,
+                          series_url=url, series_name=name,
                           bandwidth_limit=bw, current_process=cur_proc,
                           stop_flag=stop, wait_fn=ctx.get('wait'))
         else:
@@ -872,9 +959,9 @@ def extract_naijaprey(url, session, ctx=None):
         safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
 
         # Early skip before hitting the intermediate page
-        done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+        done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+            done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -893,6 +980,7 @@ def extract_naijaprey(url, session, ctx=None):
                 if direct:
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
                     download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
+                                  series_url=url, series_name=name,
                                   bandwidth_limit=bw, current_process=cur_proc,
                                   stop_flag=stop, wait_fn=ctx.get('wait'))
                 else:
@@ -931,7 +1019,6 @@ def extract_myasiantv(url, session, ctx=None):
             return
         soup      = BeautifulSoup(r.text, 'html.parser')
         show_slug = re.sub(r'-\d{4}.*$', '', slug)
-        from urllib.parse import urljoin
         ep_links  = list(dict.fromkeys(
             urljoin(bd, a['href']) for a in soup.find_all('a', href=True)
             if ('episode-' in a['href'] and show_slug in a['href']
@@ -950,7 +1037,7 @@ def extract_myasiantv(url, session, ctx=None):
         _wait(ctx)
         ep_name = ep_url.rstrip('/').split('/')[-1]
         safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
-        done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+        done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -972,6 +1059,7 @@ def extract_myasiantv(url, session, ctx=None):
         direct = resolve_embed(src, session)
         if direct:
             download_file(direct, folder, safe_filename(f"{ep_name}.mp4"), summary,
+                          series_url=url, series_name=name,
                           bandwidth_limit=bw, quality=quality,
                           current_process=cur_proc, stop_flag=stop, wait_fn=ctx.get('wait'))
         else:
@@ -1011,12 +1099,13 @@ def extract_dramarain(url, session, ctx=None):
             _wait(ctx)
             fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
             safe_print(f"\n[{i}/{len(drip_links)}] {fname}")
-            done, _ = already_downloaded(folder, fname)
+            done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
                 continue
             download_file(link, folder, fname, summary,
+                          series_url=url, series_name=name,
                           bandwidth_limit=bw, current_process=cur_proc,
                           stop_flag=stop, wait_fn=ctx.get('wait'))
         summary.report()
@@ -1034,7 +1123,7 @@ def extract_dramarain(url, session, ctx=None):
             _wait(ctx)
             fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
             safe_print(f"\n[{i}/{len(dl_links)}] {fname}")
-            done, _ = already_downloaded(folder, fname)
+            done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
@@ -1046,6 +1135,7 @@ def extract_dramarain(url, session, ctx=None):
                 direct = resolve_drip_waffi(dl_url, session)
             if direct:
                 download_file(direct, folder, fname, summary,
+                              series_url=url, series_name=name,
                               bandwidth_limit=bw, current_process=cur_proc,
                               stop_flag=stop, wait_fn=ctx.get('wait'))
             else:
@@ -1141,9 +1231,9 @@ def extract_naijavault(url, session, ctx=None):
         safe_print(f"\n[A {i}/{len(format_a)}] {ep_label}")
 
         # ── Early skip: check before hitting the dl page ──
-        done, _ = already_downloaded(folder, f"{ep_label}.mkv")
+        done, _ = already_downloaded(folder, f"{ep_label}.mkv", series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, f"{ep_label}.mp4")
+            done, _ = already_downloaded(folder, f"{ep_label}.mp4", series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -1236,11 +1326,11 @@ def extract_naijavault(url, session, ctx=None):
             ep_name    = safe_filename(fname_slug or f"{ep_label}.mkv")
 
             # ── Early skip ──
-            done, _ = already_downloaded(folder, ep_name)
+            done, _ = already_downloaded(folder, ep_name, series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_label}.mkv")
+                done, _ = already_downloaded(folder, f"{ep_label}.mkv", series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_label}.mp4")
+                done, _ = already_downloaded(folder, f"{ep_label}.mp4", series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
@@ -1360,7 +1450,7 @@ def extract_anitaku(url, session, ctx=None):
             _wait(ctx)
             ep_name = safe_filename(ep_url.rstrip('/').split('/')[-1])
             safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
-            done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+            done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
@@ -1397,6 +1487,7 @@ def extract_plutomovies(url, session, ctx=None):
             if direct:
                 ext = 'mkv' if 'mkv' in direct.lower() else 'mp4'
                 download_file(direct, folder, safe_filename(f"{name}.{ext}"), summary,
+                              series_url=url, series_name=name,
                               bandwidth_limit=bw, current_process=cur_proc,
                               stop_flag=stop, wait_fn=ctx.get('wait'))
             else:
@@ -1495,9 +1586,9 @@ def extract_plutomovies(url, session, ctx=None):
             safe_print(f"\n  [{i}/{len(all_eps)}] {ep_name}")
 
             # Early skip before hitting the episode page
-            done, _ = already_downloaded(folder, f"{ep_name}.mp4")
+            done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_name}.mkv")
+                done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
@@ -1615,7 +1706,7 @@ def _yt_playlist_items_prompt(count):
             if len(parts) != 2:
                 raise ValueError("need exactly two numbers")
             start, end = int(parts[0]), int(parts[1])
-            if start >= end:
+            if start > end:
                 raise ValueError("start must be less than end")
             return r
         except Exception:
