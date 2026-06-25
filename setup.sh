@@ -10,6 +10,56 @@ fail() { echo "[✗] $1"; }
 info() { echo "[*] $1"; }
 warn() { echo "[!] $1"; }
 
+IS_TERMUX=0
+if [ -d "/data/data/com.termux" ] || echo "${PREFIX:-}" | grep -q "com.termux"; then
+    IS_TERMUX=1
+fi
+
+if [ "$IS_TERMUX" -ne 1 ]; then
+    info "Non-Termux shell detected — using Git Bash/Linux setup"
+
+    command -v python >/dev/null 2>&1 || {
+        fail "python not found. Install Python first, then rerun setup."
+        exit 1
+    }
+    command -v git >/dev/null 2>&1 || warn "git not found — update/clone may fail"
+
+    info "Installing Python packages..."
+    python -m pip install requests beautifulsoup4 yt-dlp curl_cffi -q \
+      && ok "Python packages installed" || warn "Some Python packages failed to install"
+
+    if [ -d "$HOME/download-toolkit" ]; then
+        info "Toolkit already installed — updating..."
+        cd "$HOME/download-toolkit" && git pull \
+          && ok "Toolkit updated" || warn "Update failed — continuing with existing files"
+    else
+        info "Downloading toolkit..."
+        git clone https://github.com/anonrode/download-toolkit.git "$HOME/download-toolkit" \
+          && ok "Toolkit downloaded" || {
+            fail "Download failed — check your internet connection"
+            exit 1
+          }
+    fi
+
+    if [ ! -f "$HOME/download-toolkit/main.py" ]; then
+        fail "main.py not found — setup cannot continue"
+        exit 1
+    fi
+
+    cat > "$HOME/download-toolkit/run.sh" << 'EOF'
+#!/usr/bin/env bash
+cd "$(dirname "$0")" && python main.py
+EOF
+    chmod +x "$HOME/download-toolkit/run.sh"
+    ok "Launcher created: ~/download-toolkit/run.sh"
+    echo ""
+    echo "================================================"
+    echo "  SETUP COMPLETE!"
+    echo "  Start with: bash ~/download-toolkit/run.sh"
+    echo "================================================"
+    exit 0
+fi
+
 # ─── UPDATE PACKAGES (non-interactive) ────────────
 info "Updating package lists..."
 DEBIAN_FRONTEND=noninteractive pkg update -y \
@@ -91,7 +141,20 @@ info "Setting up auto-launch..."
 # Backup existing .bashrc if it has content beyond our launcher
 if [ -f "$HOME/.bashrc" ]; then
     existing=$(cat "$HOME/.bashrc")
-    if [ "$existing" != 'tmux kill-session -t download 2>/dev/null; cd ~/download-toolkit && git pull -q && python main.py' ] && [ -n "$existing" ]; then
+    our_content=$(cat << 'CHECKEOF'
+# Anonrode auto-launch
+if [ -n "$TMUX" ]; then
+    # Already inside tmux — shell is ready, do nothing
+    :
+else
+    # Kill any existing session and start fresh
+    tmux kill-session -t download 2>/dev/null
+    cd ~/download-toolkit && git pull -q
+    tmux new-session -s download python main.py
+fi
+CHECKEOF
+)
+    if [ "$existing" != "$our_content" ] && [ -n "$existing" ]; then
         cp "$HOME/.bashrc" "$HOME/.bashrc.backup"
         info "Existing .bashrc backed up to .bashrc.backup"
     fi
@@ -99,18 +162,15 @@ fi
 
 # .bashrc logic:
 # - If already inside a tmux session (e.g. the download session itself), do nothing
-# - If the 'download' tmux session already exists, attach to it (never kill a running download)
-# - Otherwise pull latest code and start a fresh session
+# - Otherwise kill any existing session and start fresh
 cat > "$HOME/.bashrc" << 'EOF'
 # Anonrode auto-launch
 if [ -n "$TMUX" ]; then
     # Already inside tmux — shell is ready, do nothing
     :
-elif tmux has-session -t download 2>/dev/null; then
-    # Session running — attach to it (download may be in progress)
-    tmux attach-session -t download
 else
-    # No session — pull latest and start fresh
+    # Kill any existing session and start fresh
+    tmux kill-session -t download 2>/dev/null
     cd ~/download-toolkit && git pull -q
     tmux new-session -s download python main.py
 fi

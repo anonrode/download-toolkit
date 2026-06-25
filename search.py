@@ -284,9 +284,10 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
     if not base:
         safe_print("[!] Empty query")
         return []
+    cache_key = f"{site_filter or 'all'}:{base}"
 
     # Check cache first
-    cached = _cache_get(base)
+    cached = _cache_get(cache_key)
     if cached:
         safe_print(f"  [cached] {base}")
         return cached
@@ -321,7 +322,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
         t.join(timeout=timeout)
 
     if results:
-        _cache_set(base, results)
+        _cache_set(cache_key, results)
 
     return results
 
@@ -335,7 +336,10 @@ def _present_results(results, raw_query):
         site, url = results[0]
         print(f"\n  Found on {site}:")
         print(f"  {url}")
-        ans = input("\n  Download this? [Y/n]: ").strip().lower()
+        try:
+            ans = input("\n  Download this? [Y/n]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return None
         if ans in ('', 'y', 'yes'):
             return url
         return None
@@ -348,7 +352,7 @@ def _present_results(results, raw_query):
     print(f"  {'─'*46}")
     try:
         choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(results)).strip())
-    except (ValueError, EOFError):
+    except (ValueError, EOFError, KeyboardInterrupt):
         return None
     if 1 <= choice <= len(results):
         return results[choice - 1][1]
