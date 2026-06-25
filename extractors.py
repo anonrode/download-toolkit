@@ -224,10 +224,34 @@ def try_resolver_chain(resolvers, url, session):
 # ─── FILE HOST RESOLVERS ──────────────────────────────────────
 
 def resolve_downloadwella(url, session):
+    """
+    Resolve a downloadwella.com or wetafiles.com page to a CDN URL.
+    Always uses a local requests.Session with verify=False — the global
+    curl_cffi session chokes on wetafiles SSL (which appears after the
+    form POST, not at the entry URL).
+    """
+    import requests as _req
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    s = _req.Session()
+    s.headers['User-Agent'] = UA_DESKTOP
+
     try:
-        r = safe_get(session, url, timeout=20)
-        if not r:
+        r = None
+        for attempt in range(3):
+            try:
+                r = s.get(url, timeout=20, verify=False)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2)
+                else:
+                    safe_print(f"  [!] Downloadwella fetch failed: {e}")
+                    return None
+
+        if r is None or not r.ok:
             return None
+
         soup = BeautifulSoup(r.text, 'html.parser')
         form = soup.find('form')
         if not form:
@@ -235,15 +259,11 @@ def resolve_downloadwella(url, session):
         data = {inp.get('name'): inp.get('value', '')
                 for inp in form.find_all('input') if inp.get('name')}
         data['method_free'] = 'Free Download'
-        try:
-            r2 = session.post(url, data=data, timeout=20)
-        except Exception:
-            r2 = session.post(url, data=data, timeout=20)
+        r2 = s.post(url, data=data, timeout=20, verify=False)
         return find_direct_video(r2.text)
     except Exception as e:
         safe_print(f"  [!] Downloadwella: {e}")
         return None
-
 def resolve_loadedfiles(url, session):
     try:
         r1 = safe_get(session, url, referer=f'https://{JAROCKS_DOMAIN}/')

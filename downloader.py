@@ -1075,6 +1075,7 @@ def download_social_media(url, folder, filename, summary,
     - Auto-pick best available format (720p > 480p > 360p > best)
     """
     import json
+    import shutil
     
     os.makedirs(folder, exist_ok=True)
     
