@@ -618,9 +618,20 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
             continue
 
         if len(to_process) == 1 or batch_size == 1:
-            # Single episode — use existing sequential flow
+            # Single episode — resolve in thread so stop_flag can interrupt
             ep_url, ep_name = to_process[0]
-            direct = resolve_downloadwella(ep_url, session)
+            if _stopped(ctx):
+                break
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            with _TPE(max_workers=1) as _ex:
+                _f = _ex.submit(resolve_downloadwella, ep_url, session)
+                direct = None
+                try:
+                    direct = _f.result(timeout=90)
+                except Exception:
+                    _f.cancel()
+            if _stopped(ctx):
+                break
             if direct:
                 ext   = 'mkv' if '.mkv' in direct else 'mp4'
                 fname = safe_filename(f"{ep_name}.{ext}")
@@ -774,7 +785,18 @@ def extract_nkiri(url, session, ctx=None):
 
             if len(to_process) == 1 or batch_size == 1:
                 ep_url, ep_name = to_process[0]
-                direct = resolve_downloadwella(ep_url, session)
+                if _stopped(ctx):
+                    break
+                from concurrent.futures import ThreadPoolExecutor as _TPE
+                with _TPE(max_workers=1) as _ex:
+                    _f = _ex.submit(resolve_downloadwella, ep_url, session)
+                    direct = None
+                    try:
+                        direct = _f.result(timeout=90)
+                    except Exception:
+                        _f.cancel()
+                if _stopped(ctx):
+                    break
                 if direct:
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
                     download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
