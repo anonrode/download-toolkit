@@ -889,10 +889,10 @@ def download_with_aria2c(url, folder, filename, summary,
             cmd = [
                 'aria2c',
                 '-c',  # Continue/resume support (key for resumable downloads!)
-                '--max-tries=3',
-                '--retry-wait=5',
-                '--timeout=60',
-                '--connect-timeout=15',
+                '--max-tries=0',
+                '--retry-wait=30',
+                '--timeout=' + str(config.get('download_timeout', 120)),
+                '--connect-timeout=60',
                 '--lowest-speed-limit=0',
                 '--save-session', session_file,
                 '--save-session-interval=30',
@@ -1075,7 +1075,6 @@ def download_social_media(url, folder, filename, summary,
     - Auto-pick best available format (720p > 480p > 360p > best)
     """
     import json
-    import shutil
     
     os.makedirs(folder, exist_ok=True)
     
@@ -1201,7 +1200,6 @@ def download_social_media(url, folder, filename, summary,
         return False
 
 
-def download_with_ytdlp(url, folder, filename, summary,
                         quality=None, current_process=None, stop_flag=None, parallel_mode=False):
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
@@ -1385,6 +1383,15 @@ def download_file(url, folder, filename, summary,
         summary.add_skipped()
         return True
 
+    # Link expiry detection
+    if check_expiry and not is_streaming_link(url):
+        _s = make_session()
+        status = check_url_alive(url, _s)
+        if status == 'expired':
+            safe_print(f"  [!] Link expired (404) — re-paste the series URL for fresh links")
+            summary.add_failed(filename)
+            return False
+
     # Pause/stop check
     if wait_fn:
         wait_fn()
@@ -1396,6 +1403,16 @@ def download_file(url, folder, filename, summary,
 
     if series_url:
         mark_episode_current(series_url, series_name or folder, filename)
+
+    # Fetch and store expected file size before download starts
+    # so resume checks can verify completeness precisely
+    if series_url and not is_streaming_link(url):
+        expected = get_episode_size(series_url, filename)
+        if not expected:
+            expected = fetch_expected_size(url)
+            if expected:
+                save_episode_size(series_url, filename, expected)
+                safe_print(f"  [*] Expected size: {expected/(1024*1024):.1f} MB")
 
     if is_streaming_link(url):
         result = download_with_ytdlp(url, folder, filename, summary,
