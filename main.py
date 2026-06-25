@@ -88,7 +88,9 @@ DEFAULT_CONFIG = {
     
     # Logging
     'enable_progress_log':  True,       # Log downloads to .download.log
-    'log_level':            'info',     # 'debug', 'info', 'warn'
+    'log_level':            'normal',   # 'normal' or 'debug'
+    'auto_update_days':     7,          # Weekly auto-update cadence
+    'social_quality':       '720p',     # Prefer 720p for non-YouTube social videos
 }
 
 def load_config():
@@ -97,7 +99,10 @@ def load_config():
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 cfg = json.load(f)
-                return {**DEFAULT_CONFIG, **cfg}
+                merged = {**DEFAULT_CONFIG, **cfg}
+                if merged.get('log_level') not in ('normal', 'debug'):
+                    merged['log_level'] = 'normal'
+                return merged
     except Exception:
         pass
     return dict(DEFAULT_CONFIG)
@@ -242,10 +247,37 @@ def _make_ctx(cfg):
         'exit':            EXIT_FLAG,
         'bandwidth':       cfg.get('bandwidth', 0),
         'quality':         _quality_str(cfg.get('quality', '480p')),
+        'social_quality':  cfg.get('social_quality', '720p'),
+        'log_level':       cfg.get('log_level', 'normal'),
         'parallel':        cfg.get('parallel', 1),
         'current_process': CURRENT_PROCESS,
         'disabled_sites':  cfg.get('disabled_sites', []),
     }
+
+def _parse_episode_selection(spec):
+    selected = set()
+    for part in spec.replace(' ', '').split(','):
+        if not part:
+            continue
+        if '-' in part:
+            a, b = part.split('-', 1)
+            start, end = int(a), int(b)
+            if start <= 0 or end < start:
+                raise ValueError
+            selected.update(range(start, end + 1))
+        else:
+            n = int(part)
+            if n <= 0:
+                raise ValueError
+            selected.add(n)
+    if not selected:
+        raise ValueError
+    return selected
+
+def _ctx_with_episode_filter(cfg, spec):
+    ctx = _make_ctx(cfg)
+    ctx['episode_filter'] = _parse_episode_selection(spec)
+    return ctx
 
 # ─── QUEUE ────────────────────────────────────────────────────
 def load_queue():
@@ -352,6 +384,38 @@ def handle_settings(parts, cfg):
             print(f"[ok] Bandwidth: {'unlimited' if not bw else f'{bw}KB/s'}")
         except ValueError:
             print("[!] Use KB/s number, e.g. 'settings bandwidth 500'")
+    elif key in ('log', 'mode') and len(parts) >= 3:
+        mode = parts[2].lower()
+        if mode in ('normal', 'debug'):
+            cfg['log_level'] = mode
+            save_config(cfg)
+            try:
+                from downloader import set_output_mode
+                set_output_mode(mode)
+            except Exception:
+                pass
+            print(f"[ok] Output mode: {mode}")
+        else:
+            print("[!] Valid: settings log normal | settings log debug")
+    elif key in ('social-quality', 'social_quality') and len(parts) >= 3:
+        q = parts[2].lower()
+        if q in ('360p', '480p', '720p', '1080p', 'best'):
+            cfg['social_quality'] = q
+            save_config(cfg)
+            print(f"[ok] Social quality: {q}")
+        else:
+            print("[!] Valid: 360p 480p 720p 1080p best")
+    elif key in ('auto-update', 'autoupdate') and len(parts) >= 3:
+        try:
+            days = int(parts[2])
+            if 1 <= days <= 30:
+                cfg['auto_update_days'] = days
+                save_config(cfg)
+                print(f"[ok] Auto-update: every {days} day(s)")
+            else:
+                print("[!] Use 1-30 days")
+        except ValueError:
+            print("[!] Use days, e.g. settings auto-update 7")
     elif key == 'disable' and len(parts) >= 3:
         site     = parts[2].lower()
         disabled = cfg.get('disabled_sites', [])
@@ -381,18 +445,27 @@ def _show_settings(cfg):
     dis = cfg.get('disabled_sites', [])
     q   = cfg.get('quality', '480p')
     p   = cfg.get('parallel', 1)
+    mode = cfg.get('log_level', 'normal')
+    social_q = cfg.get('social_quality', '720p')
+    auto_days = cfg.get('auto_update_days', 7)
     print(f"\n{'='*50}")
     print(f"  SETTINGS")
     print(f"{'='*50}")
     print(f"  Quality:   {q}")
     print(f"  Parallel:  {p}")
     print(f"  Bandwidth: {'unlimited' if not bw else f'{bw}KB/s'}")
+    print(f"  Output:    {mode}")
+    print(f"  Social:    {social_q} auto")
+    print(f"  Update:    every {auto_days} day(s)")
     print(f"  Disabled:  {', '.join(dis) if dis else 'none'}")
     print(f"  Save dir:  {BASE_DIR}")
     print(f"{'='*50}")
     print(f"  settings quality <360p|480p|720p|1080p>")
     print(f"  settings parallel <1|2|3>")
     print(f"  settings bandwidth <KB/s or 0=unlimited>")
+    print(f"  settings log <normal|debug>")
+    print(f"  settings social-quality <360p|480p|720p|1080p|best>")
+    print(f"  settings auto-update <days>")
     print(f"  settings disable/enable <site>")
     print(f"{'='*50}")
 
@@ -416,14 +489,12 @@ def handle_resume_command(session, cfg):
     process_link_queue([url], session, ctx)
 
 # ─── AUTO UPDATE ──────────────────────────────────────────────
-def auto_update():
+def auto_update(cfg=None):
     from downloader import _update_ytdlp
     script_dir  = os.path.dirname(os.path.abspath(__file__))
     stamp_file  = os.path.join(script_dir, '.last_pull')
-    pull_interval = 30 * 60  # 30 minutes in seconds
-
-    ytdlp_thread = threading.Thread(target=_update_ytdlp, daemon=True)
-    ytdlp_thread.start()
+    days = int((cfg or {}).get('auto_update_days', 7))
+    pull_interval = max(1, days) * 24 * 60 * 60
 
     def _should_pull():
         try:
@@ -454,6 +525,9 @@ def auto_update():
 
     if not _should_pull():
         return  # pulled recently — skip entirely, start instantly
+
+    ytdlp_thread = threading.Thread(target=_update_ytdlp, daemon=True)
+    ytdlp_thread.start()
 
     if IS_ANDROID:
         try:
@@ -517,7 +591,7 @@ def setup_android():
 # ─── BANNER ───────────────────────────────────────────────────
 def print_banner(cfg):
     import shutil as _shutil
-    from downloader import get_free_space_gb
+    from downloader import get_free_space_gb, ui_screen, update_status
     q         = cfg.get('quality', '480p')
     p         = cfg.get('parallel', 1)
     aria2c_ok = bool(_shutil.which('aria2c'))
@@ -527,22 +601,16 @@ def print_banner(cfg):
         space_s = f"{free_gb:.1f}GB free"
     except Exception:
         space_s = "unknown"
-    print("╔══════════════════════════════════════════════╗")
-    print("║              ANONRODE                        ║")
-    print(f"║  Quality: {q:<6}   Parallel: {p}               ║")
-    print(f"║  aria2c: {'✓' if aria2c_ok else '✗'}   yt-dlp: {'✓' if ytdlp_ok else '✗'}   Storage: {space_s:<10}║")
-    print("╠══════════════════════════════════════════════╣")
-    print("║  SITES:                                      ║")
-    print("║  nkiri • dramakey • dramarain • naijavault   ║")
-    print("║  plutomovies • anitaku • myasiantv           ║")
-    print("║  naijaprey • 9jarocks • yt/ig/tiktok/fb      ║")
-    print("╠══════════════════════════════════════════════╣")
-    print("║  COMMANDS:                                   ║")
-    print("║  search <title>  • fsearch <title> [hint]    ║")
-    print("║  settings • history • resume • clip          ║")
-    print("║  queue add/list/start • help • exit          ║")
-    print("╚══════════════════════════════════════════════╝")
-    print()
+    update_status(screen='Ready', status='Idle')
+    ui_screen('Ready', [
+        ('Quality', q),
+        ('Parallel', p),
+        ('Output', cfg.get('log_level', 'normal')),
+        ('Social', f"{cfg.get('social_quality', '720p')} auto"),
+        ('aria2c', 'OK' if aria2c_ok else 'Missing'),
+        ('yt-dlp', 'OK' if ytdlp_ok else 'Missing'),
+        ('Storage', space_s),
+    ], footer="Type help for commands.")
 
 # ─── SESSION FACTORY ──────────────────────────────────────────
 def make_session():
@@ -558,12 +626,119 @@ def make_session():
         s.headers['User-Agent'] = UA_DESKTOP
         return s
 
+def handle_status(cfg):
+    from downloader import get_status, load_resume_state, get_free_space_gb, ui_screen
+    q = load_queue()
+    resume = load_resume_state()
+    failed = sum(len(v.get('failed', [])) for v in resume.values())
+    paused = sum(1 for v in resume.values() if v.get('current'))
+    st = get_status()
+    ui_screen('Status', [
+        ('State', st.get('status', 'Idle')),
+        ('Screen', st.get('screen', 'Ready')),
+        ('Title', st.get('title', '')),
+        ('Current', st.get('current', '')),
+        ('Progress', st.get('progress', '')),
+        ('Queue', f'{len(q)} waiting'),
+        ('Paused', paused),
+        ('Failed', failed),
+        ('Storage', f'{get_free_space_gb():.1f}GB free'),
+        ('Output', cfg.get('log_level', 'normal')),
+    ])
+
+def handle_doctor(cfg):
+    from downloader import get_free_space_gb, ui_screen
+    checks = []
+    def ok_missing(name, ok, fix=''):
+        checks.append((name, 'OK' if ok else f'Missing{(" - " + fix) if fix else ""}'))
+
+    ok_missing('Python', True)
+    ok_missing('yt-dlp', bool(shutil.which('yt-dlp')), 'pip install yt-dlp')
+    ok_missing('aria2c', bool(shutil.which('aria2c')), 'pkg install aria2')
+    ok_missing('ffmpeg', bool(shutil.which('ffmpeg')), 'pkg install ffmpeg')
+    try:
+        import requests  # noqa
+        ok_missing('requests', True)
+    except Exception:
+        ok_missing('requests', False, 'pip install requests')
+    try:
+        import bs4  # noqa
+        ok_missing('bs4', True)
+    except Exception:
+        ok_missing('bs4', False, 'pip install beautifulsoup4')
+    ok_missing('Storage', get_free_space_gb() > 1.0, f'{get_free_space_gb():.1f}GB free')
+    if IS_ANDROID:
+        ok_missing('Termux API', bool(shutil.which('termux-clipboard-get')), 'pkg install termux-api')
+    try:
+        import requests
+        r = requests.get('https://example.com', timeout=8)
+        ok_missing('Internet', r.status_code < 500)
+    except Exception:
+        ok_missing('Internet', False, 'check network')
+    ui_screen('Doctor', checks)
+
+def handle_retry_failed(session, cfg):
+    from downloader import load_resume_state, ui_screen
+    from extractors import process_link_queue
+    state = load_resume_state()
+    failed_urls = [(u, v) for u, v in state.items() if v.get('failed')]
+    if not failed_urls:
+        ui_screen('Retry Failed', [('Status', 'No failed episodes found')])
+        return
+    ui_screen('Retry Failed', [
+        ('Found', f'{len(failed_urls)} series with failed episodes'),
+        ('Action', 'Rechecking pages and retrying failed/missing files'),
+    ])
+    ctx = _make_ctx(cfg)
+    for url, _ in failed_urls:
+        if STOP_FLAG[0]:
+            break
+        process_link_queue([url], session, ctx)
+
+def handle_cleanup():
+    from downloader import BASE_DIR, RECEIPT_FILE, DownloadReceipt, ui_screen
+    removed = 0
+    bytes_removed = 0
+    if os.path.exists(BASE_DIR):
+        for root, _, files in os.walk(BASE_DIR):
+            for name in files:
+                path = os.path.join(root, name)
+                remove = name.startswith('.aria2_') or name.endswith('.aria2')
+                if not remove and name.lower().endswith(('.mp4', '.mkv', '.webm', '.m4a')):
+                    try:
+                        remove = os.path.getsize(path) < 100 * 1024
+                    except Exception:
+                        remove = False
+                if remove:
+                    try:
+                        size = os.path.getsize(path)
+                        os.remove(path)
+                        removed += 1
+                        bytes_removed += size
+                    except Exception:
+                        pass
+    receipts = DownloadReceipt.load_all()
+    cleaned_receipts = {}
+    for key, receipt in receipts.items():
+        fp = receipt.get('filepath')
+        if fp and receipt.get('status') in ('done', 'paused') and not os.path.exists(fp):
+            continue
+        cleaned_receipts[key] = receipt
+    if cleaned_receipts != receipts:
+        DownloadReceipt.save_all(cleaned_receipts)
+    ui_screen('Cleanup', [
+        ('Files', f'{removed} removed'),
+        ('Space', f'{bytes_removed / (1024 * 1024):.1f} MB'),
+        ('Receipts', f'{len(receipts) - len(cleaned_receipts)} stale removed'),
+    ])
+
 # ─── MAIN REPL ────────────────────────────────────────────────
 def main():
     global _CTRL_C_COUNT, STOP_FLAG, EXIT_FLAG
 
     wake_proc = setup_android()
-    auto_update()
+    cfg = load_config()
+    auto_update(cfg)
 
     def _release_wake_lock():
         if wake_proc:
@@ -578,14 +753,14 @@ def main():
         except Exception:
             pass
 
-    from downloader import check_disk_space, show_history, register_state_callback
+    from downloader import check_disk_space, show_history, register_state_callback, set_output_mode
     from extractors import process_link_queue
     from search import search, fsearch, rebuild_index_command, clear_search_cache
 
     # Register callback for download state tracking
     register_state_callback(_set_current_state)
 
-    cfg     = load_config()
+    set_output_mode(cfg.get('log_level', 'normal'))
     session = make_session()
     setup_signal_handler()
     
@@ -630,13 +805,19 @@ def main():
             print(f"  <url>                       paste any supported URL")
             print(f"  clip                        read URL from clipboard")
             print(f"  resume                      resume a paused download")
+            print(f"  status                      show current app/download state")
+            print(f"  doctor                      check dependencies and environment")
             print(f"  history                     show download history")
+            print(f"  retry failed                retry failed downloads")
+            print(f"  cleanup                     remove stale helper/tiny files")
+            print(f"  download <range> <url>      download selected episodes, e.g. 1-5,8")
             print(f"  queue add <url>             add URL to queue")
             print(f"  queue list                  show queue")
             print(f"  queue start                 start downloading queue")
             print(f"  queue remove <n>            remove item from queue")
             print(f"  queue clear                 clear entire queue")
             print(f"  settings                    view / change settings")
+            print(f"  settings log normal|debug   clean output or detailed logs")
             print(f"  cache clear                 clear search result cache")
             print(f"  update                      force update from GitHub")
             print(f"  exit                        quit")
@@ -646,6 +827,18 @@ def main():
 
         elif lower == 'history':
             show_history()
+
+        elif lower == 'status':
+            handle_status(cfg)
+
+        elif lower == 'doctor':
+            handle_doctor(cfg)
+
+        elif lower == 'cleanup':
+            handle_cleanup()
+
+        elif lower in ('retry failed', 'retry'):
+            handle_retry_failed(session, cfg)
 
         elif lower == 'resume':
             handle_resume_command(session, cfg)
@@ -672,6 +865,20 @@ def main():
         elif lower.startswith('settings'):
             cfg = handle_settings(parts, cfg)
 
+        elif lower.startswith('download ') or lower.startswith('range '):
+            try:
+                _, rest = raw.split(' ', 1)
+                spec, url_part = rest.strip().split(' ', 1)
+                urls = [u.strip() for u in url_part.split() if u.strip().startswith('http')]
+                if not urls:
+                    print("[!] Usage: download <range> <url>")
+                    continue
+                ctx = _ctx_with_episode_filter(cfg, spec)
+                print(f"[*] Episode filter: {spec}")
+                process_link_queue(urls, session, ctx)
+            except ValueError:
+                print("[!] Usage: download <range> <url>  e.g. download 1-5,8 https://...")
+
         elif lower.startswith('queue'):
             if len(parts) == 1 or parts[1] == 'list':
                 queue_list()
@@ -694,6 +901,7 @@ def main():
             stamp_file = os.path.join(script_dir, '.last_pull')
             print("[*] Checking for updates...")
             try:
+                from downloader import _update_ytdlp
                 before = subprocess.run(
                     ['git', 'rev-parse', 'HEAD'],
                     cwd=script_dir, capture_output=True,
@@ -708,6 +916,8 @@ def main():
                     open(stamp_file, 'w').write(str(time.time()))
                 except Exception:
                     pass
+                print("[*] Updating yt-dlp...")
+                _update_ytdlp()
                 after = subprocess.run(
                     ['git', 'rev-parse', 'HEAD'],
                     cwd=script_dir, capture_output=True,

@@ -23,6 +23,7 @@ from downloader import (
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
     LiveProgress, _notify_start, DownloadReceipt,
     register_process, unregister_process, finish_process,
+    update_status, ui_screen,
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
@@ -100,6 +101,14 @@ def _wait(ctx):
     fn = ctx.get('wait')
     if fn:
         fn()
+
+def _filter_by_episode_range(items, ctx):
+    selected = ctx.get('episode_filter') if ctx else None
+    if not selected:
+        return items
+    filtered = [item for idx, item in enumerate(items, 1) if idx in selected]
+    safe_print(f"[*] Episode range selected: {len(filtered)} of {len(items)}")
+    return filtered
 
 def diagnose_page(soup, url, expected_pattern=None):
     """Write diagnostic info to log file when extraction fails."""
@@ -563,6 +572,10 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
         safe_print(f"[!] No downloadwella/wetafiles links found on page")
         diagnose_page(soup, url, "downloadwella.com links")
         return
+    links = _filter_by_episode_range(links, ctx)
+    if not links:
+        safe_print("[!] No episodes matched that range")
+        return
 
     safe_print(f"[*] Found {len(links)} episode(s) — saving to: {folder}")
     _notify_start(name, len(links))
@@ -724,6 +737,10 @@ def extract_nkiri(url, session, ctx=None):
         if 'downloadwella.com' in a['href'] or 'wetafiles.com' in a['href']
     ))
     if dw_links:
+        dw_links = _filter_by_episode_range(dw_links, ctx)
+        if not dw_links:
+            safe_print("[!] No episodes matched that range")
+            return
         safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) — saving to: {folder}")
         _notify_start(name, len(dw_links))
 
@@ -844,6 +861,10 @@ def extract_nkiri(url, session, ctx=None):
         if 'nkiserv.com' in a['href'] and a['href'].endswith('.mkv')
     ))
     if cdn_links:
+        cdn_links = _filter_by_episode_range(cdn_links, ctx)
+        if not cdn_links:
+            safe_print("[!] No episodes matched that range")
+            return
         safe_print(f"[*] Found {len(cdn_links)} CDN link(s) — saving to: {folder}")
         _notify_start(name, len(cdn_links))
         items = []
@@ -898,6 +919,7 @@ def extract_9jarocks(url, session, ctx=None):
         if 'loadedfiles.org' in a['href']
     ))
     safe_print(f"[*] Found {len(lf_links)} file(s) — saving to: {folder}")
+    lf_links = _filter_by_episode_range(lf_links, ctx)
     summary = DownloadSummary()
 
     for i, (label, lf_url) in enumerate(lf_links, 1):
@@ -950,6 +972,7 @@ def extract_naijaprey(url, session, ctx=None):
         if 'vdl.np-downloader.com' in a['href']
     ))
     safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
+    ep_links = _filter_by_episode_range(ep_links, ctx)
     summary = DownloadSummary()
 
     for i, ep_url in enumerate(ep_links, 1):
@@ -1029,6 +1052,7 @@ def extract_myasiantv(url, session, ctx=None):
             safe_print("[!] No episode links found")
             return
         ep_links.sort(key=lambda u: int(m.group(1)) if (m := re.search(r'episode-(\d+)', u)) else 0)
+        ep_links = _filter_by_episode_range(ep_links, ctx)
         safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
     _notify_start(name, len(ep_links))
 
@@ -1093,6 +1117,10 @@ def extract_dramarain(url, session, ctx=None):
     drip_links = [(a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
                   if 'drip.waffi.cloud' in a['href']]
     if drip_links:
+        drip_links = _filter_by_episode_range(drip_links, ctx)
+        if not drip_links:
+            safe_print("[!] No episodes matched that range")
+            return
         safe_print(f"[*] Found {len(drip_links)} direct link(s) — saving to: {folder}")
         _notify_start(name, len(drip_links))
         for i, (label, link) in enumerate(drip_links, 1):
@@ -1117,6 +1145,10 @@ def extract_dramarain(url, session, ctx=None):
                 if any(x in a['href'] for x in
                        [f'{DRAMARAIN_DOMAIN}/download', f'{DRAMAKEY_CC}/download', 'drip.waffi.cloud'])]
     if dl_links:
+        dl_links = _filter_by_episode_range(dl_links, ctx)
+        if not dl_links:
+            safe_print("[!] No episodes matched that range")
+            return
         safe_print(f"[*] Found {len(dl_links)} episode(s) — saving to: {folder}")
         _notify_start(name, len(dl_links))
         for i, (label, dl_url) in enumerate(dl_links, 1):
@@ -1205,6 +1237,15 @@ def extract_naijavault(url, session, ctx=None):
         return
 
     total = len(format_a) + len(format_b)
+    if ctx.get('episode_filter'):
+        combined = [(kind, item) for kind, seq in (('a', format_a), ('b', format_b)) for item in seq]
+        combined = _filter_by_episode_range(combined, ctx)
+        format_a = [item for kind, item in combined if kind == 'a']
+        format_b = [item for kind, item in combined if kind == 'b']
+        if not format_a and not format_b:
+            safe_print("[!] No episodes matched that range")
+            return
+        total = len(format_a) + len(format_b)
     safe_print(f"[*] Found {total} episode(s) — Format A: {len(format_a)}, Format B: {len(format_b)}")
     safe_print(f"[*] Saving to: {folder}")
 
@@ -1443,6 +1484,7 @@ def extract_anitaku(url, session, ctx=None):
             m = re.search(r'episode-(\d+)', item[0])
             return int(m.group(1)) if m else 0
         ep_links.sort(key=ep_num)
+        ep_links = _filter_by_episode_range(ep_links, ctx)
         safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
 
         for i, (ep_url, ep_text) in enumerate(ep_links, 1):
@@ -1575,6 +1617,7 @@ def extract_plutomovies(url, session, ctx=None):
             if m: return int(m.group(1))
             return 0
         all_eps.sort(key=ep_sort)
+        all_eps = _filter_by_episode_range(all_eps, ctx)
         safe_print(f"  [*] Total: {len(all_eps)} episode(s)")
 
         # Resolve and download each episode immediately — don't batch all links first
@@ -1775,6 +1818,15 @@ def extract_social(url, session, ctx=None):
                 '--no-warnings', '--progress', '--newline',
                 url
         ]
+            download_social_ytdlp(url, folder, filename, summary,
+                                  current_process=cur_proc,
+                                  out_template=out_template,
+                                  stop_flag=stop,
+                                  preferred_quality=ctx.get('social_quality', '720p'),
+                                  smart_select=True)
+            summary.report()
+            return
+        proc = None
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             register_process(proc)
@@ -1785,8 +1837,6 @@ def extract_social(url, session, ctx=None):
                     break
                 time.sleep(0.5)
             finish_process(proc)
-            unregister_process(proc)
-            cur_proc[0] = None
             if proc.returncode == 0 and not (stop and stop[0]):
                 summary.add_success()
             else:
@@ -1794,6 +1844,9 @@ def extract_social(url, session, ctx=None):
         except Exception as e:
             safe_print(f'[✗] Pinterest error: {e}')
             summary.add_failed('pinterest')
+        finally:
+            unregister_process(proc)
+            cur_proc[0] = None
         summary.report()
         return
 
@@ -1854,6 +1907,7 @@ def extract_social(url, session, ctx=None):
                 cmd += ['--playlist-items', items_sel]
             cmd.append(url)
             summary = DownloadSummary()
+            proc = None
             try:
                 proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
                 register_process(proc)
@@ -1864,8 +1918,6 @@ def extract_social(url, session, ctx=None):
                         break
                     time.sleep(0.5)
                 finish_process(proc)
-                unregister_process(proc)
-                cur_proc[0] = None
                 if proc.returncode == 0 and not (stop and stop[0]):
                     summary.add_success()
                 else:
@@ -1873,6 +1925,9 @@ def extract_social(url, session, ctx=None):
             except Exception as e:
                 safe_print(f'[✗] Playlist error: {e}')
                 summary.add_failed('playlist')
+            finally:
+                unregister_process(proc)
+                cur_proc[0] = None
             summary.report()
             return
 
@@ -1886,7 +1941,9 @@ def extract_social(url, session, ctx=None):
         download_social_ytdlp(url, folder, 'video.mp4', summary,
                               current_process=cur_proc,
                               quality_override=fmt,
-                              out_template=out_template)
+                              out_template=out_template,
+                              stop_flag=stop,
+                              smart_select=False)
         summary.report()
         return
 
@@ -1900,7 +1957,13 @@ def extract_social(url, session, ctx=None):
     safe_print(f"[*] Downloading: {filename}")
     safe_print(f"[*] Saving to: {folder}")
     summary  = DownloadSummary()
-    download_social_ytdlp(url, folder, filename, summary, current_process=cur_proc)
+    out_template = os.path.join(folder, '%(uploader)s - %(title).80s [%(id)s].%(ext)s')
+    download_social_ytdlp(url, folder, filename, summary,
+                          current_process=cur_proc,
+                          out_template=out_template,
+                          stop_flag=stop,
+                          preferred_quality=ctx.get('social_quality', '720p'),
+                          smart_select=True)
     summary.report()
 
 # ─── SITE MAP & DETECTION ─────────────────────────────────────
@@ -1959,7 +2022,10 @@ def process_link_queue(links, session, ctx=None):
             safe_print("[*] Supported: NKiri, DramaKey, DramaRain, NaijaVault, 9jaRocks, NaijaPrey, MyAsianTV, Anitaku, PlutoMovies, YouTube, Instagram, TikTok, Facebook, Pinterest")
             continue
         try:
+            update_status(screen='Download', status='Preparing', source=extractor.__name__.replace('extract_', ''), current=url[:80])
             extractor(url, session, ctx)
+            update_status(status='Idle', current='')
         except Exception as e:
+            update_status(status='Failed', current=url[:80])
             safe_print(f"\n[!] Unexpected error: {e}")
             safe_print("[!] Please check the URL and try again")

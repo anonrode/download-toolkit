@@ -39,6 +39,15 @@ PRINT_LOCK   = threading.Lock()
 STATE_LOCK   = threading.RLock()
 PROCESS_LOCK = threading.Lock()
 ACTIVE_PROCESSES = set()
+OUTPUT_MODE = 'normal'
+LAST_STATUS = {
+    'screen': 'Ready',
+    'status': 'Idle',
+    'title': '',
+    'source': '',
+    'current': '',
+    'progress': '',
+}
 
 # ─── STATE TRACKING CALLBACK (avoids circular import) ──────────────
 # main.py registers a callback to be notified of current download state
@@ -57,13 +66,67 @@ def _notify_current_state(series_url, series_name, episode_name, filepath, expec
     except Exception:
         pass
 
+def set_output_mode(mode):
+    global OUTPUT_MODE
+    OUTPUT_MODE = 'debug' if str(mode).lower() == 'debug' else 'normal'
+
+def get_output_mode():
+    return OUTPUT_MODE
+
+def is_debug():
+    return OUTPUT_MODE == 'debug'
+
+def _is_noisy_line(text):
+    t = text.strip().lower()
+    if not t:
+        return False
+    noisy_starts = (
+        '[*] resolver', '[*] checking', '[*] expected size',
+        '[!] http', '[!] attempt', '[>] ', '[diag]',
+        '    [>]', '  [>] ', '  [!] attempt',
+    )
+    noisy_contains = (
+        ' resolved:', 'trying:', 'cdn url', 'available formats',
+        'diagnostic', 'details written', 'resolver', 'pattern not found',
+    )
+    return t.startswith(noisy_starts) or any(x in t for x in noisy_contains)
+
 def safe_print(*args, **kwargs):
+    text = ' '.join(str(a) for a in args)
+    if not is_debug() and _is_noisy_line(text):
+        return
     with PRINT_LOCK:
         try:
             print(*args, **kwargs)
         except UnicodeEncodeError:
-            text = ' '.join(str(a) for a in args)
             print(text.encode('ascii', 'replace').decode('ascii'), **kwargs)
+
+def debug_print(*args, **kwargs):
+    if is_debug():
+        safe_print(*args, **kwargs)
+
+def update_status(**kwargs):
+    LAST_STATUS.update({k: v for k, v in kwargs.items() if v is not None})
+
+def get_status():
+    return dict(LAST_STATUS)
+
+def ui_screen(title, rows=None, footer=None):
+    """Compact normal-mode status block. In debug mode it still prints cleanly."""
+    rows = rows or []
+    width = 50
+    with PRINT_LOCK:
+        print()
+        print("ANONRODE")
+        print(title)
+        print("-" * width)
+        for key, value in rows:
+            if value is None or value == '':
+                continue
+            print(f"{str(key) + ':':<12} {value}")
+        if footer:
+            print()
+            print(footer)
 
 def register_process(proc):
     """Track subprocesses so Ctrl+C can stop parallel downloads too."""
@@ -259,6 +322,7 @@ class LiveProgress:
         if self._done:
             return
         self._started = True
+        update_status(status='Downloading', current=self._name, progress=f'{pct:0.1f}%')
         pct_s = f'{pct:5.1f}%'
         spd_s = f' — {spd_mbps:.1f} MB/s' if spd_mbps is not None else ''
         eta_s = f' — ETA {eta}'            if eta          else ''
@@ -278,6 +342,7 @@ class LiveProgress:
         if self._done:
             return
         self._done = True
+        update_status(status='Complete', current=self._name, progress='100%')
         size_s = f' ({size_mb:.1f} MB)' if size_mb is not None else ''
         line   = f'  [✓] Done: {self._name}{size_s}'
         try:
@@ -293,6 +358,7 @@ class LiveProgress:
         if self._done:
             return
         self._done = True
+        update_status(status='Failed', current=self._name)
         line = f'  [✗] Failed: {self._name}'
         try:
             if self._parallel or not self._started:
@@ -486,6 +552,8 @@ def mark_episode_done(series_url, series_name, ep_filename):
             state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
         if ep_filename not in state[key]['done']:
             state[key]['done'].append(ep_filename)
+        if ep_filename in state[key].get('failed', []):
+            state[key]['failed'].remove(ep_filename)
         state[key]['current'] = None
         _save_resume_state_unlocked(state)
 
@@ -1073,6 +1141,8 @@ def download_with_aria2c(url, folder, filename, summary,
                 unregister_process(proc)
             except Exception:
                 pass
+            if current_process is not None:
+                current_process[0] = None
             _cleanup_session_file(session_file)
             safe_print(f"[✗] aria2c error: {e}")
             summary.add_failed(filename)
@@ -1182,6 +1252,7 @@ def download_with_ytdlp(url, folder, filename, summary,
     quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
 
     progress = LiveProgress(filename, parallel=parallel_mode)
+    proc = None
     try:
         cmd = [
             'yt-dlp',
@@ -1247,13 +1318,77 @@ def download_with_ytdlp(url, folder, filename, summary,
                 summary.add_failed(filename)
             return False
     except Exception as e:
+        unregister_process(proc)
+        if current_process is not None:
+            current_process[0] = None
         progress.fail()
         safe_print(f"[✗] yt-dlp error: {e}")
         summary.add_failed(filename)
         return False
 
+def _select_social_format(url, preferred_quality='720p'):
+    """Inspect yt-dlp formats for social videos. Prefer 720p, else best available."""
+    if str(preferred_quality).lower() == 'best':
+        return 'bestvideo+bestaudio/best', 'best available'
+    preferred_height = 720
+    m = re.search(r'(\d+)', str(preferred_quality or '720p'))
+    if m:
+        preferred_height = int(m.group(1))
+    try:
+        result = subprocess.run(
+            ['yt-dlp', '-J', '--no-playlist', '--no-warnings', url],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
+        )
+        if result.returncode != 0 or not result.stdout:
+            return 'bestvideo+bestaudio/best', 'best available'
+        info = json.loads(result.stdout)
+        formats = info.get('formats') or []
+        heights = sorted({
+            int(f.get('height')) for f in formats
+            if isinstance(f.get('height'), int) and f.get('height') > 0
+        })
+        if heights:
+            debug_print(f"[*] Available social formats: {', '.join(str(h) + 'p' for h in heights)}")
+        if preferred_height in heights:
+            debug_print(f"[*] Selected social format: {preferred_height}p")
+            return (
+                f'bestvideo[height={preferred_height}]+bestaudio/'
+                f'best[height={preferred_height}]/best',
+                f'{preferred_height}p'
+            )
+        if heights:
+            best_height = max(heights)
+            debug_print(f"[*] Selected social format: best available ({best_height}p)")
+            return (
+                f'bestvideo[height={best_height}]+bestaudio/'
+                f'best[height={best_height}]/best',
+                f'best available ({best_height}p)'
+            )
+    except Exception as e:
+        debug_print(f"[*] Social format inspection failed: {e}")
+    return 'bestvideo+bestaudio/best', 'best available'
+
+def _find_recent_media(folder, since_time):
+    try:
+        candidates = []
+        for name in os.listdir(folder):
+            if not name.lower().endswith(('.mp4', '.mkv', '.webm', '.m4a')):
+                continue
+            path = os.path.join(folder, name)
+            try:
+                if os.path.getmtime(path) >= since_time - 2:
+                    candidates.append(path)
+            except Exception:
+                pass
+        if candidates:
+            return max(candidates, key=lambda p: os.path.getmtime(p))
+    except Exception:
+        pass
+    return None
+
 def download_social_ytdlp(url, folder, filename, summary, current_process=None,
-                           quality_override=None, out_template=None, stop_flag=None):
+                           quality_override=None, out_template=None, stop_flag=None,
+                           preferred_quality='720p', smart_select=True):
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
     has_aria2c = shutil.which('aria2c') is not None
@@ -1269,9 +1404,13 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
     if not out_template:
         out_template = os.path.join(folder, base + '.%(ext)s')
 
-    # Quality chain: caller-specified → 720p → 480p → 360p → 1080p → best
+    selected_label = None
     if quality_override:
         format_chain = [quality_override, 'bestvideo+bestaudio/best', 'best']
+        selected_label = 'custom'
+    elif smart_select:
+        selected_fmt, selected_label = _select_social_format(url, preferred_quality)
+        format_chain = [selected_fmt, 'bestvideo+bestaudio/best', 'best']
     else:
         format_chain = [
             'bestvideo[height<=720]+bestaudio/best[height<=720]',
@@ -1285,6 +1424,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
     progress = LiveProgress(filename)
 
     def _run_ytdlp(fmt):
+        proc = None
         cmd = [
             'yt-dlp', '-f', fmt,
             '--merge-output-format', 'mp4',
@@ -1301,22 +1441,30 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                 '--timeout=120 --connect-timeout=60 --file-allocation=none --min-split-size=1M'
             ]
         cmd.append(url)
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-        register_process(proc)
-        if current_process is not None:
-            current_process[0] = proc
-        while proc.poll() is None:
-            if stop_flag and stop_flag[0]:
-                proc.terminate()
-                break
-            time.sleep(0.5)
-        finish_process(proc)
-        unregister_process(proc)
-        if current_process is not None:
-            current_process[0] = None
-        return proc.returncode if proc.returncode is not None else -1
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+            register_process(proc)
+            if current_process is not None:
+                current_process[0] = proc
+            while proc.poll() is None:
+                if stop_flag and stop_flag[0]:
+                    proc.terminate()
+                    break
+                time.sleep(0.5)
+            finish_process(proc)
+            return proc.returncode if proc.returncode is not None else -1
+        finally:
+            unregister_process(proc)
+            if current_process is not None:
+                current_process[0] = None
 
     try:
+        start_time = time.time()
+        if selected_label:
+            ui_screen('Social Download', [
+                ('Quality', selected_label),
+                ('Status', 'Downloading'),
+            ])
         for fmt in format_chain:
             if stop_flag and stop_flag[0]:
                 break
@@ -1332,6 +1480,13 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                         summary.add_success()
                         log_download(filename, url, p)
                         return True
+                p = _find_recent_media(folder, start_time)
+                if p:
+                    size_mb = os.path.getsize(p) / (1024 * 1024)
+                    progress.done(size_mb)
+                    summary.add_success()
+                    log_download(os.path.basename(p), url, p)
+                    return True
                 progress.done()
                 summary.add_success()
                 return True
