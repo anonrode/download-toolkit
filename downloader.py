@@ -1066,7 +1066,138 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
         summary.add_failed(filename)
         return False
 
-def download_with_ytdlp(url, folder, filename, summary,
+                          current_process=None, stop_flag=None, parallel_mode=False):
+    """
+    Download social media videos (TikTok, Instagram, Twitter, etc) with:
+    - Descriptive titles as filenames
+    - Auto-pick best available format (720p > 480p > 360p > best)
+    """
+    import json
+    
+    os.makedirs(folder, exist_ok=True)
+    
+    # Step 1: Get video metadata (title, ID)
+    title = None
+    video_id = 'video'
+    try:
+        result = subprocess.run(
+            ['yt-dlp', '--dump-json', '--no-warnings', url],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            title = data.get('title', '')
+            video_id = data.get('id', 'video')
+        else:
+            safe_print(f"  [!] Could not get video metadata")
+    except Exception as e:
+        safe_print(f"  [!] Metadata error: {e}")
+    
+    # Step 2: Sanitize and create filename
+    if title:
+        # Remove bad filename chars: !?*"<>:|
+        title_clean = re.sub(r'[!?*"<>:|]', '', title)
+        # Remove emoji (non-ASCII)
+        title_clean = title_clean.encode('ascii', 'ignore').decode('ascii')
+        # Strip whitespace
+        title_clean = title_clean.strip()
+        # Truncate to 50 chars
+        if len(title_clean) > 50:
+            title_clean = title_clean[:50].rstrip()
+        
+        base_filename = f"{title_clean}_{video_id}" if title_clean else f"video_{video_id}"
+    else:
+        base_filename = f"video_{video_id}"
+    
+    # Initialize progress with ACTUAL filename
+    progress = LiveProgress(base_filename, parallel=parallel_mode)
+    
+    # Step 3: Query available formats and pick best
+    selected_format = 'best'
+    try:
+        result = subprocess.run(
+            ['yt-dlp', '--list-formats', '--no-warnings', url],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            output = result.stdout
+            format_chain = ['720', '480', '360']
+            for height in format_chain:
+                # Match: "720p", "720", "1280x720", etc
+                if re.search(rf'(\b{height}p?|\b{int(height)*16//9}x{height})\b', output, re.IGNORECASE):
+                    selected_format = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
+                    safe_print(f"  [*] Downloading: {height}p")
+                    break
+    except Exception:
+        pass
+    
+    if selected_format == 'best':
+        safe_print(f"  [*] Downloading: best available")
+    
+    # Step 4: Download with aria2c or direct
+    out_template = os.path.join(folder, base_filename + '.%(ext)s')
+    cmd = [
+        'yt-dlp', '-f', selected_format,
+        '--merge-output-format', 'mp4',
+        '-o', out_template,
+        '--no-playlist',
+        '--retries', '3', '--fragment-retries', '3',
+        '--no-warnings', '--progress', '--newline',
+    ]
+    
+    has_aria2c = shutil.which('aria2c') is not None
+    if has_aria2c:
+        cmd += [
+            '--external-downloader', 'aria2c',
+            '--external-downloader-args',
+            'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=30 --check-certificate=false'
+        ]
+    
+    cmd.append(url)
+    
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        if current_process is not None:
+            current_process[0] = proc
+        
+        # Poll until done
+        while True:
+            if stop_flag and stop_flag[0]:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                progress.fail()
+                summary.add_failed(base_filename)
+                return False
+            
+            retcode = proc.poll()
+            if retcode is not None:
+                break
+            time.sleep(0.1)
+        
+        # Check result
+        if retcode == 0:
+            for ext in ['mp4', 'mkv', 'webm']:
+                p = os.path.join(folder, f"{base_filename}.{ext}")
+                if os.path.exists(p):
+                    size = os.path.getsize(p)
+                    if size > 100 * 1024:
+                        progress.done(size / (1024*1024))
+                        summary.add_success()
+                        return True
+        
+        progress.fail()
+        summary.add_failed(base_filename)
+        return False
+        
+    except Exception as e:
+        safe_print(f"  [✗] Download error: {e}")
+        progress.fail()
+        summary.add_failed(base_filename)
+        return False
+
+
                         quality=None, current_process=None, stop_flag=None, parallel_mode=False):
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
@@ -1149,6 +1280,7 @@ def download_with_ytdlp(url, folder, filename, summary,
 
 def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                            quality_override=None, out_template=None, stop_flag=None):
+    """Minimal version for Pinterest boards (playlists). Social media singles use download_social_media."""
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
     has_aria2c = shutil.which('aria2c') is not None
@@ -1160,22 +1292,17 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             return False
 
     os.makedirs(folder, exist_ok=True)
-    base = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
     if not out_template:
+        base = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
         out_template = os.path.join(folder, base + '.%(ext)s')
 
-    # Quality chain: caller-specified → 720p → 480p → 360p → 1080p → best
-    if quality_override:
-        format_chain = [quality_override, 'bestvideo+bestaudio/best', 'best']
-    else:
-        format_chain = [
-            'bestvideo[height<=720]+bestaudio/best[height<=720]',
-            'bestvideo[height<=480]+bestaudio/best[height<=480]',
-            'bestvideo[height<=360]+bestaudio/best[height<=360]',
-            'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-            'bestvideo+bestaudio/best',
-            'best',
-        ]
+    # Simple format chain for playlists
+    format_chain = [
+        'bestvideo[height<=720]+bestaudio/best[height<=720]',
+        'bestvideo[height<=480]+bestaudio/best[height<=480]',
+        'bestvideo+bestaudio/best',
+        'best',
+    ]
 
     progress = LiveProgress(filename)
 
@@ -1184,7 +1311,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             'yt-dlp', '-f', fmt,
             '--merge-output-format', 'mp4',
             '-o', out_template,
-            '--no-playlist',
+            '--yes-playlist',
             '--retries', '3', '--fragment-retries', '3',
             '--no-warnings', '--progress', '--newline',
         ]
@@ -1192,8 +1319,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
-                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=30 '
-                '--timeout=120 --connect-timeout=60 --file-allocation=none --min-split-size=1M'
+                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=30 --check-certificate=false'
             ]
         cmd.append(url)
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
@@ -1202,43 +1328,25 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
         while proc.poll() is None:
             if stop_flag and stop_flag[0]:
                 proc.terminate()
-                break
-            time.sleep(0.5)
-        if current_process is not None:
-            current_process[0] = None
-        return proc.returncode if proc.returncode is not None else -1
+                return False
+            time.sleep(0.1)
+        return proc.returncode == 0
 
-    try:
-        for fmt in format_chain:
-            if stop_flag and stop_flag[0]:
-                break
-            code = _run_ytdlp(fmt)
-            if stop_flag and stop_flag[0]:
-                break
-            if code == 0:
-                for ext in ['mp4', 'mkv', 'webm', 'm4a']:
-                    p = os.path.join(folder, f'{base}.{ext}')
-                    if os.path.exists(p):
-                        size_mb = os.path.getsize(p) / (1024 * 1024)
-                        progress.done(size_mb)
-                        summary.add_success()
-                        log_download(filename, url, p)
-                        return True
+    for fmt in format_chain:
+        try:
+            if _run_ytdlp(fmt):
                 progress.done()
                 summary.add_success()
                 return True
-        # All formats failed
-        progress.fail()
-        safe_print("[✗] yt-dlp failed — no compatible format found")
-        summary.add_failed(filename)
-        return False
-    except Exception as e:
-        progress.fail()
-        safe_print(f"[✗] yt-dlp error: {e}")
-        summary.add_failed(filename)
-        return False
+        except Exception:
+            pass
 
-# ─── SMART DOWNLOAD FILE ──────────────────────────────────────
+    progress.fail()
+    safe_print(f"[✗] yt-dlp failed — no compatible format found")
+    summary.add_failed(filename)
+    return False
+
+
 def download_file(url, folder, filename, summary,
                   check_expiry=True, series_url=None, series_name=None,
                   bandwidth_limit=0, quality=None,

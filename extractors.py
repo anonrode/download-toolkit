@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 
 from downloader import (
     DownloadSummary, download_file, download_batch, download_with_ytdlp,
-    download_social_ytdlp, Prefetcher, safe_print, safe_filename,
+    download_social_media, download_social_ytdlp, Prefetcher, safe_print, safe_filename,
     find_direct_video, base_domain, is_streaming_link,
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
     LiveProgress, _notify_start, DownloadReceipt,
@@ -1887,13 +1887,8 @@ def extract_social(url, session, ctx=None):
     safe_print(f"[*] Social/Generic mode: {bd}")
     name     = bd.split('.')[0].title()
     folder   = os.path.join(BASE_DIR, 'Social', safe_filename(name))
-    slug     = url.rstrip('/').split('/')[-1] or 'video'
-    slug     = re.sub(r'[^\w-]', '_', slug)[:50]
-    filename = safe_filename(f"{slug}.mp4")
-    safe_print(f"[*] Downloading: {filename}")
-    safe_print(f"[*] Saving to: {folder}")
     summary  = DownloadSummary()
-    download_social_ytdlp(url, folder, filename, summary, current_process=cur_proc)
+    download_social_media(url, folder, '', summary, current_process=cur_proc, stop_flag=stop)
     summary.report()
 
 # ─── SITE MAP & DETECTION ─────────────────────────────────────
