@@ -1200,6 +1200,7 @@ def download_social_media(url, folder, filename, summary,
         return False
 
 
+def download_with_ytdlp(url, folder, filename, summary,
                         quality=None, current_process=None, stop_flag=None, parallel_mode=False):
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
