@@ -335,10 +335,7 @@ def _present_results(results, raw_query):
         site, url = results[0]
         print(f"\n  Found on {site}:")
         print(f"  {url}")
-        try:
-            ans = input("\n  Download this? [Y/n]: ").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            return None
+        ans = input("\n  Download this? [Y/n]: ").strip().lower()
         if ans in ('', 'y', 'yes'):
             return url
         return None
@@ -351,7 +348,7 @@ def _present_results(results, raw_query):
     print(f"  {'─'*46}")
     try:
         choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(results)).strip())
-    except (ValueError, EOFError, KeyboardInterrupt):
+    except (ValueError, EOFError):
         return None
     if 1 <= choice <= len(results):
         return results[choice - 1][1]
