@@ -107,7 +107,7 @@ def save_config(cfg):
 # ─── SIGNAL HANDLING (Ctrl+C) ─────────────────────────────────
 def setup_signal_handler():
     global _CTRL_C_COUNT, CURRENT_PROCESS, STOP_FLAG, EXIT_FLAG
-    global CURRENT_SERIES_URL, CURRENT_SERIES_NAME, CURRENT_FILEPATH, CURRENT_EPISODE_NAME, CURRENT_EXPECTED_SIZE
+    global CURRENT_SERIES_URL, CURRENT_FILEPATH, CURRENT_EXPECTED_SIZE
 
     def handler(sig, frame):
         _CTRL_C_COUNT[0] += 1
