@@ -91,7 +91,20 @@ info "Setting up auto-launch..."
 # Backup existing .bashrc if it has content beyond our launcher
 if [ -f "$HOME/.bashrc" ]; then
     existing=$(cat "$HOME/.bashrc")
-    if [ "$existing" != 'tmux kill-session -t download 2>/dev/null; cd ~/download-toolkit && git pull -q && python main.py' ] && [ -n "$existing" ]; then
+    our_content=$(cat << 'CHECKEOF'
+# Anonrode auto-launch
+if [ -n "$TMUX" ]; then
+    # Already inside tmux — shell is ready, do nothing
+    :
+else
+    # Kill any existing session and start fresh
+    tmux kill-session -t download 2>/dev/null
+    cd ~/download-toolkit && git pull -q
+    tmux new-session -s download python main.py
+fi
+CHECKEOF
+)
+    if [ "$existing" != "$our_content" ] && [ -n "$existing" ]; then
         cp "$HOME/.bashrc" "$HOME/.bashrc.backup"
         info "Existing .bashrc backed up to .bashrc.backup"
     fi
@@ -99,18 +112,15 @@ fi
 
 # .bashrc logic:
 # - If already inside a tmux session (e.g. the download session itself), do nothing
-# - If the 'download' tmux session already exists, attach to it (never kill a running download)
-# - Otherwise pull latest code and start a fresh session
+# - Otherwise kill any existing session and start fresh
 cat > "$HOME/.bashrc" << 'EOF'
 # Anonrode auto-launch
 if [ -n "$TMUX" ]; then
     # Already inside tmux — shell is ready, do nothing
     :
-elif tmux has-session -t download 2>/dev/null; then
-    # Session running — attach to it (download may be in progress)
-    tmux attach-session -t download
 else
-    # No session — pull latest and start fresh
+    # Kill any existing session and start fresh
+    tmux kill-session -t download 2>/dev/null
     cd ~/download-toolkit && git pull -q
     tmux new-session -s download python main.py
 fi

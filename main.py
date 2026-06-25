@@ -20,17 +20,69 @@ CONFIG_FILE = os.path.join(BASE_DIR, '.config.json')
 QUEUE_FILE  = os.path.join(BASE_DIR, '.queue.json')
 
 # ─── GLOBAL STATE ─────────────────────────────────────────────
-PAUSED          = False
 _CTRL_C_COUNT   = [0]
 CURRENT_PROCESS = [None]
-STOP_FLAG       = [False]
+STOP_FLAG       = [False]   # stops current batch — extractor loops check this
+EXIT_FLAG       = [False]   # exits entire script — REPL loop checks this
+
+# Track current download so we can mark_paused() on Ctrl+C
+CURRENT_SERIES_URL   = [None]
+CURRENT_SERIES_NAME  = [None]
+CURRENT_FILEPATH     = [None]
+CURRENT_EPISODE_NAME = [None]
+CURRENT_EXPECTED_SIZE = [0]
+
+# Lock for thread-safe access to CURRENT_* globals
+CURRENT_STATE_LOCK = threading.Lock()
+
+def _set_current_state(series_url, series_name, episode_name, filepath, expected_size):
+    """Safely set CURRENT_* globals with locking for parallel downloads."""
+    global CURRENT_SERIES_URL, CURRENT_SERIES_NAME, CURRENT_FILEPATH, CURRENT_EPISODE_NAME, CURRENT_EXPECTED_SIZE
+    with CURRENT_STATE_LOCK:
+        CURRENT_SERIES_URL[0] = series_url
+        CURRENT_SERIES_NAME[0] = series_name
+        CURRENT_EPISODE_NAME[0] = episode_name
+        CURRENT_FILEPATH[0] = filepath
+        CURRENT_EXPECTED_SIZE[0] = expected_size or 0
+
+def _reset_current_state():
+    """Reset all CURRENT_* tracking variables between downloads."""
+    global CURRENT_SERIES_URL, CURRENT_SERIES_NAME, CURRENT_FILEPATH, CURRENT_EPISODE_NAME, CURRENT_EXPECTED_SIZE
+    CURRENT_SERIES_URL[0]   = None
+    CURRENT_SERIES_NAME[0]  = None
+    CURRENT_FILEPATH[0]     = None
+    CURRENT_EPISODE_NAME[0] = None
+    CURRENT_EXPECTED_SIZE[0] = 0
 
 # ─── CONFIG ───────────────────────────────────────────────────
 DEFAULT_CONFIG = {
-    'quality':        '480p',
-    'parallel':       1,
-    'bandwidth':      0,
-    'disabled_sites': [],
+    # Download settings
+    'quality':              '480p',
+    'parallel':             1,
+    'bandwidth':            0,
+    'disabled_sites':       [],
+    
+    # Network monitoring
+    'network_check_interval': 20,      # Check network every N seconds
+    
+    # Resolver settings
+    'resolver_timeout':     15,         # Max seconds per resolver attempt
+    'resolver_retries':     3,          # Max attempts per resolver
+    'resolver_backoff_sec': 2,          # Wait between resolver retries
+    
+    # Download settings
+    'download_retries':     3,          # Max attempts per download
+    'download_timeout':     120,        # HTTP timeout in seconds
+    'min_file_size_mb':     5,          # Minimum file size to consider complete
+    'resumable_downloads':  True,       # Resume from byte offset on reconnect
+    
+    # Parallel download settings
+    'parallel_mode':        'queue',    # 'queue' (recommended) or 'thread' (legacy)
+    'resolver_threads':     4,          # Parallel resolvers when using queue mode
+    
+    # Logging
+    'enable_progress_log':  True,       # Log downloads to .download.log
+    'log_level':            'info',     # 'debug', 'info', 'warn'
 }
 
 def load_config():
@@ -54,56 +106,100 @@ def save_config(cfg):
 
 # ─── SIGNAL HANDLING (Ctrl+C) ─────────────────────────────────
 def setup_signal_handler():
-    global PAUSED, _CTRL_C_COUNT, CURRENT_PROCESS, STOP_FLAG
+    global _CTRL_C_COUNT, CURRENT_PROCESS, STOP_FLAG, EXIT_FLAG
+    global CURRENT_SERIES_URL, CURRENT_SERIES_NAME, CURRENT_FILEPATH, CURRENT_EPISODE_NAME, CURRENT_EXPECTED_SIZE
 
     def handler(sig, frame):
-        global PAUSED
         _CTRL_C_COUNT[0] += 1
         proc = CURRENT_PROCESS[0]
+
         if _CTRL_C_COUNT[0] == 1:
-            PAUSED       = True
             STOP_FLAG[0] = False
             if proc:
                 try: proc.terminate()
                 except Exception: pass
+            
+            # Mark download as paused in both receipt and resume state
+            if CURRENT_SERIES_URL[0] and CURRENT_FILEPATH[0]:
+                try:
+                    from downloader import DownloadReceipt, mark_episode_current
+                    progress_bytes = os.path.getsize(CURRENT_FILEPATH[0]) if os.path.exists(CURRENT_FILEPATH[0]) else 0
+                    
+                    # Update receipt (per-episode)
+                    DownloadReceipt.mark_paused(
+                        CURRENT_SERIES_URL[0],
+                        CURRENT_FILEPATH[0],
+                        progress_bytes,
+                        CURRENT_EXPECTED_SIZE[0]
+                    )
+                    
+                    # Update resume state (series-level) so it shows in resume list
+                    if CURRENT_SERIES_NAME[0] and CURRENT_EPISODE_NAME[0]:
+                        mark_episode_current(
+                            CURRENT_SERIES_URL[0],
+                            CURRENT_SERIES_NAME[0],
+                            CURRENT_EPISODE_NAME[0]
+                        )
+                except Exception:
+                    pass
+            
             try:
-                sys.stdout.write('\n\n  [pause] Paused — press Enter to resume, Ctrl+C again to exit\n\n')
+                sys.stdout.write('\n\n  [pause] Paused — press Enter to resume, Ctrl+C again to stop batch\n\n')
                 sys.stdout.flush()
             except Exception:
                 pass
-        else:
-            PAUSED       = False
+
+        elif _CTRL_C_COUNT[0] == 2:
             STOP_FLAG[0] = True
+            EXIT_FLAG[0] = False
             if proc:
                 try: proc.terminate()
                 except Exception: pass
             try:
-                sys.stdout.write('\n\n  [stop] Stopping...\n\n')
+                sys.stdout.write('\n\n  [stop] Batch stopped — back to prompt. Ctrl+C again to exit.\n\n')
                 sys.stdout.flush()
             except Exception:
                 pass
 
-    signal.signal(signal.SIGINT, handler)
+        else:
+            STOP_FLAG[0] = True
+            EXIT_FLAG[0] = True
+            if proc:
+                try: proc.terminate()
+                except Exception: pass
+            try:
+                sys.stdout.write('\n\n  [exit] Exiting...\n\n')
+                sys.stdout.flush()
+            except Exception:
+                pass
 
-def wait_if_paused():
-    global PAUSED, _CTRL_C_COUNT
-    if not PAUSED or not sys.stdin.isatty():
-        return
+    def sigterm_handler(sig, frame):
+        """Called when Android kills Termux from notification or app switcher."""
+        proc = CURRENT_PROCESS[0]
+        if proc:
+            try: proc.terminate()
+            except Exception: pass
+        # Release wake lock so Termux foreground service stops
+        try:
+            subprocess.run(['termux-wake-unlock'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=3)
+        except Exception:
+            pass
+        # Kill tmux session so next open starts fresh
+        try:
+            subprocess.run(['tmux', 'kill-session', '-t', 'download'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=3)
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handler)
     try:
-        import termios
-        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        signal.signal(signal.SIGTERM, sigterm_handler)
     except Exception:
         pass
-    while PAUSED and not STOP_FLAG[0]:
-        try:
-            input()
-            if PAUSED:
-                PAUSED = False
-                _CTRL_C_COUNT[0] = 0
-                print('  [resume] Resuming...\n')
-        except EOFError:
-            STOP_FLAG[0] = True
-            break
 
 def _quality_str(q):
     q = str(q)
@@ -116,7 +212,7 @@ def _quality_str(q):
 def _make_ctx(cfg):
     return {
         'stop':            STOP_FLAG,
-        'wait':            wait_if_paused,
+        'exit':            EXIT_FLAG,
         'bandwidth':       cfg.get('bandwidth', 0),
         'quality':         _quality_str(cfg.get('quality', '480p')),
         'parallel':        cfg.get('parallel', 1),
@@ -185,12 +281,12 @@ def queue_run(session, cfg):
     print(f"\n[*] Starting queue — {len(q)} item(s)")
     from extractors import process_link_queue
     ctx = _make_ctx(cfg)
-    completed = []
+    completed = set()
     for url in q:
         if STOP_FLAG[0]:
             break
         process_link_queue([url], session, ctx)
-        completed.append(url)
+        completed.add(url)
     remaining = [u for u in q if u not in completed]
     save_queue(remaining)
     if not remaining:
@@ -295,10 +391,28 @@ def handle_resume_command(session, cfg):
 # ─── AUTO UPDATE ──────────────────────────────────────────────
 def auto_update():
     from downloader import _update_ytdlp
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir  = os.path.dirname(os.path.abspath(__file__))
+    stamp_file  = os.path.join(script_dir, '.last_pull')
+    pull_interval = 7 * 24 * 60 * 60  # 1 week in seconds (604,800)
 
     ytdlp_thread = threading.Thread(target=_update_ytdlp, daemon=True)
     ytdlp_thread.start()
+
+    def _should_pull():
+        try:
+            if os.path.exists(stamp_file):
+                last = float(open(stamp_file).read().strip())
+                if time.time() - last < pull_interval:
+                    return False
+        except Exception:
+            pass
+        return True
+
+    def _stamp_pull():
+        try:
+            open(stamp_file, 'w').write(str(time.time()))
+        except Exception:
+            pass
 
     def _get_commit():
         try:
@@ -311,6 +425,9 @@ def auto_update():
         except Exception:
             return ''
 
+    if not _should_pull():
+        return  # pulled recently — skip entirely, start instantly
+
     if IS_ANDROID:
         try:
             before = _get_commit()
@@ -319,6 +436,7 @@ def auto_update():
                 cwd=script_dir, capture_output=True,
                 text=True, timeout=30, stdin=subprocess.DEVNULL
             )
+            _stamp_pull()
             after = _get_commit()
             if before and after and before != after:
                 print("[ok] Updated — restarting...")
@@ -335,6 +453,7 @@ def auto_update():
                 capture_output=True, text=True, timeout=30,
                 stdin=subprocess.DEVNULL
             )
+            _stamp_pull()
             if result.returncode == 0 and 'Already up to date' not in result.stdout:
                 print("[ok] Toolkit updated — restart to use latest version")
         except Exception:
@@ -354,22 +473,16 @@ def setup_android():
         pass
     if not os.environ.get('TMUX'):
         if shutil.which('tmux'):
-            check = subprocess.run(
-                ['tmux', 'has-session', '-t', 'download'],
+            # Always kill existing session and start fresh
+            subprocess.run(
+                ['tmux', 'kill-session', '-t', 'download'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            if check.returncode == 0:
-                try:
-                    os.execvp('tmux', ['tmux', 'attach-session', '-t', 'download'])
-                except Exception as e:
-                    print(f"[!] tmux attach error: {e}")
-            else:
-                print("[*] Starting tmux session...")
-                try:
-                    os.execvp('tmux', ['tmux', 'new-session', '-s', 'download',
-                                       sys.executable] + sys.argv)
-                except Exception as e:
-                    print(f"[!] tmux error: {e}")
+            try:
+                os.execvp('tmux', ['tmux', 'new-session', '-s', 'download',
+                                   sys.executable] + sys.argv)
+            except Exception as e:
+                print(f"[!] tmux error: {e}")
         else:
             print("[!] tmux not found — install with: pkg install tmux")
     return wake_proc
@@ -420,7 +533,7 @@ def make_session():
 
 # ─── MAIN REPL ────────────────────────────────────────────────
 def main():
-    global PAUSED, _CTRL_C_COUNT, STOP_FLAG
+    global _CTRL_C_COUNT, STOP_FLAG, EXIT_FLAG
 
     wake_proc = setup_android()
     auto_update()
@@ -438,22 +551,27 @@ def main():
         except Exception:
             pass
 
-    from downloader import check_disk_space, show_history
+    from downloader import check_disk_space, show_history, register_state_callback
     from extractors import process_link_queue
     from search import search, fsearch, rebuild_index_command, clear_search_cache
+
+    # Register callback for download state tracking
+    register_state_callback(_set_current_state)
 
     cfg     = load_config()
     session = make_session()
     setup_signal_handler()
+    
     check_disk_space()
     print_banner(cfg)
 
     while True:
-        if STOP_FLAG[0]:
+        if EXIT_FLAG[0]:
             print("\n[*] Exiting...")
             _release_wake_lock()
             break
-        PAUSED           = False
+        # Reset batch state between commands
+        _reset_current_state()
         _CTRL_C_COUNT[0] = 0
         STOP_FLAG[0]     = False
 
@@ -493,9 +611,10 @@ def main():
             print(f"  queue clear                 clear entire queue")
             print(f"  settings                    view / change settings")
             print(f"  cache clear                 clear search result cache")
+            print(f"  update                      force update from GitHub")
             print(f"  exit                        quit")
             print(f"{'='*50}")
-            print(f"  Ctrl+C once = pause   Ctrl+C twice = stop")
+            print(f"  Ctrl+C once = pause   Ctrl+C twice = stop batch   Ctrl+C 3x = exit")
             print(f"{'='*50}")
 
         elif lower == 'history':
@@ -511,6 +630,7 @@ def main():
                 clipped = result.stdout.strip()
                 if clipped.startswith('http'):
                     print(f"[*] From clipboard: {clipped[:70]}")
+                    _reset_current_state()
                     ctx = _make_ctx(cfg)
                     process_link_queue([clipped], session, ctx)
                 elif clipped:
@@ -542,8 +662,39 @@ def main():
             else:
                 print("[*] queue add <url> | list | start | clear | remove <n>")
 
-        elif lower == 'index rebuild':
-            rebuild_index_command()
+        elif lower == 'update':
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            stamp_file = os.path.join(script_dir, '.last_pull')
+            print("[*] Checking for updates...")
+            try:
+                before = subprocess.run(
+                    ['git', 'rev-parse', 'HEAD'],
+                    cwd=script_dir, capture_output=True,
+                    text=True, timeout=5, stdin=subprocess.DEVNULL
+                ).stdout.strip()
+                subprocess.run(
+                    ['git', 'pull', '-q'],
+                    cwd=script_dir, capture_output=True,
+                    text=True, timeout=30, stdin=subprocess.DEVNULL
+                )
+                try:
+                    open(stamp_file, 'w').write(str(time.time()))
+                except Exception:
+                    pass
+                after = subprocess.run(
+                    ['git', 'rev-parse', 'HEAD'],
+                    cwd=script_dir, capture_output=True,
+                    text=True, timeout=5, stdin=subprocess.DEVNULL
+                ).stdout.strip()
+                if before and after and before != after:
+                    print("[ok] Updated — restarting...")
+                    sys.stdout.flush()
+                    time.sleep(0.5)
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                else:
+                    print("[*] Already up to date")
+            except Exception as e:
+                print(f"[!] Update failed: {e}")
 
         elif lower.startswith('search ') or lower.startswith('s '):
             query = raw.split(' ', 1)[1].strip()
@@ -551,6 +702,7 @@ def main():
                 url = search(query, session)
                 if url:
                     print(f"\n[*] Downloading: {url[:60]}")
+                    _reset_current_state()
                     ctx = _make_ctx(cfg)
                     process_link_queue([url], session, ctx)
             else:
@@ -562,6 +714,7 @@ def main():
                 url = fsearch(query, session)
                 if url:
                     print(f"\n[*] Downloading: {url[:60]}")
+                    _reset_current_state()
                     ctx = _make_ctx(cfg)
                     process_link_queue([url], session, ctx)
             else:
@@ -575,6 +728,7 @@ def main():
             if not urls:
                 print("[!] No valid URLs found")
                 continue
+            _reset_current_state()
             ctx = _make_ctx(cfg)
             if len(urls) > 3:
                 print(f"[*] {len(urls)} URLs detected")
