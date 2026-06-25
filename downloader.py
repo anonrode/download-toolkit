@@ -9,9 +9,6 @@ import json
 import time
 import threading
 import subprocess
-import tempfile
-import hashlib
-from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─── SHARED STATE (imported from main) ────────────────────────
@@ -23,174 +20,17 @@ IS_ANDROID   = os.path.exists('/storage/emulated/0')
 BASE_DIR     = '/storage/emulated/0/Anon' if IS_ANDROID else os.path.join(os.path.expanduser('~'), 'Downloads', 'Anon')
 LOG_FILE     = os.path.join(BASE_DIR, '.download_history.json')
 RESUME_FILE  = os.path.join(BASE_DIR, '.resume_state.json')
-RECEIPT_FILE = os.path.join(BASE_DIR, '.download_receipts.json')
 DIAG_LOG     = os.path.join(BASE_DIR, '.diag.log')
-PROGRESS_LOG = os.path.join(BASE_DIR, '.download.log')  # NEW: Download progress log
 
 UA_DESKTOP   = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 PRINT_LOCK   = threading.Lock()
-STATE_LOCK   = threading.Lock()
-
-# ─── STATE TRACKING CALLBACK (avoids circular import) ──────────────
-# main.py registers a callback to be notified of current download state
-_current_state_callback = None
-
-def register_state_callback(callback):
-    """Register callback for download state updates. Called by main.py."""
-    global _current_state_callback
-    _current_state_callback = callback
-
-def _notify_current_state(series_url, series_name, episode_name, filepath, expected_size):
-    """Thread-safe notification of current download state."""
-    try:
-        if _current_state_callback:
-            _current_state_callback(series_url, series_name, episode_name, filepath, expected_size)
-    except Exception:
-        pass
 
 def safe_print(*args, **kwargs):
     with PRINT_LOCK:
         print(*args, **kwargs)
 
-# ─── ATOMIC FILE WRITES (Safe state persistence) ─────────────────
-def _atomic_write_json(filepath, data):
-    """Write JSON atomically: temp file → rename."""
-    try:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(filepath), prefix='.tmp_')
-        try:
-            with os.fdopen(temp_fd, 'w') as f:
-                json.dump(data, f, indent=2)
-            os.replace(temp_path, filepath)  # Atomic rename
-            return True
-        except Exception:
-            try:
-                os.unlink(temp_path)
-            except Exception:
-                pass
-            raise
-    except Exception as e:
-        safe_print(f"  [!] Failed to write {filepath}: {e}")
-        return False
-
-def _atomic_read_json(filepath, default=None):
-    """Read JSON safely, return default if corrupted."""
-    try:
-        if os.path.exists(filepath):
-            with open(filepath, 'r') as f:
-                return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        safe_print(f"  [!] Corrupted JSON: {filepath}, resetting")
-    return default or {}
-
-# ─── DOWNLOAD RECEIPT SYSTEM (Single source of truth) ─────────────
-class DownloadReceipt:
-    """Track per-episode download state precisely."""
-    
-    @staticmethod
-    def load_all():
-        """Load all receipts."""
-        return _atomic_read_json(RECEIPT_FILE, {})
-    
-    @staticmethod
-    def save_all(receipts):
-        """Save all receipts atomically."""
-        with STATE_LOCK:
-            _atomic_write_json(RECEIPT_FILE, receipts)
-    
-    @staticmethod
-    def get_receipt(episode_url):
-        """Get receipt for one episode, return status."""
-        receipts = DownloadReceipt.load_all()
-        return receipts.get(episode_url, {})
-    
-    @staticmethod
-    def mark_in_progress(episode_url, filename, expected_size=0):
-        """Mark episode as being downloaded."""
-        with STATE_LOCK:
-            receipts = DownloadReceipt.load_all()
-            receipts[episode_url] = {
-                'status': 'in-progress',
-                'filename': filename,
-                'expected_size': expected_size,
-                'timestamp': time.time()
-            }
-            DownloadReceipt.save_all(receipts)
-    
-    @staticmethod
-    def mark_complete(episode_url, filepath, actual_size):
-        """Mark episode as fully downloaded."""
-        with STATE_LOCK:
-            receipts = DownloadReceipt.load_all()
-            receipts[episode_url] = {
-                'status': 'done',
-                'filepath': filepath,
-                'filename': os.path.basename(filepath),
-                'expected_size': 0,
-                'actual_size': actual_size,
-                'timestamp': time.time()
-            }
-            DownloadReceipt.save_all(receipts)
-    
-    @staticmethod
-    def mark_failed(episode_url):
-        """Mark episode as failed."""
-        with STATE_LOCK:
-            receipts = DownloadReceipt.load_all()
-            if episode_url in receipts:
-                receipts[episode_url]['status'] = 'failed'
-                DownloadReceipt.save_all(receipts)
-    
-    @staticmethod
-    def mark_partial(episode_url, filepath, actual_size, expected_size):
-        """Mark episode as partially downloaded."""
-        with STATE_LOCK:
-            receipts = DownloadReceipt.load_all()
-            receipts[episode_url] = {
-                'status': 'partial',
-                'filepath': filepath,
-                'filename': os.path.basename(filepath),
-                'actual_size': actual_size,
-                'expected_size': expected_size,
-                'timestamp': time.time()
-            }
-            DownloadReceipt.save_all(receipts)
-    
-    @staticmethod
-    def is_complete(episode_url):
-        """Check if episode is fully downloaded."""
-        receipt = DownloadReceipt.get_receipt(episode_url)
-        return receipt.get('status') == 'done'
-
-    @staticmethod
-    def mark_paused(episode_url, filepath, progress_bytes, expected_size):
-        """Mark episode as paused (for resumable downloads)."""
-        with STATE_LOCK:
-            receipts = DownloadReceipt.load_all()
-            receipts[episode_url] = {
-                'status': 'paused',
-                'filepath': filepath,
-                'filename': os.path.basename(filepath),
-                'progress_bytes': progress_bytes,
-                'expected_size': expected_size,
-                'timestamp': time.time()
-            }
-            DownloadReceipt.save_all(receipts)
-    
-    @staticmethod
-    def get_paused_download(episode_url):
-        """Get paused download info (for resuming)."""
-        receipt = DownloadReceipt.get_receipt(episode_url)
-        if receipt.get('status') == 'paused':
-            return {
-                'filepath': receipt.get('filepath'),
-                'progress_bytes': receipt.get('progress_bytes', 0),
-                'expected_size': receipt.get('expected_size', 0)
-            }
-        return None
-
-
+# ─── INLINE LIVE PROGRESS ─────────────────────────────────────
 class LiveProgress:
     """
     Single-line \r progress display.
@@ -253,10 +93,10 @@ class LiveProgress:
 # ─── DISK SPACE ───────────────────────────────────────────────
 def get_free_space_gb():
     try:
-        import shutil as _shutil
-        path = BASE_DIR if (IS_ANDROID and os.path.exists(BASE_DIR)) else os.path.expanduser('~')
-        usage = _shutil.disk_usage(path)
-        return usage.free / (1024 ** 3)
+        if not hasattr(os, 'statvfs'):
+            return 999
+        stat = os.statvfs(BASE_DIR if IS_ANDROID else os.path.expanduser('~'))
+        return (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
     except Exception:
         return 999
 
@@ -292,7 +132,8 @@ def load_history():
 def save_history(history):
     try:
         os.makedirs(BASE_DIR, exist_ok=True)
-        _atomic_write_json(LOG_FILE, history)
+        with open(LOG_FILE, 'w') as f:
+            json.dump(history, f, indent=2)
     except Exception:
         pass
 
@@ -334,155 +175,78 @@ def show_history():
             print(f"    ·  {e['time']}  —  {os.path.basename(e['file'])}")
     print(f"{'='*50}")
 
-# ─── PROGRESS LOGGING ─────────────────────────────────────────
-def log_progress(filename, url, status, size_mb=None, reason=None, speed_mbps=None, duration_sec=None, retries=0):
-    """Log download progress to .download.log for history and debugging."""
+# ─── RESUME STATE ─────────────────────────────────────────────
+def load_resume_state():
     try:
         os.makedirs(BASE_DIR, exist_ok=True)
-        log_entry = {
-            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'filename': filename,
-            'url': url[:80],  # Truncate long URLs
-            'status': status,  # 'success', 'failed', 'paused', 'resumed'
-        }
-        if size_mb is not None:
-            log_entry['size_mb'] = round(size_mb, 1)
-        if speed_mbps is not None:
-            log_entry['speed_mbps'] = round(speed_mbps, 1)
-        if duration_sec is not None:
-            log_entry['duration_sec'] = duration_sec
-        if reason is not None:
-            log_entry['reason'] = reason
-        if retries > 0:
-            log_entry['retries'] = retries
-        
-        with open(PROGRESS_LOG, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(log_entry) + '\n')
+        if os.path.exists(RESUME_FILE):
+            with open(RESUME_FILE, 'r') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_resume_state(state):
+    try:
+        os.makedirs(BASE_DIR, exist_ok=True)
+        with open(RESUME_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
     except Exception:
         pass
 
-# ─── ERROR CATEGORIZATION ─────────────────────────────────────
-def categorize_error(exception, status_code=None):
-    """
-    Categorize download/network errors.
-    Returns: (category, should_retry, description)
-    
-    Categories:
-      - 'transient': retry (timeout, connection reset, 5xx)
-      - 'permanent': don't retry (404, 410, bad URL)
-      - 'rate_limit': retry with backoff (429, 503)
-      - 'auth': don't retry (401, 403 — unless verified)
-      - 'unknown': retry cautiously
-    """
-    err_str = str(exception).lower()
-    
-    # Network timeouts — always transient
-    if any(x in err_str for x in ['timeout', 'timed out', 'read timed out']):
-        return ('transient', True, 'Network timeout — will retry')
-    
-    # Connection errors — transient
-    if any(x in err_str for x in ['connection reset', 'connection refused', 'broken pipe', 'remote end closed']):
-        return ('transient', True, 'Connection reset — will retry')
-    
-    # DNS failures — transient
-    if any(x in err_str for x in ['getaddrinfo failed', 'name resolution', 'no address']):
-        return ('transient', True, 'DNS failure — will retry')
-    
-    # HTTP status codes
-    if status_code:
-        if status_code == 404 or status_code == 410:
-            return ('permanent', False, f'Link expired ({status_code}) — skip')
-        if status_code == 401:
-            return ('auth', False, '401 Unauthorized — auth required')
-        if status_code == 403:
-            return ('auth', False, '403 Forbidden — may need verification')
-        if status_code == 429:
-            return ('rate_limit', True, '429 Too Many Requests — back off and retry')
-        if status_code >= 500 and status_code < 600:
-            return ('transient', True, f'{status_code} Server error — will retry')
-        if status_code >= 400 and status_code < 500:
-            return ('permanent', False, f'{status_code} Client error — skip')
-        if status_code == 200:
-            return ('success', False, 'OK')
-    
-    # Generic fallback
-    return ('unknown', True, 'Unknown error — will retry')
-
-
-RESUME_LOCK = threading.Lock()
-
-def _load_resume_state_unlocked():
-    return _atomic_read_json(RESUME_FILE, {})
-
-def _save_resume_state_unlocked(state):
-    _atomic_write_json(RESUME_FILE, state)
-
-def load_resume_state():
-    with RESUME_LOCK:
-        return _load_resume_state_unlocked()
-
-def save_resume_state(state):
-    with RESUME_LOCK:
-        _save_resume_state_unlocked(state)
-
 def mark_episode_done(series_url, series_name, ep_filename):
-    with RESUME_LOCK:
-        state = _load_resume_state_unlocked()
-        key = series_url
-        if key not in state:
-            state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
-        if ep_filename not in state[key]['done']:
-            state[key]['done'].append(ep_filename)
-        state[key]['current'] = None
-        _save_resume_state_unlocked(state)
+    state = load_resume_state()
+    key = series_url
+    if key not in state:
+        state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
+    if ep_filename not in state[key]['done']:
+        state[key]['done'].append(ep_filename)
+    state[key]['current'] = None
+    save_resume_state(state)
 
 def mark_episode_current(series_url, series_name, ep_filename):
-    with RESUME_LOCK:
-        state = _load_resume_state_unlocked()
-        key = series_url
-        if key not in state:
-            state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
-        state[key]['current'] = ep_filename
-        state[key]['name'] = series_name
-        _save_resume_state_unlocked(state)
+    state = load_resume_state()
+    key = series_url
+    if key not in state:
+        state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
+    state[key]['current'] = ep_filename
+    state[key]['name'] = series_name
+    save_resume_state(state)
 
 def mark_series_complete(series_url):
-    with RESUME_LOCK:
-        state = _load_resume_state_unlocked()
-        if series_url in state:
-            del state[series_url]
-            _save_resume_state_unlocked(state)
+    state = load_resume_state()
+    if series_url in state:
+        del state[series_url]
+        save_resume_state(state)
 
 def is_episode_done_in_state(series_url, ep_filename):
-    with RESUME_LOCK:
-        state = _load_resume_state_unlocked()
-        if series_url in state:
-            return ep_filename in state[series_url].get('done', [])
-        return False
+    state = load_resume_state()
+    if series_url in state:
+        return ep_filename in state[series_url].get('done', [])
+    return False
 
 def save_episode_size(series_url, ep_filename, expected_bytes):
     """Store expected file size in resume state before download starts."""
-    with RESUME_LOCK:
-        try:
-            state = _load_resume_state_unlocked()
-            if series_url not in state:
-                state[series_url] = {'name': '', 'done': [], 'failed': [], 'current': None, 'sizes': {}}
-            if 'sizes' not in state[series_url]:
-                state[series_url]['sizes'] = {}
-            if ep_filename not in state[series_url]['sizes']:
-                state[series_url]['sizes'][ep_filename] = expected_bytes
-                _save_resume_state_unlocked(state)
-        except Exception:
-            pass
+    try:
+        state = load_resume_state()
+        if series_url not in state:
+            state[series_url] = {'name': '', 'done': [], 'failed': [], 'current': None, 'sizes': {}}
+        if 'sizes' not in state[series_url]:
+            state[series_url]['sizes'] = {}
+        # Only save if not already stored — avoid overwriting with stale value
+        if ep_filename not in state[series_url]['sizes']:
+            state[series_url]['sizes'][ep_filename] = expected_bytes
+            save_resume_state(state)
+    except Exception:
+        pass
 
 def get_episode_size(series_url, ep_filename):
     """Retrieve stored expected size. Returns None if not stored."""
-    with RESUME_LOCK:
-        try:
-            state = _load_resume_state_unlocked()
-            return state.get(series_url, {}).get('sizes', {}).get(ep_filename)
-        except Exception:
-            return None
+    try:
+        state = load_resume_state()
+        return state.get(series_url, {}).get('sizes', {}).get(ep_filename)
+    except Exception:
+        return None
 
 def show_resume_list():
     state = load_resume_state()
@@ -544,12 +308,8 @@ class DownloadSummary:
             for f in self.failed_list:
                 print(f"    · {f}")
         print(f"{'='*50}")
-        if IS_ANDROID:
-            if self.failed == 0:
-                msg = f'{name} — {self.success}/{total} done ✓'
-            else:
-                msg = f'{name} — {self.success} done, {self.failed} failed'
-            _notify('Anonrode — Complete', msg)
+        if IS_ANDROID and total > 1:
+            _notify(f"Done — {self.success}/{total} downloaded")
         return list(self.failed_list)
 
     def prompt_retry(self):
@@ -563,30 +323,14 @@ class DownloadSummary:
             return False
 
 # ─── NOTIFICATION ─────────────────────────────────────────────
-def _notify(title, message, vibrate=True):
-    if not IS_ANDROID:
-        return
+def _notify(message):
     try:
-        cmd = [
-            'termux-notification',
-            '--title', title,
-            '--content', message,
-            '--id', '42',          # fixed ID so notifications replace each other
-            '--priority', 'high',
-        ]
-        if vibrate:
-            cmd += ['--vibrate', '500']
-        subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=5)
+        subprocess.run(
+            ['termux-notification', '--title', 'Anonrode', '--content', message],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
+        )
     except Exception:
         pass
-
-def _notify_start(name, count):
-    """Notify when a batch download starts."""
-    if count > 1:
-        _notify('Anonrode — Downloading', f'{name} ({count} episodes)', vibrate=False)
-    else:
-        _notify('Anonrode — Downloading', name, vibrate=False)
 
 # ─── HELPERS ──────────────────────────────────────────────────
 def fetch_expected_size(url, session=None):
@@ -608,106 +352,22 @@ def fetch_expected_size(url, session=None):
 
 def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
     """
-    Check if file is complete using receipt system (primary) + filesystem check (fallback).
-    Returns: (is_complete, filepath)
-    
-    Priority:
-    1. If series_url: check receipt for "paused" status FIRST (don't delete paused files!)
-    2. If series_url: check receipt for "done" status
-    3. Else: check filesystem for file existence and size
+    Check if a file already exists and is complete.
+    If series_url given and expected size is stored, compares exact size.
+    Falls back to min_mb threshold check if no size stored.
     """
-    # Per-episode receipt key: series_url + filename avoids all episodes sharing one slot
-    ep_key = f"{series_url}:{filename}" if series_url else None
-
-    # CRITICAL: Check receipt for "paused" FIRST (before any file checks)
-    if ep_key:
-        receipt = DownloadReceipt.get_receipt(ep_key)
-        
-        # If paused: return paused info WITHOUT deleting the file
-        if receipt.get('status') == 'paused':
-            filepath = receipt.get('filepath')
-            if filepath and os.path.exists(filepath):
-                actual = os.path.getsize(filepath)
-                expected = receipt.get('expected_size', 0)
-                safe_print(f"  [*] Paused: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB")
-                return False, None  # Not complete, but don't delete!
-            # File missing but receipt says paused - clear it
-            DownloadReceipt.mark_failed(ep_key)
-        
-        # If done: return complete
-        if receipt.get('status') == 'done':
-            path = receipt.get('filepath')
-            if path and os.path.exists(path):
-                safe_print(f"  [✓] Already downloaded (receipt verified)")
-                return True, path
-            # Receipt says done but file missing — clean up receipt and re-download
-            DownloadReceipt.mark_failed(ep_key)
-    
-    # Fallback: filesystem check (for files without receipt records)
     base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
-    
-    # First try exact filename match
-    if os.path.exists(os.path.join(folder, filename)):
-        filepath = os.path.join(folder, filename)
-        actual = os.path.getsize(filepath)
-        expected = get_episode_size(series_url, filename) if series_url else None
-        
-        if expected:
-            if actual >= expected * 0.99:
-                safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
-                return True, filepath
-            elif ep_key:
-                receipt = DownloadReceipt.get_receipt(ep_key)
-                if receipt.get('status') == 'paused':
-                    safe_print(f"  [*] Resuming: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB")
-                    return False, None
-        else:
-            # No expected size: use file size heuristic
-            min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
-            if actual >= min_bytes:
-                safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
-                return True, filepath
-    
-    # If exact filename not found, check by extension (but prefer receipt filepath if available)
-    receipt_path = None
-    if ep_key:
-        receipt = DownloadReceipt.get_receipt(ep_key)
-        if receipt and receipt.get('filepath'):
-            receipt_path = receipt.get('filepath')
-            if os.path.exists(receipt_path):
-                actual = os.path.getsize(receipt_path)
-                expected = get_episode_size(series_url, filename) if series_url else None
-                if expected:
-                    if actual >= expected * 0.99:
-                        safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
-                        return True, receipt_path
-                else:
-                    min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
-                    if actual >= min_bytes:
-                        safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
-                        return True, receipt_path
-    
-    # Last resort: scan by extension (only if no receipt path available)
     for ext in ['mp4', 'mkv', 'webm']:
         filepath = os.path.join(folder, f"{base}.{ext}")
         if os.path.exists(filepath):
             actual = os.path.getsize(filepath)
+            # Try exact size match first
             expected = get_episode_size(series_url, filename) if series_url else None
-            
             if expected:
-                # Verify against expected size (allow 1% tolerance)
+                # Allow 1% tolerance for rounding differences
                 if actual >= expected * 0.99:
-                    safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
                     return True, filepath
                 else:
-                    # Incomplete file — only delete if genuinely broken, NOT paused
-                    # Check again if receipt says paused (shouldn't reach here but be safe)
-                    if ep_key:
-                        receipt = DownloadReceipt.get_receipt(ep_key)
-                        if receipt.get('status') == 'paused':
-                            safe_print(f"  [*] Resuming: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB")
-                            return False, None  # Don't delete!
-                    
                     safe_print(f"  [!] Incomplete: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB — re-downloading")
                     try:
                         os.remove(filepath)
@@ -715,21 +375,16 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
                         pass
                     return False, None
             else:
-                # No expected size: use file size heuristic
-                # If file is large enough, consider it complete and skip
-                min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
-                if actual >= min_bytes:
-                    safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
+                # Fall back to minimum size threshold
+                if actual >= min_mb * 1024 * 1024:
                     return True, filepath
                 else:
-                    # File too small - likely corrupted, safe to delete
-                    safe_print(f"  [!] File too small ({actual/(1024*1024):.1f}MB) — likely incomplete or corrupted")
+                    safe_print(f"  [!] Incomplete file ({actual/(1024*1024):.1f}MB) — re-downloading")
                     try:
                         os.remove(filepath)
                     except Exception as e:
                         safe_print(f"  [!] Could not remove: {e}")
                     return False, None
-    
     return False, None
 
 def base_domain(url):
@@ -833,19 +488,8 @@ def _update_ytdlp():
 # ─── DOWNLOAD BACKENDS ────────────────────────────────────────
 def download_with_aria2c(url, folder, filename, summary,
                          bandwidth_limit=0, current_process=None,
-                         retries=3, stop_flag=None, parallel_mode=False,
-                         series_url=None, series_name=None, config=None):
-    """
-    Smart downloader with resumable downloads support.
-    
-    If a partial file exists:
-      - Check receipt system
-      - Use aria2c's --continue flag to resume from byte offset
-      - Much faster than starting over
-    """
+                         retries=3, stop_flag=None, parallel_mode=False):
     import shutil
-    config = config or {}  # Config dict with resolver_timeout, etc.
-    
     has_aria2c = shutil.which('aria2c') is not None
     if not has_aria2c:
         if not _install_aria2c():
@@ -855,24 +499,9 @@ def download_with_aria2c(url, folder, filename, summary,
 
     os.makedirs(folder, exist_ok=True)
     safe_fname    = re.sub(r'[^\w]', '_', filename)[:30]
-    # Add thread ID and hash to prevent collision in parallel downloads
-    import threading
-    import hashlib
-    thread_id = threading.get_ident()
-    file_hash = hashlib.md5(filename.encode()).hexdigest()[:8]
-    session_file  = os.path.join(folder, f'.aria2_{safe_fname}_{file_hash}_{thread_id}.txt')
+    session_file  = os.path.join(folder, f'.aria2_{safe_fname}.txt')
     filepath      = os.path.join(folder, filename)
     referer       = get_referer_for_url(url)
-    
-    # Check if this is a resumed download (for user-facing print only)
-    if series_url:
-        ep_key = f"{series_url}:{filename}"
-        paused_info = DownloadReceipt.get_paused_download(ep_key)
-        if paused_info and os.path.exists(paused_info['filepath']):
-            current_size = os.path.getsize(paused_info['filepath'])
-            expected_size = paused_info.get('expected_size', 0)
-            if expected_size > 0 and current_size < expected_size:
-                safe_print(f"  [*] Resuming from {current_size/(1024*1024):.1f}MB of {expected_size/(1024*1024):.1f}MB")
 
     def _cleanup_session_file(sf):
         try:
@@ -882,17 +511,16 @@ def download_with_aria2c(url, folder, filename, summary,
             pass
 
     progress = LiveProgress(filename, parallel=parallel_mode)
-    start_time = time.time()
 
     for attempt in range(retries):
         try:
             cmd = [
                 'aria2c',
-                '-c',  # Continue/resume support (key for resumable downloads!)
-                '--max-tries=3',
-                '--retry-wait=5',
-                '--timeout=60',
-                '--connect-timeout=15',
+                '-c',
+                '--max-tries=0',
+                '--retry-wait=30',
+                '--timeout=120',
+                '--connect-timeout=60',
                 '--lowest-speed-limit=0',
                 '--save-session', session_file,
                 '--save-session-interval=30',
@@ -910,16 +538,12 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--auto-file-renaming=false',
                 '--console-log-level=warn',
                 '--summary-interval=0',
-                '--check-certificate=false',
                 '-d', folder,
                 '-o', filename,
             ]
             if bandwidth_limit > 0:
                 cmd += ['--max-download-limit', f'{bandwidth_limit}K']
             cmd.append(url)
-
-            # Set filepath for pause handler using callback
-            _notify_current_state(series_url, series_name or '', filename, filepath, 0)
 
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             if current_process is not None:
@@ -1066,141 +690,6 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None, paral
         summary.add_failed(filename)
         return False
 
-def download_social_media(url, folder, filename, summary,
-                          bandwidth_limit=0, quality=None,
-                          current_process=None, stop_flag=None, parallel_mode=False):
-    """
-    Download social media videos (TikTok, Instagram, Twitter, etc) with:
-    - Descriptive titles as filenames
-    - Auto-pick best available format (720p > 480p > 360p > best)
-    """
-    import json
-    import shutil
-    
-    os.makedirs(folder, exist_ok=True)
-    
-    # Step 1: Get video metadata (title, ID)
-    title = None
-    video_id = 'video'
-    try:
-        result = subprocess.run(
-            ['yt-dlp', '--dump-json', '--no-warnings', url],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            title = data.get('title', '')
-            video_id = data.get('id', 'video')
-        else:
-            safe_print(f"  [!] Could not get video metadata")
-    except Exception as e:
-        safe_print(f"  [!] Metadata error: {e}")
-    
-    # Step 2: Sanitize and create filename
-    if title:
-        # Remove bad filename chars: !?*"<>:|
-        title_clean = re.sub(r'[!?*"<>:|]', '', title)
-        # Remove emoji (non-ASCII)
-        title_clean = title_clean.encode('ascii', 'ignore').decode('ascii')
-        # Strip whitespace
-        title_clean = title_clean.strip()
-        # Truncate to 50 chars
-        if len(title_clean) > 50:
-            title_clean = title_clean[:50].rstrip()
-        
-        base_filename = f"{title_clean}_{video_id}" if title_clean else f"video_{video_id}"
-    else:
-        base_filename = f"video_{video_id}"
-    
-    # Initialize progress with ACTUAL filename
-    progress = LiveProgress(base_filename, parallel=parallel_mode)
-    
-    # Step 3: Query available formats and pick best
-    selected_format = 'best'
-    try:
-        result = subprocess.run(
-            ['yt-dlp', '--list-formats', '--no-warnings', url],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            output = result.stdout
-            format_chain = ['720', '480', '360']
-            for height in format_chain:
-                # Match: "720p", "720", "1280x720", etc
-                if re.search(rf'(\b{height}p?|\b{int(height)*16//9}x{height})\b', output, re.IGNORECASE):
-                    selected_format = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
-                    safe_print(f"  [*] Downloading: {height}p")
-                    break
-    except Exception:
-        pass
-    
-    if selected_format == 'best':
-        safe_print(f"  [*] Downloading: best available")
-    
-    # Step 4: Download with aria2c or direct
-    out_template = os.path.join(folder, base_filename + '.%(ext)s')
-    cmd = [
-        'yt-dlp', '-f', selected_format,
-        '--merge-output-format', 'mp4',
-        '-o', out_template,
-        '--no-playlist',
-        '--retries', '3', '--fragment-retries', '3',
-        '--no-warnings', '--progress', '--newline',
-    ]
-    
-    has_aria2c = shutil.which('aria2c') is not None
-    if has_aria2c:
-        cmd += [
-            '--external-downloader', 'aria2c',
-            '--external-downloader-args',
-            'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=30 --check-certificate=false'
-        ]
-    
-    cmd.append(url)
-    
-    try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-        if current_process is not None:
-            current_process[0] = proc
-        
-        # Poll until done
-        while True:
-            if stop_flag and stop_flag[0]:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                progress.fail()
-                summary.add_failed(base_filename)
-                return False
-            
-            retcode = proc.poll()
-            if retcode is not None:
-                break
-            time.sleep(0.1)
-        
-        # Check result
-        if retcode == 0:
-            for ext in ['mp4', 'mkv', 'webm']:
-                p = os.path.join(folder, f"{base_filename}.{ext}")
-                if os.path.exists(p):
-                    size = os.path.getsize(p)
-                    if size > 100 * 1024:
-                        progress.done(size / (1024*1024))
-                        summary.add_success()
-                        return True
-        
-        progress.fail()
-        summary.add_failed(base_filename)
-        return False
-        
-    except Exception as e:
-        safe_print(f"  [✗] Download error: {e}")
-        progress.fail()
-        summary.add_failed(base_filename)
-        return False
-
-
 def download_with_ytdlp(url, folder, filename, summary,
                         quality=None, current_process=None, stop_flag=None, parallel_mode=False):
     import shutil
@@ -1266,11 +755,9 @@ def download_with_ytdlp(url, folder, filename, summary,
                     summary.add_success()
                     log_download(filename, url, p)
                     return True
-            # yt-dlp exited 0 but no output file — likely failed
-            progress.fail()
-            safe_print("[✗] yt-dlp exited successfully but produced no file")
-            summary.add_failed(filename)
-            return False
+            progress.done()
+            summary.add_success()
+            return True
         else:
             progress.fail()
             safe_print("[✗] yt-dlp failed")
@@ -1284,7 +771,6 @@ def download_with_ytdlp(url, folder, filename, summary,
 
 def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                            quality_override=None, out_template=None, stop_flag=None):
-    """Minimal version for Pinterest boards (playlists). Social media singles use download_social_media."""
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
     has_aria2c = shutil.which('aria2c') is not None
@@ -1296,17 +782,22 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             return False
 
     os.makedirs(folder, exist_ok=True)
+    base = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
     if not out_template:
-        base = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
         out_template = os.path.join(folder, base + '.%(ext)s')
 
-    # Simple format chain for playlists
-    format_chain = [
-        'bestvideo[height<=720]+bestaudio/best[height<=720]',
-        'bestvideo[height<=480]+bestaudio/best[height<=480]',
-        'bestvideo+bestaudio/best',
-        'best',
-    ]
+    # Quality chain: caller-specified → 720p → 480p → 360p → 1080p → best
+    if quality_override:
+        format_chain = [quality_override, 'bestvideo+bestaudio/best', 'best']
+    else:
+        format_chain = [
+            'bestvideo[height<=720]+bestaudio/best[height<=720]',
+            'bestvideo[height<=480]+bestaudio/best[height<=480]',
+            'bestvideo[height<=360]+bestaudio/best[height<=360]',
+            'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+            'bestvideo+bestaudio/best',
+            'best',
+        ]
 
     progress = LiveProgress(filename)
 
@@ -1315,7 +806,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             'yt-dlp', '-f', fmt,
             '--merge-output-format', 'mp4',
             '-o', out_template,
-            '--yes-playlist',
+            '--no-playlist',
             '--retries', '3', '--fragment-retries', '3',
             '--no-warnings', '--progress', '--newline',
         ]
@@ -1323,7 +814,8 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
-                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=30 --check-certificate=false'
+                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=30 '
+                '--timeout=120 --connect-timeout=60 --file-allocation=none --min-split-size=1M'
             ]
         cmd.append(url)
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
@@ -1332,25 +824,43 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
         while proc.poll() is None:
             if stop_flag and stop_flag[0]:
                 proc.terminate()
-                return False
-            time.sleep(0.1)
-        return proc.returncode == 0
+                break
+            time.sleep(0.5)
+        if current_process is not None:
+            current_process[0] = None
+        return proc.returncode if proc.returncode is not None else -1
 
-    for fmt in format_chain:
-        try:
-            if _run_ytdlp(fmt):
+    try:
+        for fmt in format_chain:
+            if stop_flag and stop_flag[0]:
+                break
+            code = _run_ytdlp(fmt)
+            if stop_flag and stop_flag[0]:
+                break
+            if code == 0:
+                for ext in ['mp4', 'mkv', 'webm', 'm4a']:
+                    p = os.path.join(folder, f'{base}.{ext}')
+                    if os.path.exists(p):
+                        size_mb = os.path.getsize(p) / (1024 * 1024)
+                        progress.done(size_mb)
+                        summary.add_success()
+                        log_download(filename, url, p)
+                        return True
                 progress.done()
                 summary.add_success()
                 return True
-        except Exception:
-            pass
+        # All formats failed
+        progress.fail()
+        safe_print("[✗] yt-dlp failed — no compatible format found")
+        summary.add_failed(filename)
+        return False
+    except Exception as e:
+        progress.fail()
+        safe_print(f"[✗] yt-dlp error: {e}")
+        summary.add_failed(filename)
+        return False
 
-    progress.fail()
-    safe_print(f"[✗] yt-dlp failed — no compatible format found")
-    summary.add_failed(filename)
-    return False
-
-
+# ─── SMART DOWNLOAD FILE ──────────────────────────────────────
 def download_file(url, folder, filename, summary,
                   check_expiry=True, series_url=None, series_name=None,
                   bandwidth_limit=0, quality=None,
@@ -1385,17 +895,33 @@ def download_file(url, folder, filename, summary,
         summary.add_skipped()
         return True
 
+    # Link expiry detection
+    if check_expiry and not is_streaming_link(url):
+        _s = make_session()
+        status = check_url_alive(url, _s)
+        if status == 'expired':
+            safe_print(f"  [!] Link expired (404) — re-paste the series URL for fresh links")
+            summary.add_failed(filename)
+            return False
+
     # Pause/stop check
     if wait_fn:
         wait_fn()
     if stop_flag and stop_flag[0]:
         return False
 
-    # Set globals for pause handler (Ctrl+C) - use callback for thread safety
-    _notify_current_state(series_url, series_name or folder, filename, None, 0)
-
     if series_url:
         mark_episode_current(series_url, series_name or folder, filename)
+
+    # Fetch and store expected file size before download starts
+    # so resume checks can verify completeness precisely
+    if series_url and not is_streaming_link(url):
+        expected = get_episode_size(series_url, filename)
+        if not expected:
+            expected = fetch_expected_size(url)
+            if expected:
+                save_episode_size(series_url, filename, expected)
+                safe_print(f"  [*] Expected size: {expected/(1024*1024):.1f} MB")
 
     if is_streaming_link(url):
         result = download_with_ytdlp(url, folder, filename, summary,
@@ -1408,35 +934,10 @@ def download_file(url, folder, filename, summary,
                                       bandwidth_limit=bandwidth_limit,
                                       current_process=current_process,
                                       stop_flag=stop_flag,
-                                      parallel_mode=parallel_mode,
-                                      series_url=series_url,
-                                      series_name=series_name)
+                                      parallel_mode=parallel_mode)
 
-    # Mark receipt if successful
     if result and series_url:
-        # Find the actual downloaded file and record it
-        ep_key = f"{series_url}:{filename}"
-        base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
-        for ext in ['mp4', 'mkv', 'webm', 'm4a']:
-            p = os.path.join(folder, f'{base}.{ext}')
-            if os.path.exists(p):
-                actual_size = os.path.getsize(p)
-                DownloadReceipt.mark_complete(ep_key, p, actual_size)
-                break
         mark_episode_done(series_url, series_name or folder, filename)
-    elif not result and series_url:
-        ep_key = f"{series_url}:{filename}"
-        DownloadReceipt.mark_failed(ep_key)
-        # Also clear from resume state so it doesn't show as "current"
-        with RESUME_LOCK:
-            state = _load_resume_state_unlocked()
-            if series_url in state:
-                state[series_url]['current'] = None
-                if filename not in state[series_url].get('failed', []):
-                    if 'failed' not in state[series_url]:
-                        state[series_url]['failed'] = []
-                    state[series_url]['failed'].append(filename)
-                _save_resume_state_unlocked(state)
 
     return result
 
