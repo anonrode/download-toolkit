@@ -60,6 +60,18 @@ def safe_get(session, url, timeout=20, referer=None, retries=3):
             except TypeError:
                 # Some session types don't support verify= kwarg
                 r = session.get(url, timeout=timeout, headers=headers)
+            
+            # Handle 403 with JavaScript redirect (loadedfiles.org pattern)
+            if r.status_code == 403:
+                m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text)
+                if m:
+                    redirect_url = m.group(1)
+                    if not redirect_url.startswith('http'):
+                        redirect_url = urljoin(url, redirect_url)
+                    debug_print(f"  [*] Following JS redirect from 403: {redirect_url[:60]}...")
+                    if retries > 1:
+                        return safe_get(session, redirect_url, referer, retries - 1)
+            
             if not r.ok:
                 safe_print(f"  [!] HTTP {r.status_code}: {url[:60]}")
                 return None
@@ -928,11 +940,12 @@ def extract_9jarocks(url, session, ctx=None):
         _wait(ctx)
         # Extract from URL slug first (has real episode name), anchor text is always "DOWNLOAD"
         slug_part = lf_url.rstrip('/').split('/')[-1]
-        fname = safe_filename(slug_part)
-        safe_print(f"\n[{i}/{len(lf_links)}] {fname}")
-        done, _ = already_downloaded(folder, fname + '.mp4', series_url=url)
+        # Strip extension from slug — will re-add with correct ext to avoid .mkv.mkv
+        base_fname = re.sub(r'\.(mkv|mp4|webm)$', '', safe_filename(slug_part))
+        safe_print(f"\n[{i}/{len(lf_links)}] {base_fname}")
+        done, _ = already_downloaded(folder, base_fname + '.mp4', series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, fname + '.mkv', series_url=url)
+            done, _ = already_downloaded(folder, base_fname + '.mkv', series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -940,13 +953,13 @@ def extract_9jarocks(url, session, ctx=None):
         direct = resolve_loadedfiles(lf_url, session)
         if direct:
             ext = 'mkv' if '.mkv' in direct else 'mp4'
-            download_file(direct, folder, safe_filename(f"{fname}.{ext}"), summary,
+            download_file(direct, folder, safe_filename(f"{base_fname}.{ext}"), summary,
                           series_url=url, series_name=name,
                           bandwidth_limit=bw, current_process=cur_proc,
                           stop_flag=stop, wait_fn=ctx.get('wait'))
         else:
-            safe_print(f"  [✗] Could not extract: {fname}")
-            summary.add_failed(fname)
+            safe_print(f"  [✗] Could not extract: {base_fname}")
+            summary.add_failed(base_fname)
         time.sleep(0.5)
     summary.report()
 
