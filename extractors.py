@@ -1605,12 +1605,15 @@ def extract_plutomovies(url, session, ctx=None):
                 if eu not in seen_u:
                     seen_u.add(eu)
                     unique.append((eu, en))
+            has_next = any('next' in a.get_text(strip=True).lower() for a in soup2.find_all('a', href=True))
             if not unique:
                 break
             for eu, _ in unique:
                 seen_eps.add(eu)
             safe_print(f"  [*] Page {page}: {len(unique)} episode(s)")
             all_eps.extend(unique)
+            if not has_next:
+                break
             page += 1
             time.sleep(0.5)
 
