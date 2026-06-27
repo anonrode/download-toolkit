@@ -1564,6 +1564,27 @@ def extract_plutomovies(url, session, ctx=None):
 
     safe_print(f"[*] Found {len(season_links)} season(s)")
 
+    def _resolve_ep(ep_url):
+        """Fetch ep page and resolve CDN url. Returns (dl_link, direct) or (None, None)."""
+        r3 = safe_get(session, ep_url, timeout=30)
+        if not r3:
+            return None, None
+        soup3   = BeautifulSoup(r3.text, 'html.parser')
+        dl_link = next((a['href'] for a in soup3.find_all('a', href=True)
+                        if f'dl.{PLUTO_DOMAIN}' in a['href']), None)
+        if not dl_link:
+            return None, None
+        direct = resolve_plutomovies_dl(dl_link, session)
+        return dl_link, direct
+
+    def _cdn_alive(cdn_url):
+        """Quick HEAD check to verify CDN token hasn't expired."""
+        try:
+            r = session.head(cdn_url, timeout=5, allow_redirects=True)
+            return r.status_code in (200, 206)
+        except Exception:
+            return False
+
     for season_url in season_links:
         if _stopped(ctx):
             break
@@ -1633,16 +1654,31 @@ def extract_plutomovies(url, session, ctx=None):
         all_eps = _filter_by_episode_range(all_eps, ctx)
         safe_print(f"  [*] Total: {len(all_eps)} episode(s)")
 
-        # Resolve and download each episode immediately — don't batch all links first
-        # (PlutoMovies CDN tokens can expire before a 24-ep batch finishes resolving)
-        ep_count = 0
+
+        # Resolve and download each episode immediately.
+        # Prefetcher resolves next ep's CDN url in background while current ep downloads.
+        # HEAD check guards against expired tokens if current ep took too long.
+        # Prefetch ep[0] immediately, then prefetch ep[N+1] as soon as ep[N] starts downloading.
+        # Always prefetch every ep in order — alignment is guaranteed because
+        # we call get() for every ep before deciding to skip, so the queue never drifts.
+        prefetcher = Prefetcher(_resolve_ep)
+        if all_eps:
+            prefetcher.prefetch(all_eps[0][0])
+
         for i, (ep_url, ep_name) in enumerate(all_eps, 1):
             if _stopped(ctx):
                 break
             _wait(ctx)
             safe_print(f"\n  [{i}/{len(all_eps)}] {ep_name}")
 
-            # Early skip before hitting the episode page
+            # Get prefetched result first — keeps queue aligned regardless of skip/fail
+            dl_link, direct = prefetcher.get(timeout=30)
+
+            # Kick off prefetch for next ep immediately while we process current
+            if i < len(all_eps):
+                prefetcher.prefetch(all_eps[i][0])
+
+            # Skip check AFTER get() so queue alignment is never broken
             done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
             if not done:
                 done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
@@ -1651,30 +1687,30 @@ def extract_plutomovies(url, session, ctx=None):
                 summary.add_skipped()
                 continue
 
-            r3 = safe_get(session, ep_url, timeout=30)
-            if not r3:
+            if not dl_link:
                 safe_print(f"  [✗] Could not fetch episode page")
                 summary.add_failed(ep_name)
                 continue
-            soup3   = BeautifulSoup(r3.text, 'html.parser')
-            dl_link = next((a['href'] for a in soup3.find_all('a', href=True)
-                            if f'dl.{PLUTO_DOMAIN}' in a['href']), None)
-            if not dl_link:
-                safe_print(f"  [✗] No download link on episode page")
-                summary.add_failed(ep_name)
-                continue
-            direct = resolve_plutomovies_dl(dl_link, session)
             if not direct:
                 safe_print(f"  [✗] Could not resolve download link")
                 summary.add_failed(ep_name)
                 continue
+
+            # HEAD check — re-resolve if token expired
+            if not _cdn_alive(direct):
+                safe_print(f"  [*] CDN token expired — re-resolving...")
+                direct = resolve_plutomovies_dl(dl_link, session)
+                if not direct:
+                    safe_print(f"  [✗] Re-resolve failed")
+                    summary.add_failed(ep_name)
+                    continue
+
             ext = 'mkv' if 'mkv' in direct.lower() else 'mp4'
             download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
                           series_url=url, series_name=name,
                           bandwidth_limit=bw, quality=quality,
                           current_process=cur_proc,
                           stop_flag=stop, wait_fn=ctx.get('wait'))
-            ep_count += 1
             time.sleep(0.5)
 
     summary.report()
