@@ -7,12 +7,10 @@ import re
 import sys
 import json
 import time
-import socket
 import threading
 import subprocess
 import tempfile
 import hashlib
-from collections import deque
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -529,48 +527,6 @@ def categorize_error(exception, status_code=None):
     # Generic fallback
     return ('unknown', True, 'Unknown error — will retry')
 
-def network_is_available(timeout=3):
-    probes = [('1.1.1.1', 53), ('8.8.8.8', 53)]
-    for host, port in probes:
-        try:
-            conn = socket.create_connection((host, port), timeout=timeout)
-            conn.close()
-            return True
-        except OSError:
-            continue
-    return False
-
-def _mark_paused_download(series_url, filename, filepath, expected_size, series_name=''):
-    if not series_url or not filename or not filepath:
-        return
-    try:
-        progress_bytes = os.path.getsize(filepath) if os.path.exists(filepath) else 0
-        ep_key = f"{series_url}:{filename}"
-        DownloadReceipt.mark_paused(ep_key, filepath, progress_bytes, expected_size or 0)
-        if series_name:
-            mark_episode_current(series_url, series_name, filename)
-        log_progress(filename, '', 'paused', reason='network interruption')
-    except Exception:
-        pass
-
-def _looks_like_tls_failure(text):
-    t = (text or '').lower()
-    patterns = (
-        'ssl/tls handshake failure',
-        'tls handshake failure',
-        'handshake failure',
-        'connection was forcibly closed by the remote host',
-        'remote host',
-        'errorcode=1',
-        'socketcore.cc',
-        'certificate',
-    )
-    return any(p in t for p in patterns)
-
-def _is_fragile_host(url):
-    u = (url or '').lower()
-    return any(token in u for token in ('downloadwella', 'wetafiles', 'dwbe', 'dramakey'))
-
 
 RESUME_LOCK = threading.Lock()
 
@@ -1056,12 +1012,9 @@ def download_with_aria2c(url, folder, filename, summary,
 
     progress = LiveProgress(filename, parallel=parallel_mode)
     start_time = time.time()
-    fragile_host = _is_fragile_host(url)
 
     for attempt in range(retries):
         try:
-            split_count = '4' if fragile_host else '16'
-            recent_output = deque(maxlen=40)
             cmd = [
                 'aria2c',
                 '-c',  # Continue/resume support (key for resumable downloads!)
@@ -1073,7 +1026,7 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--save-session', session_file,
                 '--save-session-interval=30',
                 '--file-allocation=none',
-                '-x', split_count, '-s', split_count,
+                '-x', '16', '-s', '16',
                 '--min-split-size', '1M',
                 '--piece-length', '1M',
                 '--max-concurrent-downloads', '1',
@@ -1097,33 +1050,10 @@ def download_with_aria2c(url, folder, filename, summary,
             # Set filepath for pause handler using callback
             _notify_current_state(series_url, series_name or folder, filename, filepath, expected_size)
 
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                bufsize=1,
-            )
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             register_process(proc)
             if current_process is not None:
                 current_process[0] = proc
-
-            def _read_output():
-                try:
-                    for line in proc.stdout:
-                        clean = line.strip()
-                        if not clean:
-                            continue
-                        recent_output.append(clean)
-                        debug_print(f"[aria2] {clean}")
-                except Exception:
-                    pass
-
-            reader = threading.Thread(target=_read_output, daemon=True)
-            reader.start()
 
             # Poll instead of blocking wait — allows stop_flag to interrupt
             stopped = False
@@ -1145,12 +1075,6 @@ def download_with_aria2c(url, folder, filename, summary,
                     stalled = True
                     break
                 time.sleep(0.5)
-            try:
-                if proc.stdout:
-                    proc.stdout.close()
-            except Exception:
-                pass
-            reader.join(timeout=1)
             finish_process(proc)
             code = proc.returncode if proc.returncode is not None else -1
             unregister_process(proc)
@@ -1163,23 +1087,6 @@ def download_with_aria2c(url, folder, filename, summary,
                 return False
             if stalled:
                 progress.fail()
-                output_text = '\n'.join(recent_output)
-                if not network_is_available() and os.path.exists(filepath):
-                    _mark_paused_download(series_url, filename, filepath, expected_size, series_name or folder)
-                    safe_print(f"[*] Network lost - paused at {os.path.getsize(filepath)/(1024*1024):.1f}MB. Use resume when back online.")
-                    _cleanup_session_file(session_file)
-                    return False
-                if fragile_host and _looks_like_tls_failure(output_text):
-                    debug_print("[*] aria2c hit TLS/host failure on fragile host - falling back to requests resume")
-                    _cleanup_session_file(session_file)
-                    return download_with_requests(
-                        url, folder, filename, summary,
-                        stop_flag=stop_flag,
-                        parallel_mode=parallel_mode,
-                        series_url=series_url,
-                        series_name=series_name,
-                        expected_size=expected_size
-                    )
                 safe_print(f"[✗] aria2c stalled for {idle_timeout}s — moving to next episode")
                 _cleanup_session_file(session_file)
                 summary.add_failed(filename)
@@ -1220,24 +1127,7 @@ def download_with_aria2c(url, folder, filename, summary,
                     return False
             else:
                 progress.fail()
-                output_text = '\n'.join(recent_output)
-                if not network_is_available() and os.path.exists(filepath):
-                    _mark_paused_download(series_url, filename, filepath, expected_size, series_name or folder)
-                    safe_print(f"[*] Network lost - paused at {os.path.getsize(filepath)/(1024*1024):.1f}MB. Use resume when back online.")
-                    _cleanup_session_file(session_file)
-                    return False
-                if fragile_host and _looks_like_tls_failure(output_text):
-                    debug_print("[*] aria2c failed on fragile host - falling back to requests resume")
-                    _cleanup_session_file(session_file)
-                    return download_with_requests(
-                        url, folder, filename, summary,
-                        stop_flag=stop_flag,
-                        parallel_mode=parallel_mode,
-                        series_url=series_url,
-                        series_name=series_name,
-                        expected_size=expected_size
-                    )
-                safe_print(f"[x] aria2c failed (code {code})")
+                safe_print(f"[✗] aria2c failed (code {code})")
                 if attempt < retries - 1:
                     safe_print(f"[*] retrying ({attempt+2}/{retries})...")
                     time.sleep(5)
@@ -1254,11 +1144,7 @@ def download_with_aria2c(url, folder, filename, summary,
             if current_process is not None:
                 current_process[0] = None
             _cleanup_session_file(session_file)
-            if os.path.exists(filepath) and not network_is_available():
-                _mark_paused_download(series_url, filename, filepath, expected_size, series_name or folder)
-                safe_print(f"[*] Network interrupted - kept partial file for resume ({os.path.getsize(filepath)/(1024*1024):.1f}MB)")
-                return False
-            safe_print(f"[x] aria2c error: {e}")
+            safe_print(f"[✗] aria2c error: {e}")
             summary.add_failed(filename)
             return False
     _cleanup_session_file(session_file)
@@ -1303,7 +1189,9 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
                 if stop_flag and stop_flag[0]:
                     progress.fail()
                     safe_print("[!] stopped")
-                    _mark_paused_download(series_url, filename, filepath, total, series_name or folder)
+                    if series_url:
+                        ep_key = f"{series_url}:{filename}"
+                        DownloadReceipt.mark_paused(ep_key, filepath, os.path.getsize(filepath), total)
                     return False
                 if chunk:
                     f.write(chunk)
@@ -1333,13 +1221,10 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
     except Exception as e:
         progress.fail()
         try:
-            current_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+            if os.path.exists(filepath):
+                os.remove(filepath)
         except Exception:
-            current_size = 0
-        if current_size and not network_is_available():
-            _mark_paused_download(series_url, filename, filepath, expected_size or current_size, series_name or folder)
-            safe_print(f"[*] Network interrupted - kept partial file for resume ({current_size/(1024*1024):.1f}MB)")
-            return False
+            pass
         safe_print(f"[✗] requests error: {e}")
         summary.add_failed(filename)
         return False
@@ -1442,20 +1327,46 @@ def download_with_ytdlp(url, folder, filename, summary,
         return False
 
 def _select_social_format(url, preferred_quality='720p'):
-    """Fast social format selection without a metadata pre-probe."""
-    preferred = str(preferred_quality or '720p').lower()
-    if preferred == 'best':
+    """Inspect yt-dlp formats for social videos. Prefer 720p, else best available."""
+    if str(preferred_quality).lower() == 'best':
         return 'bestvideo+bestaudio/best', 'best available'
-    preferred_height = 2160 if preferred == '4k' else 720
-    m = re.search(r'(\d+)', preferred)
-    if m and preferred != '4k':
+    preferred_height = 720
+    m = re.search(r'(\d+)', str(preferred_quality or '720p'))
+    if m:
         preferred_height = int(m.group(1))
-    fmt = (
-        f'bestvideo[height={preferred_height}]+bestaudio/'
-        f'best[height={preferred_height}]/'
-        f'bestvideo+bestaudio/best'
-    )
-    return fmt, f'{preferred_height}p auto'
+    try:
+        result = subprocess.run(
+            ['yt-dlp', '-J', '--no-playlist', '--no-warnings', url],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
+        )
+        if result.returncode != 0 or not result.stdout:
+            return 'bestvideo+bestaudio/best', 'best available'
+        info = json.loads(result.stdout)
+        formats = info.get('formats') or []
+        heights = sorted({
+            int(f.get('height')) for f in formats
+            if isinstance(f.get('height'), int) and f.get('height') > 0
+        })
+        if heights:
+            debug_print(f"[*] Available social formats: {', '.join(str(h) + 'p' for h in heights)}")
+        if preferred_height in heights:
+            debug_print(f"[*] Selected social format: {preferred_height}p")
+            return (
+                f'bestvideo[height={preferred_height}]+bestaudio/'
+                f'best[height={preferred_height}]/best',
+                f'{preferred_height}p'
+            )
+        if heights:
+            best_height = max(heights)
+            debug_print(f"[*] Selected social format: best available ({best_height}p)")
+            return (
+                f'bestvideo[height={best_height}]+bestaudio/'
+                f'best[height={best_height}]/best',
+                f'best available ({best_height}p)'
+            )
+    except Exception as e:
+        debug_print(f"[*] Social format inspection failed: {e}")
+    return 'bestvideo+bestaudio/best', 'best available'
 
 def _find_recent_media(folder, since_time):
     try:

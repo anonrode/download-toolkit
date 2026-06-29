@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 
 from downloader import (
     DownloadSummary, download_file, download_batch, download_with_ytdlp,
-    download_social_ytdlp, Prefetcher, safe_print, safe_filename, debug_print,
+    download_social_ytdlp, Prefetcher, safe_print, safe_filename,
     find_direct_video, base_domain, is_streaming_link,
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
     LiveProgress, _notify_start, DownloadReceipt,
@@ -60,21 +60,18 @@ def safe_get(session, url, timeout=20, referer=None, retries=3):
             except TypeError:
                 # Some session types don't support verify= kwarg
                 r = session.get(url, timeout=timeout, headers=headers)
+            
+            # Handle 403 with JavaScript redirect (loadedfiles.org pattern)
             if r.status_code == 403:
-                m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text or '')
+                m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text)
                 if m:
                     redirect_url = m.group(1)
                     if not redirect_url.startswith('http'):
                         redirect_url = urljoin(url, redirect_url)
                     debug_print(f"  [*] Following JS redirect from 403: {redirect_url[:60]}...")
                     if retries > 1:
-                        return safe_get(
-                            session,
-                            redirect_url,
-                            timeout=timeout,
-                            referer=referer,
-                            retries=retries - 1,
-                        )
+                        return safe_get(session, redirect_url, referer, retries - 1)
+            
             if not r.ok:
                 safe_print(f"  [!] HTTP {r.status_code}: {url[:60]}")
                 return None
@@ -253,53 +250,18 @@ def resolve_downloadwella(url, session):
         r = safe_get(session, url, timeout=20)
         if not r:
             return None
-        direct = find_direct_video(r.text)
-        if direct:
-            return direct
         soup = BeautifulSoup(r.text, 'html.parser')
-        for a in soup.find_all('a', href=True):
-            href = a['href'].strip()
-            lower = href.lower()
-            if any(ext in lower for ext in ('.mkv', '.mp4', '.webm', '.m3u8')):
-                return urljoin(r.url, href)
-            if any(token in lower for token in ('download', 'dl', 'cdn', 'files')):
-                if href.startswith('http'):
-                    return href
         form = soup.find('form')
-        if form:
-            data = {inp.get('name'): inp.get('value', '')
-                    for inp in form.find_all('input') if inp.get('name')}
-            data.setdefault('method_free', 'Free Download')
-            action = form.get('action') or url
-            post_url = urljoin(r.url, action)
-            headers = {'Referer': r.url, 'User-Agent': UA_DESKTOP}
-            try:
-                r2 = session.post(post_url, data=data, timeout=20, headers=headers, allow_redirects=False)
-            except Exception:
-                r2 = session.post(post_url, data=data, timeout=20, headers=headers)
-            location = r2.headers.get('location')
-            if location:
-                return urljoin(post_url, location)
-            direct = find_direct_video(getattr(r2, 'text', ''))
-            if direct:
-                return direct
-            for pattern in (
-                r"""(?:downloadUrl|downloadURL)\s*[:=]\s*['"]([^'"]+)['"]""",
-                r"""(?:window\.location|location\.href)\s*=\s*['"]([^'"]+)['"]""",
-                r"""href=['"]([^'"]+\.(?:mkv|mp4|webm|m3u8)[^'"]*)['"]""",
-            ):
-                m = re.search(pattern, getattr(r2, 'text', ''), re.I)
-                if m:
-                    return urljoin(post_url, m.group(1))
-        for pattern in (
-            r"""(?:downloadUrl|downloadURL)\s*[:=]\s*['"]([^'"]+)['"]""",
-            r"""(?:window\.location|location\.href)\s*=\s*['"]([^'"]+)['"]""",
-            r"""href=['"]([^'"]+\.(?:mkv|mp4|webm|m3u8)[^'"]*)['"]""",
-        ):
-            m = re.search(pattern, r.text, re.I)
-            if m:
-                return urljoin(r.url, m.group(1))
-        return None
+        if not form:
+            return None
+        data = {inp.get('name'): inp.get('value', '')
+                for inp in form.find_all('input') if inp.get('name')}
+        data['method_free'] = 'Free Download'
+        try:
+            r2 = session.post(url, data=data, timeout=20)
+        except Exception:
+            r2 = session.post(url, data=data, timeout=20)
+        return find_direct_video(r2.text)
     except Exception as e:
         safe_print(f"  [!] Downloadwella: {e}")
         return None
@@ -976,14 +938,16 @@ def extract_9jarocks(url, session, ctx=None):
         if _stopped(ctx):
             break
         _wait(ctx)
+        # Extract from URL slug first (has real episode name), anchor text is always "DOWNLOAD"
         slug_part = lf_url.rstrip('/').split('/')[-1]
+        # Strip extension from slug — will re-add with correct ext to avoid .mkv.mkv
         base_fname = re.sub(r'\.(mkv|mp4|webm)$', '', safe_filename(slug_part))
         safe_print(f"\n[{i}/{len(lf_links)}] {base_fname}")
         done, _ = already_downloaded(folder, base_fname + '.mp4', series_url=url)
         if not done:
             done, _ = already_downloaded(folder, base_fname + '.mkv', series_url=url)
         if done:
-            safe_print(f"  [???] Already downloaded ??? skipping")
+            safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
             continue
         direct = resolve_loadedfiles(lf_url, session)
@@ -994,7 +958,7 @@ def extract_9jarocks(url, session, ctx=None):
                           bandwidth_limit=bw, current_process=cur_proc,
                           stop_flag=stop, wait_fn=ctx.get('wait'))
         else:
-            safe_print(f"  [???] Could not extract: {base_fname}")
+            safe_print(f"  [✗] Could not extract: {base_fname}")
             summary.add_failed(base_fname)
         time.sleep(0.5)
     summary.report()
@@ -1601,10 +1565,11 @@ def extract_plutomovies(url, session, ctx=None):
     safe_print(f"[*] Found {len(season_links)} season(s)")
 
     def _resolve_ep(ep_url):
+        """Fetch ep page and resolve CDN url. Returns (dl_link, direct) or (None, None)."""
         r3 = safe_get(session, ep_url, timeout=30)
         if not r3:
             return None, None
-        soup3 = BeautifulSoup(r3.text, 'html.parser')
+        soup3   = BeautifulSoup(r3.text, 'html.parser')
         dl_link = next((a['href'] for a in soup3.find_all('a', href=True)
                         if f'dl.{PLUTO_DOMAIN}' in a['href']), None)
         if not dl_link:
@@ -1613,12 +1578,12 @@ def extract_plutomovies(url, session, ctx=None):
         return dl_link, direct
 
     def _cdn_alive(cdn_url):
+        """Quick HEAD check to verify CDN token hasn't expired."""
         try:
             r = session.head(cdn_url, timeout=5, allow_redirects=True)
             return r.status_code in (200, 206)
         except Exception:
             return False
-
 
     for season_url in season_links:
         if _stopped(ctx):
@@ -1689,42 +1654,57 @@ def extract_plutomovies(url, session, ctx=None):
         all_eps = _filter_by_episode_range(all_eps, ctx)
         safe_print(f"  [*] Total: {len(all_eps)} episode(s)")
 
+
+        # Resolve and download each episode immediately.
+        # Prefetcher resolves next ep's CDN url in background while current ep downloads.
+        # HEAD check guards against expired tokens if current ep took too long.
+        # Prefetch ep[0] immediately, then prefetch ep[N+1] as soon as ep[N] starts downloading.
+        # Always prefetch every ep in order — alignment is guaranteed because
+        # we call get() for every ep before deciding to skip, so the queue never drifts.
         prefetcher = Prefetcher(_resolve_ep)
         if all_eps:
             prefetcher.prefetch(all_eps[0][0])
+
         for i, (ep_url, ep_name) in enumerate(all_eps, 1):
             if _stopped(ctx):
                 break
             _wait(ctx)
             safe_print(f"\n  [{i}/{len(all_eps)}] {ep_name}")
 
+            # Get prefetched result first — keeps queue aligned regardless of skip/fail
             dl_link, direct = prefetcher.get(timeout=30)
+
+            # Kick off prefetch for next ep immediately while we process current
             if i < len(all_eps):
                 prefetcher.prefetch(all_eps[i][0])
 
+            # Skip check AFTER get() so queue alignment is never broken
             done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
             if not done:
                 done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
             if done:
-                safe_print(f"  [???] Already downloaded ??? skipping")
+                safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
                 continue
 
             if not dl_link:
-                safe_print(f"  [???] Could not fetch episode page")
+                safe_print(f"  [✗] Could not fetch episode page")
                 summary.add_failed(ep_name)
                 continue
             if not direct:
-                safe_print(f"  [???] Could not resolve download link")
+                safe_print(f"  [✗] Could not resolve download link")
                 summary.add_failed(ep_name)
                 continue
+
+            # HEAD check — re-resolve if token expired
             if not _cdn_alive(direct):
-                safe_print(f"  [*] CDN token expired ??? re-resolving...")
+                safe_print(f"  [*] CDN token expired — re-resolving...")
                 direct = resolve_plutomovies_dl(dl_link, session)
                 if not direct:
-                    safe_print(f"  [???] Re-resolve failed")
+                    safe_print(f"  [✗] Re-resolve failed")
                     summary.add_failed(ep_name)
                     continue
+
             ext = 'mkv' if 'mkv' in direct.lower() else 'mp4'
             download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
                           series_url=url, series_name=name,
@@ -1742,10 +1722,9 @@ def _yt_quality_prompt(default_quality):
         '2': ('480p',  'bestvideo[height<=480]+bestaudio/best[height<=480]'),
         '3': ('720p',  'bestvideo[height<=720]+bestaudio/best[height<=720]'),
         '4': ('1080p', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'),
-        '5': ('4k',    'bestvideo[height<=2160]+bestaudio/best[height<=2160]'),
     }
     # Work out which number matches the current default
-    label_to_num = {'360p': '1', '480p': '2', '720p': '3', '1080p': '4', '4k': '5'}
+    label_to_num = {'360p': '1', '480p': '2', '720p': '3', '1080p': '4'}
     default_label = '480p'
     for label in label_to_num:
         if label in default_quality:
@@ -1753,9 +1732,9 @@ def _yt_quality_prompt(default_quality):
             break
     default_num = label_to_num.get(default_label, '2')
 
-    safe_print(f"\n  Quality: [1] 360p  [2] 480p  [3] 720p  [4] 1080p  [5] 4k  (default: {default_label})")
+    safe_print(f"\n  Quality: [1] 360p  [2] 480p  [3] 720p  [4] 1080p  (default: {default_label})")
     try:
-        choice = input("  Pick [1-5] or Enter for default: ").strip()
+        choice = input("  Pick [1-4] or Enter for default: ").strip()
     except EOFError:
         choice = ''
     if not choice:
