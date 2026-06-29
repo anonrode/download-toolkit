@@ -102,6 +102,10 @@ def load_config():
                 merged = {**DEFAULT_CONFIG, **cfg}
                 if merged.get('log_level') not in ('normal', 'debug'):
                     merged['log_level'] = 'normal'
+                if merged.get('quality') not in ('360p', '480p', '720p', '1080p', '4k', 'best'):
+                    merged['quality'] = DEFAULT_CONFIG['quality']
+                if merged.get('social_quality') not in ('360p', '480p', '720p', '1080p', '4k', 'best'):
+                    merged['social_quality'] = DEFAULT_CONFIG['social_quality']
                 return merged
     except Exception:
         pass
@@ -235,6 +239,7 @@ def setup_signal_handler():
 
 def _quality_str(q):
     q = str(q)
+    if '2160' in q or '4k' in q.lower(): return 'bestvideo[height<=2160]+bestaudio/best[height<=2160]'
     if '1080' in q: return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
     if '720'  in q: return 'bestvideo[height<=720]+bestaudio/best[height<=720]'
     if '480'  in q: return 'bestvideo[height<=480]+bestaudio/best[height<=480]'
@@ -359,12 +364,12 @@ def handle_settings(parts, cfg):
     key = parts[1].lower()
     if key == 'quality' and len(parts) >= 3:
         q = parts[2]
-        if q in ('360p', '480p', '720p', '1080p', 'best'):
+        if q in ('360p', '480p', '720p', '1080p', '4k', 'best'):
             cfg['quality'] = q
             save_config(cfg)
             print(f"[ok] Quality: {q}")
         else:
-            print("[!] Valid: 360p 480p 720p 1080p best")
+            print("[!] Valid: 360p 480p 720p 1080p 4k best")
     elif key == 'parallel' and len(parts) >= 3:
         try:
             n = int(parts[2])
@@ -399,12 +404,12 @@ def handle_settings(parts, cfg):
             print("[!] Valid: settings log normal | settings log debug")
     elif key in ('social-quality', 'social_quality') and len(parts) >= 3:
         q = parts[2].lower()
-        if q in ('360p', '480p', '720p', '1080p', 'best'):
+        if q in ('360p', '480p', '720p', '1080p', '4k', 'best'):
             cfg['social_quality'] = q
             save_config(cfg)
             print(f"[ok] Social quality: {q}")
         else:
-            print("[!] Valid: 360p 480p 720p 1080p best")
+            print("[!] Valid: 360p 480p 720p 1080p 4k best")
     elif key in ('auto-update', 'autoupdate') and len(parts) >= 3:
         try:
             days = int(parts[2])
@@ -460,11 +465,11 @@ def _show_settings(cfg):
     print(f"  Disabled:  {', '.join(dis) if dis else 'none'}")
     print(f"  Save dir:  {BASE_DIR}")
     print(f"{'='*50}")
-    print(f"  settings quality <360p|480p|720p|1080p>")
+    print(f"  settings quality <360p|480p|720p|1080p|4k|best>")
     print(f"  settings parallel <1|2|3>")
     print(f"  settings bandwidth <KB/s or 0=unlimited>")
     print(f"  settings log <normal|debug>")
-    print(f"  settings social-quality <360p|480p|720p|1080p|best>")
+    print(f"  settings social-quality <360p|480p|720p|1080p|4k|best>")
     print(f"  settings auto-update <days>")
     print(f"  settings disable/enable <site>")
     print(f"{'='*50}")
