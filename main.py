@@ -32,22 +32,6 @@ STOP_FLAG       = [False]   # stops current batch — extractor loops check this
 EXIT_FLAG       = [False]   # exits entire script — REPL loop checks this
 PAUSE_FLAG      = [False]   # toggles aria2c SIGSTOP/SIGCONT — Ctrl+P
 
-# Save original terminal settings so we can always restore cooked mode
-ORIGINAL_TERM = [None]
-try:
-    import termios
-    ORIGINAL_TERM[0] = termios.tcgetattr(sys.stdin.fileno())
-except Exception:
-    pass
-
-def _restore_terminal():
-    """Force terminal back to cooked mode (echo + line editing)."""
-    if ORIGINAL_TERM[0] is not None:
-        try:
-            import termios
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, ORIGINAL_TERM[0])
-        except Exception:
-            pass
 
 # Track current download so we can mark_paused() on Ctrl+C
 CURRENT_SERIES_URL   = [None]
@@ -154,7 +138,6 @@ def setup_signal_handler():
     def handler(sig, frame):
         _CTRL_C_COUNT[0] += 1
         proc = CURRENT_PROCESS[0]
-        _restore_terminal()  # Always restore terminal on Ctrl+C
 
         if _CTRL_C_COUNT[0] == 1:
             STOP_FLAG[0] = True
@@ -265,86 +248,8 @@ def setup_signal_handler():
     except Exception:
         pass
 
-def _start_pause_listener():
-    """
-    Background thread that reads raw keypresses from /dev/tty.
-    Ctrl+P (0x10) toggles SIGSTOP/SIGCONT on the active aria2c process.
-    Exits cleanly when EXIT_FLAG is set.
-    Only active on platforms that have /dev/tty (Termux/Linux).
-    """
-    import os
-    if not os.path.exists('/dev/tty'):
-        return  # Git Bash / Windows — silently skip
-
-    def _reader():
-        import os, time, termios, tty, select
-        while not EXIT_FLAG[0]:
-            # Wait until there is an active download process before capturing keystrokes
-            if CURRENT_PROCESS[0] is None:
-                time.sleep(0.1)
-                continue
-
-            try:
-                fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
-                try:
-                    old = termios.tcgetattr(fd)
-                    tty.setraw(fd)
-                    last_ctrl_c = 0.0
-                    while (CURRENT_PROCESS[0] is not None or PAUSE_FLAG[0]) and not EXIT_FLAG[0] and not STOP_FLAG[0]:
-                        # Non-blocking read — poll every 100ms
-                        r, _, _ = select.select([fd], [], [], 0.1)
-                        if not r:
-                            continue
-                        ch = os.read(fd, 1)
-                        if ch == b'\x03':  # Ctrl+C
-                            now = time.time()
-                            proc = CURRENT_PROCESS[0]
-                            if PAUSE_FLAG[0]:
-                                # Currently paused: check if second Ctrl+C is pressed quickly to quit
-                                if now - last_ctrl_c < 1.5:
-                                    PAUSE_FLAG[0] = False
-                                    STOP_FLAG[0] = True
-                                    import signal
-                                    os.kill(os.getpid(), signal.SIGINT)
-                                else:
-                                    PAUSE_FLAG[0] = False
-                                    last_ctrl_c = now
-                                    try:
-                                        sys.stdout.write('\n  [▶] Resumed\n')
-                                        sys.stdout.flush()
-                                    except Exception:
-                                        pass
-                            else:
-                                if proc is None:
-                                    continue
-                                PAUSE_FLAG[0] = True
-                                last_ctrl_c = now
-                                try:
-                                    sys.stdout.write('\n  [‖] Paused — press Ctrl+C to resume | Ctrl+C again quickly to stop\n')
-                                    sys.stdout.flush()
-                                except Exception:
-                                    pass
-                        elif ch in (b'q', b'Q', b'\r', b'\n'):  # Allow q/Q/Enter to exit while paused
-                            if PAUSE_FLAG[0]:
-                                PAUSE_FLAG[0] = False
-                                STOP_FLAG[0] = True
-                                import signal
-                                os.kill(os.getpid(), signal.SIGINT)
-                finally:
-                    # Safely restore terminal mode and close file descriptor to prevent leaks
-                    try:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-                    except Exception:
-                        pass
-                    try:
-                        os.close(fd)
-                    except Exception:
-                        pass
-            except Exception:
-                time.sleep(0.5)  # Avoid tight loop in case of errors
-
-    t = threading.Thread(target=_reader, daemon=True)
-    t.start()
+# Raw mode listener removed — it caused terminal glitches on Termux.
+# Ctrl+C is handled natively via signal handler. Use 'resume' command to resume.
 
 def _quality_str(q):
     q = str(q)
@@ -1243,7 +1148,7 @@ def main():
     set_output_mode(cfg.get('log_level', 'normal'))
     session = make_session()
     setup_signal_handler()
-    _start_pause_listener()
+    # _start_pause_listener() — removed (caused terminal glitches)
     
     print_banner(cfg)
 
@@ -1295,7 +1200,7 @@ def main():
             print(f"  history                - Show past download history")
             print(f"  exit                   - Quit app")
             print(f"{'='*50}")
-            print(f"  Ctrl+C = Pause/Resume | Ctrl+C twice = Stop active batch")
+            print(f"  Ctrl+C once = pause   Ctrl+C twice = stop batch   Ctrl+C 3x = exit")
             print(f"{'='*50}")
 
         elif lower == 'history':
