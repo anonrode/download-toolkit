@@ -39,6 +39,10 @@ PRINT_LOCK   = threading.Lock()
 STATE_LOCK   = threading.RLock()
 PROCESS_LOCK = threading.Lock()
 ACTIVE_PROCESSES = set()
+_ARIA2C_AVAILABLE = [None]
+_YTDLP_AVAILABLE  = [None]
+_FFMPEG_AVAILABLE = [None]
+_TOOL_LOCK        = threading.Lock()
 OUTPUT_MODE = 'normal'
 LAST_STATUS = {
     'screen': 'Ready',
@@ -207,7 +211,8 @@ class DownloadReceipt:
     @staticmethod
     def load_all():
         """Load all receipts."""
-        return _atomic_read_json(RECEIPT_FILE, {})
+        with STATE_LOCK:
+            return _atomic_read_json(RECEIPT_FILE, {})
     
     @staticmethod
     def save_all(receipts):
@@ -405,21 +410,23 @@ def assert_disk_space(min_mb=200):
 
 # ─── DOWNLOAD HISTORY ─────────────────────────────────────────
 def load_history():
-    try:
-        os.makedirs(BASE_DIR, exist_ok=True)
-        if os.path.exists(LOG_FILE):
-            with open(LOG_FILE, 'r') as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {}
+    with HISTORY_LOCK:
+        try:
+            os.makedirs(BASE_DIR, exist_ok=True)
+            if os.path.exists(LOG_FILE):
+                with open(LOG_FILE, 'r') as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
 
 def save_history(history):
-    try:
-        os.makedirs(BASE_DIR, exist_ok=True)
-        _atomic_write_json(LOG_FILE, history)
-    except Exception:
-        pass
+    with HISTORY_LOCK:
+        try:
+            os.makedirs(BASE_DIR, exist_ok=True)
+            _atomic_write_json(LOG_FILE, history)
+        except Exception:
+            pass
 
 def _media_scan(filepath):
     """Trigger Android media scanner on the file's folder so WhatsApp picks it up fast."""
@@ -536,7 +543,7 @@ def categorize_error(exception, status_code=None):
 
 
 RESUME_LOCK  = threading.Lock()
-HISTORY_LOCK = threading.Lock()
+HISTORY_LOCK = threading.RLock()
 
 def _load_resume_state_unlocked():
     return _atomic_read_json(RESUME_FILE, {})
@@ -772,8 +779,11 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
             if path and os.path.exists(path):
                 # If there are incomplete files on disk, it means the done status is corrupt/outdated
                 if os.path.exists(path + '.aria2') or os.path.exists(path + '.part'):
-                    receipt['status'] = 'paused'
-                    DownloadReceipt.save_all(DownloadReceipt.load_all())  # Save state change
+                    with STATE_LOCK:
+                        receipts = DownloadReceipt.load_all()
+                        if ep_key in receipts:
+                            receipts[ep_key]['status'] = 'paused'
+                            DownloadReceipt.save_all(receipts)
                 else:
                     safe_print(f"  [✓] Already downloaded (receipt verified)")
                     return True, path
@@ -1000,6 +1010,49 @@ def _update_ytdlp(channel='stable'):
     except Exception:
         pass
 
+def _check_aria2c_availability():
+    global _ARIA2C_AVAILABLE
+    with _TOOL_LOCK:
+        if _ARIA2C_AVAILABLE[0] is not None:
+            return _ARIA2C_AVAILABLE[0]
+        import shutil
+        if shutil.which('aria2c') is not None:
+            _ARIA2C_AVAILABLE[0] = True
+        else:
+            if _install_aria2c():
+                _ARIA2C_AVAILABLE[0] = True
+            else:
+                _ARIA2C_AVAILABLE[0] = False
+        return _ARIA2C_AVAILABLE[0]
+
+def _check_ytdlp_availability():
+    global _YTDLP_AVAILABLE
+    with _TOOL_LOCK:
+        if _YTDLP_AVAILABLE[0] is not None:
+            return _YTDLP_AVAILABLE[0]
+        import shutil
+        if shutil.which('yt-dlp') is not None:
+            _YTDLP_AVAILABLE[0] = True
+        else:
+            if _install_ytdlp():
+                _YTDLP_AVAILABLE[0] = True
+            else:
+                _YTDLP_AVAILABLE[0] = False
+        return _YTDLP_AVAILABLE[0]
+
+def _check_ffmpeg_availability():
+    global _FFMPEG_AVAILABLE
+    with _TOOL_LOCK:
+        if _FFMPEG_AVAILABLE[0] is not None:
+            return _FFMPEG_AVAILABLE[0]
+        import shutil
+        if shutil.which('ffmpeg') is not None:
+            _FFMPEG_AVAILABLE[0] = True
+        else:
+            safe_print("[!] ffmpeg not found — install with: pkg install ffmpeg")
+            _FFMPEG_AVAILABLE[0] = False
+        return _FFMPEG_AVAILABLE[0]
+
 # ─── DOWNLOAD BACKENDS ────────────────────────────────────────
 def download_with_aria2c(url, folder, filename, summary,
                          bandwidth_limit=0, current_process=None,
@@ -1027,19 +1080,16 @@ def download_with_aria2c(url, folder, filename, summary,
         pass
     retries = int(config.get('download_retries', 3))
     
-    has_aria2c = shutil.which('aria2c') is not None
-    if not has_aria2c:
-        if not _install_aria2c():
-            safe_print("[!] aria2c unavailable — falling back to requests")
-            return download_with_requests(
-                url, folder, filename, summary,
-                stop_flag=stop_flag,
-                parallel_mode=parallel_mode,
-                series_url=series_url,
-                series_name=series_name,
-                expected_size=expected_size
-            )
-        has_aria2c = True
+    if not _check_aria2c_availability():
+        safe_print("[!] aria2c unavailable — falling back to requests")
+        return download_with_requests(
+            url, folder, filename, summary,
+            stop_flag=stop_flag,
+            parallel_mode=parallel_mode,
+            series_url=series_url,
+            series_name=series_name,
+            expected_size=expected_size
+        )
 
     os.makedirs(folder, exist_ok=True)
     safe_fname    = re.sub(r'[^\w]', '_', filename)[:30]
@@ -1318,18 +1368,11 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
 def download_with_ytdlp(url, folder, filename, summary,
                         quality=None, current_process=None, stop_flag=None,
                         pause_flag=None, parallel_mode=False):
-    import shutil
-    has_ytdlp  = shutil.which('yt-dlp') is not None
-    has_ffmpeg = shutil.which('ffmpeg') is not None
-    has_aria2c = shutil.which('aria2c') is not None
-
-    if not has_ytdlp:
-        if not _install_ytdlp():
-            safe_print("[!] yt-dlp unavailable")
-            summary.add_failed(filename)
-            return False
-    if not has_ffmpeg:
-        safe_print("[!] ffmpeg not found — install with: pkg install ffmpeg")
+    if not _check_ytdlp_availability():
+        safe_print("[!] yt-dlp unavailable")
+        summary.add_failed(filename)
+        return False
+    if not _check_ffmpeg_availability():
         summary.add_failed(filename)
         return False
 
@@ -1442,100 +1485,7 @@ def download_with_ytdlp(url, folder, filename, summary,
         safe_print(f"[✗] yt-dlp error: {e}")
         summary.add_failed(filename)
         return False
-    import shutil
-    has_ytdlp  = shutil.which('yt-dlp') is not None
-    has_ffmpeg = shutil.which('ffmpeg') is not None
-    has_aria2c = shutil.which('aria2c') is not None
 
-    if not has_ytdlp:
-        if not _install_ytdlp():
-            safe_print("[!] yt-dlp unavailable")
-            summary.add_failed(filename)
-            return False
-    if not has_ffmpeg:
-        safe_print("[!] ffmpeg not found — install with: pkg install ffmpeg")
-        summary.add_failed(filename)
-        return False
-
-    os.makedirs(folder, exist_ok=True)
-    base        = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
-    out_template = os.path.join(folder, base + '.%(ext)s')
-    quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
-
-    progress = LiveProgress(filename, parallel=parallel_mode)
-    proc = None
-    try:
-        cmd = [
-            'yt-dlp',
-            '-f', quality_str,
-            '--merge-output-format', 'mp4',
-            '-o', out_template,
-            '--no-playlist',
-            '--retries', '3',
-            '--fragment-retries', '3',
-            '--retry-sleep', '10',
-            '--no-warnings', '--progress', '--newline',
-        ]
-        if has_aria2c:
-            cmd += [
-                '--external-downloader', 'aria2c',
-                '--external-downloader-args',
-                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=10 --timeout=120 '
-                '--connect-timeout=60 --file-allocation=none --min-split-size=1M'
-            ]
-        cmd.append(url)
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-        register_process(proc)
-        if current_process is not None:
-            current_process[0] = proc
-
-        started = time.time()
-        hard_timeout = 6 * 60 * 60
-        while proc.poll() is None:
-            if stop_flag and stop_flag[0]:
-                proc.terminate()
-                break
-            if time.time() - started > hard_timeout:
-                proc.terminate()
-                safe_print("[✗] yt-dlp timed out — moving on")
-                break
-            time.sleep(0.5)
-        finish_process(proc)
-        code = proc.returncode if proc.returncode is not None else -1
-        unregister_process(proc)
-        if current_process is not None:
-            current_process[0] = None
-
-        if code == 0:
-            for ext in ['mp4', 'mkv', 'webm']:
-                p = os.path.join(folder, f"{base}.{ext}")
-                if os.path.exists(p):
-                    size_mb = os.path.getsize(p) / (1024 * 1024)
-                    progress.done(size_mb)
-                    summary.add_success()
-                    log_download(filename, url, p)
-                    return True
-            # yt-dlp exited 0 but no output file — likely failed
-            progress.fail()
-            safe_print("[✗] yt-dlp exited successfully but produced no file")
-            summary.add_failed(filename)
-            return False
-        else:
-            progress.fail()
-            if stop_flag and stop_flag[0]:
-                safe_print("[*] yt-dlp stopped")
-            else:
-                safe_print("[✗] yt-dlp failed")
-                summary.add_failed(filename)
-            return False
-    except Exception as e:
-        unregister_process(proc)
-        if current_process is not None:
-            current_process[0] = None
-        progress.fail()
-        safe_print(f"[✗] yt-dlp error: {e}")
-        summary.add_failed(filename)
-        return False
 
 def _select_social_format(url, preferred_quality='720p'):
     """Inspect yt-dlp formats for social videos. Prefer 720p, else best available."""
@@ -1600,15 +1550,10 @@ def _find_recent_media(folder, since_time):
 def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                            quality_override=None, out_template=None, stop_flag=None,
                            preferred_quality='720p', smart_select=True):
-    import shutil
-    has_ytdlp  = shutil.which('yt-dlp') is not None
-    has_aria2c = shutil.which('aria2c') is not None
-
-    if not has_ytdlp:
-        if not _install_ytdlp():
-            safe_print("[!] yt-dlp unavailable")
-            summary.add_failed(filename)
-            return False
+    if not _check_ytdlp_availability():
+        safe_print("[!] yt-dlp unavailable")
+        summary.add_failed(filename)
+        return False
 
     os.makedirs(folder, exist_ok=True)
     base = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
