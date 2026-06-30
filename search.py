@@ -427,8 +427,17 @@ def _present_results(results, raw_query):
         safe_print("[*] Try different spelling or paste URL directly")
         return None
 
-    # Limit to top 5 results to prevent screen clutter
-    display_results = results[:5]
+    # Limit each site/platform to at most 3 results to ensure search results diversity
+    counts = {}
+    balanced = []
+    for site, url in results:
+        base_site = site.split(' (')[0] if ' (' in site else site
+        base_site = base_site.split(':')[0] if ':' in base_site else base_site
+        counts[base_site] = counts.get(base_site, 0) + 1
+        if counts[base_site] <= 3:
+            balanced.append((site, url))
+    
+    display_results = balanced[:8]
 
     if len(display_results) == 1:
         site, url = display_results[0]
