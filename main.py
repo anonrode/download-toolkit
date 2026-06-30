@@ -297,6 +297,10 @@ def _start_pause_listener():
                                     sys.stdout.flush()
                                 except Exception:
                                     pass
+                        elif ch == b'\x03':  # Ctrl+C
+                            # Trigger SIGINT manually since raw mode intercepts it
+                            import signal
+                            os.kill(os.getpid(), signal.SIGINT)
                 finally:
                     # Safely restore terminal mode and close file descriptor to prevent leaks
                     try:
