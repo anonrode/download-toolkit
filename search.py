@@ -427,8 +427,11 @@ def _present_results(results, raw_query):
         safe_print("[*] Try different spelling or paste URL directly")
         return None
 
-    if len(results) == 1:
-        site, url = results[0]
+    # Limit to top 5 results to prevent screen clutter
+    display_results = results[:5]
+
+    if len(display_results) == 1:
+        site, url = display_results[0]
         print(f"\n  Found on {site}:")
         print(f"  {url}")
         try:
@@ -440,17 +443,21 @@ def _present_results(results, raw_query):
         return None
 
     print()
-    print(f"  {'─'*46}")
-    for i, (site, url) in enumerate(results, 1):
-        print(f"  [{i}] {site}")
-        print(f"       {url}")
-    print(f"  {'─'*46}")
+    print(f"  {'─'*55}")
+    for i, (site, url) in enumerate(display_results, 1):
+        # Format: [1] [NKiri] Vincenzo (Korean Drama)
+        # We strip the "PlutoMovies" prefix if it exists to keep it short
+        source = site
+        if site.startswith("PlutoMovies "):
+            source = site.replace("PlutoMovies ", "Pluto")
+        print(f"  [{i}] [{source}]")
+    print(f"  {'─'*55}")
     try:
-        choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(results)).strip())
+        choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(display_results)).strip())
     except (ValueError, EOFError, KeyboardInterrupt):
         return None
-    if 1 <= choice <= len(results):
-        return results[choice - 1][1]
+    if 1 <= choice <= len(display_results):
+        return display_results[choice - 1][1]
     return None
 
 def search(raw_query, session=None):
