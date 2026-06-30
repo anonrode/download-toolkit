@@ -1017,18 +1017,25 @@ def main():
                     text=True, timeout=5, stdin=subprocess.DEVNULL
                 ).stdout.strip()
 
-                # Check for local changes BEFORE pulling — these silently
-                # block `git pull` even with exit code 0, causing false
-                # "Already up to date" reports.
-                dirty = subprocess.run(
+                # Check for local changes BEFORE pulling — modified tracked
+                # files silently block `git pull` even with exit code 0.
+                # Untracked files (??) like .last_pull and __pycache__ are
+                # intentionally ignored — they never block git pull.
+                status_out = subprocess.run(
                     ['git', 'status', '--porcelain'],
                     cwd=script_dir, capture_output=True,
                     text=True, timeout=5, stdin=subprocess.DEVNULL
                 ).stdout.strip()
 
+                dirty_lines = [
+                    l for l in status_out.splitlines()
+                    if l and not l.startswith('??')
+                ]
+                dirty = '\n'.join(dirty_lines)
+
                 if dirty:
                     print("[!] Local changes detected — these block updates:")
-                    for line in dirty.splitlines()[:10]:
+                    for line in dirty_lines[:10]:
                         print(f"      {line}")
                     print("[!] Run 'git stash' or 'git checkout -- .' in the toolkit folder, then update again")
                 else:
