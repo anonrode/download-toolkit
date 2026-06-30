@@ -32,6 +32,23 @@ STOP_FLAG       = [False]   # stops current batch — extractor loops check this
 EXIT_FLAG       = [False]   # exits entire script — REPL loop checks this
 PAUSE_FLAG      = [False]   # toggles aria2c SIGSTOP/SIGCONT — Ctrl+P
 
+# Save original terminal settings so we can always restore cooked mode
+ORIGINAL_TERM = [None]
+try:
+    import termios
+    ORIGINAL_TERM[0] = termios.tcgetattr(sys.stdin.fileno())
+except Exception:
+    pass
+
+def _restore_terminal():
+    """Force terminal back to cooked mode (echo + line editing)."""
+    if ORIGINAL_TERM[0] is not None:
+        try:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, ORIGINAL_TERM[0])
+        except Exception:
+            pass
+
 # Track current download so we can mark_paused() on Ctrl+C
 CURRENT_SERIES_URL   = [None]
 CURRENT_SERIES_NAME  = [None]
@@ -137,6 +154,7 @@ def setup_signal_handler():
     def handler(sig, frame):
         _CTRL_C_COUNT[0] += 1
         proc = CURRENT_PROCESS[0]
+        _restore_terminal()  # Always restore terminal on Ctrl+C
 
         if _CTRL_C_COUNT[0] == 1:
             STOP_FLAG[0] = True
