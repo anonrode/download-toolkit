@@ -813,7 +813,10 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
                 pass
             return False, None
         else:
-            # No expected size and no URL to HEAD — use file size heuristic
+            # No expected size — check for aria2c/yt-dlp incomplete markers first
+            if os.path.exists(filepath + '.aria2') or os.path.exists(filepath + '.part'):
+                safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) — will resume")
+                return False, None
             min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
             if actual >= min_bytes:
                 safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
@@ -833,6 +836,9 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
                         safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
                         return True, receipt_path
                 else:
+                    if os.path.exists(receipt_path + '.aria2') or os.path.exists(receipt_path + '.part'):
+                        safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) — will resume")
+                        return False, None
                     min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
                     if actual >= min_bytes:
                         safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
@@ -862,7 +868,10 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
                         pass
                     return False, None
             else:
-                # No expected size and no URL — use heuristic
+                # No expected size — check for incomplete markers first
+                if os.path.exists(filepath + '.aria2') or os.path.exists(filepath + '.part'):
+                    safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) — will resume")
+                    return False, None
                 min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
                 if actual >= min_bytes:
                     safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
@@ -1302,7 +1311,132 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
         return False
 
 def download_with_ytdlp(url, folder, filename, summary,
-                        quality=None, current_process=None, stop_flag=None, parallel_mode=False):
+                        quality=None, current_process=None, stop_flag=None,
+                        pause_flag=None, parallel_mode=False):
+    import shutil
+    has_ytdlp  = shutil.which('yt-dlp') is not None
+    has_ffmpeg = shutil.which('ffmpeg') is not None
+    has_aria2c = shutil.which('aria2c') is not None
+
+    if not has_ytdlp:
+        if not _install_ytdlp():
+            safe_print("[!] yt-dlp unavailable")
+            summary.add_failed(filename)
+            return False
+    if not has_ffmpeg:
+        safe_print("[!] ffmpeg not found — install with: pkg install ffmpeg")
+        summary.add_failed(filename)
+        return False
+
+    os.makedirs(folder, exist_ok=True)
+    base        = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
+    out_template = os.path.join(folder, base + '.%(ext)s')
+    quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
+
+    progress = LiveProgress(filename, parallel=parallel_mode)
+    proc = None
+    try:
+        cmd = [
+            'yt-dlp',
+            '-f', quality_str,
+            '--merge-output-format', 'mp4',
+            '-o', out_template,
+            '--no-playlist',
+            '--retries', '3',
+            '--fragment-retries', '3',
+            '--retry-sleep', '10',
+            '--no-warnings', '--progress', '--newline',
+        ]
+        if has_aria2c:
+            cmd += [
+                '--external-downloader', 'aria2c',
+                '--external-downloader-args',
+                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=10 --timeout=120 '
+                '--connect-timeout=60 --file-allocation=none --min-split-size=1M'
+            ]
+        cmd.append(url)
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        register_process(proc)
+        if current_process is not None:
+            current_process[0] = proc
+
+        started = time.time()
+        hard_timeout = 6 * 60 * 60
+        while proc.poll() is None:
+            if stop_flag and stop_flag[0]:
+                proc.terminate()
+                break
+            # ── Pause/Resume support ───────────────────────────────
+            if pause_flag and pause_flag[0]:
+                # Gracefully terminate so aria2c saves .aria2 state for resume
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+                if current_process is not None:
+                    current_process[0] = None
+                safe_print("  [‖] Paused — press Ctrl+P to resume")
+                # Block here until unpaused or stopped
+                while pause_flag[0]:
+                    if stop_flag and stop_flag[0]:
+                        break
+                    time.sleep(0.2)
+                if stop_flag and stop_flag[0]:
+                    summary.add_failed(filename)
+                    return False
+                # Re-launch with -c (continue/resume) flag
+                safe_print("  [▶] Resuming download...")
+                # Add -c (continue) flag for aria2c
+                resume_cmd = cmd[:]  # cmd already has -c in aria2c args above
+                proc = subprocess.Popen(resume_cmd, stdin=subprocess.DEVNULL)
+                register_process(proc)
+                if current_process is not None:
+                    current_process[0] = proc
+                started = time.time()
+                continue
+            # ──────────────────────────────────────────────────────
+            if time.time() - started > hard_timeout:
+                proc.terminate()
+                safe_print("[✗] yt-dlp timed out — moving on")
+                break
+            time.sleep(0.5)
+        finish_process(proc)
+        code = proc.returncode if proc.returncode is not None else -1
+        unregister_process(proc)
+        if current_process is not None:
+            current_process[0] = None
+
+        if code == 0:
+            for ext in ['mp4', 'mkv', 'webm']:
+                p = os.path.join(folder, f"{base}.{ext}")
+                if os.path.exists(p):
+                    size_mb = os.path.getsize(p) / (1024 * 1024)
+                    progress.done(size_mb)
+                    summary.add_success()
+                    log_download(filename, url, p)
+                    return True
+            # yt-dlp exited 0 but no output file — likely failed
+            progress.fail()
+            safe_print("[✗] yt-dlp exited successfully but produced no file")
+            summary.add_failed(filename)
+            return False
+        else:
+            progress.fail()
+            if stop_flag and stop_flag[0]:
+                safe_print("[*] yt-dlp stopped")
+            else:
+                safe_print("[✗] yt-dlp failed")
+                summary.add_failed(filename)
+            return False
+    except Exception as e:
+        unregister_process(proc)
+        if current_process is not None:
+            current_process[0] = None
+        progress.fail()
+        safe_print(f"[✗] yt-dlp error: {e}")
+        summary.add_failed(filename)
+        return False
     import shutil
     has_ytdlp  = shutil.which('yt-dlp') is not None
     has_ffmpeg = shutil.which('ffmpeg') is not None
@@ -1649,6 +1783,7 @@ def download_file(url, folder, filename, summary,
                                      quality=quality,
                                      current_process=current_process,
                                      stop_flag=stop_flag,
+                                     pause_flag=pause_flag,
                                      parallel_mode=parallel_mode)
     else:
         result = download_with_aria2c(url, folder, filename, summary,
