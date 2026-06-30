@@ -249,54 +249,60 @@ def _start_pause_listener():
         return  # Git Bash / Windows — silently skip
 
     def _reader():
-        try:
-            import termios, tty
-            fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
-            old = termios.tcgetattr(fd)
-            tty.setraw(fd)
+        import termios, tty, select
+        while not EXIT_FLAG[0]:
+            # Wait until there is an active download process before capturing keystrokes
+            if CURRENT_PROCESS[0] is None:
+                time.sleep(0.1)
+                continue
+
             try:
-                while not EXIT_FLAG[0]:
-                    # Non-blocking read — poll every 100ms
-                    import select
-                    r, _, _ = select.select([fd], [], [], 0.1)
-                    if not r:
-                        continue
-                    ch = os.read(fd, 1)
-                    if ch == b'\x10':  # Ctrl+P
-                        proc = CURRENT_PROCESS[0]
-                        if proc is None:
+                fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
+                old = termios.tcgetattr(fd)
+                tty.setraw(fd)
+                try:
+                    while CURRENT_PROCESS[0] is not None and not EXIT_FLAG[0]:
+                        # Non-blocking read — poll every 100ms
+                        r, _, _ = select.select([fd], [], [], 0.1)
+                        if not r:
                             continue
-                        if PAUSE_FLAG[0]:
-                            # Currently paused — resume
-                            PAUSE_FLAG[0] = False
-                            try:
-                                import signal as _sig
-                                os.kill(proc.pid, _sig.SIGCONT)
-                            except Exception:
-                                pass
-                            try:
-                                sys.stdout.write('\n  [▶] Resumed\n')
-                                sys.stdout.flush()
-                            except Exception:
-                                pass
-                        else:
-                            # Currently running — pause
-                            PAUSE_FLAG[0] = True
-                            try:
-                                import signal as _sig
-                                os.kill(proc.pid, _sig.SIGSTOP)
-                            except Exception:
-                                pass
-                            try:
-                                sys.stdout.write('\n  [‖] Paused — Ctrl+P to resume\n')
-                                sys.stdout.flush()
-                            except Exception:
-                                pass
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
-                os.close(fd)
-        except Exception:
-            pass  # Any failure — silently give up, don't break downloads
+                        ch = os.read(fd, 1)
+                        if ch == b'\x10':  # Ctrl+P
+                            proc = CURRENT_PROCESS[0]
+                            if proc is None:
+                                continue
+                            if PAUSE_FLAG[0]:
+                                # Currently paused — resume
+                                PAUSE_FLAG[0] = False
+                                try:
+                                    import signal as _sig
+                                    os.kill(proc.pid, _sig.SIGCONT)
+                                except Exception:
+                                    pass
+                                try:
+                                    sys.stdout.write('\n  [▶] Resumed\n')
+                                    sys.stdout.flush()
+                                except Exception:
+                                    pass
+                            else:
+                                # Currently running — pause
+                                PAUSE_FLAG[0] = True
+                                try:
+                                    import signal as _sig
+                                    os.kill(proc.pid, _sig.SIGSTOP)
+                                except Exception:
+                                    pass
+                                try:
+                                    sys.stdout.write('\n  [‖] Paused — Ctrl+P to resume\n')
+                                    sys.stdout.flush()
+                                except Exception:
+                                    pass
+                finally:
+                    # Restore cooked terminal mode as soon as the download finishes
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    os.close(fd)
+            except Exception:
+                time.sleep(0.5)  # Avoid tight loop in case of errors
 
     t = threading.Thread(target=_reader, daemon=True)
     t.start()
