@@ -363,11 +363,21 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
         return []
     cache_key = f"{site_filter or 'all'}:{base}"
 
-    # Check cache first
-    cached = _cache_get(cache_key)
-    if cached:
-        safe_print(f"  [cached] {base}")
-        return cached
+    use_cache = True
+    try:
+        config_path = os.path.join(BASE_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                use_cache = json.load(f).get('search_cache', True)
+    except Exception:
+        pass
+
+    # Check cache first if enabled
+    if use_cache:
+        cached = _cache_get(cache_key)
+        if cached:
+            safe_print(f"  [cached] {base}")
+            return cached
 
     results = []
     lock    = threading.Lock()
@@ -406,7 +416,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
     for t in threads:
         t.join(timeout=timeout)
 
-    if results:
+    if results and use_cache:
         _cache_set(cache_key, results)
 
     return results
@@ -457,8 +467,18 @@ def search(raw_query, session=None):
         site_filter = 'plutomovies'
         query = query[:-12].strip()
 
+    # Load dynamic search timeout
+    timeout = 45
+    try:
+        config_path = os.path.join(BASE_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                timeout = int(json.load(f).get('search_timeout', 45))
+    except Exception:
+        pass
+
     safe_print(f"\n[*] Searching: {query}")
-    results = _run_search(query, site_filter=site_filter, fast=False, timeout=45)
+    results = _run_search(query, site_filter=site_filter, fast=False, timeout=timeout)
     return _present_results(results, raw_query)
 
 def fsearch(raw_query, session=None):
@@ -485,7 +505,17 @@ def fsearch(raw_query, session=None):
     else:
         safe_print(f"\n[*] Fast search: {query}")
 
-    results = _run_search(query, site_filter=site_filter, fast=True, hint=hint, timeout=45)
+    # Load dynamic search timeout
+    timeout = 45
+    try:
+        config_path = os.path.join(BASE_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                timeout = int(json.load(f).get('search_timeout', 45))
+    except Exception:
+        pass
+
+    results = _run_search(query, site_filter=site_filter, fast=True, hint=hint, timeout=timeout)
     return _present_results(results, raw_query)
 
 def rebuild_index_command():

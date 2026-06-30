@@ -391,9 +391,15 @@ def check_disk_space(min_gb=1.0):
 
 def assert_disk_space(min_mb=200):
     """Check before each episode. Stops download if critically low."""
+    try:
+        config_path = os.path.join(BASE_DIR, '.config.json')
+        with open(config_path) as f:
+            min_gb = float(json.load(f).get('storage_guard_gb', 1.0))
+    except Exception:
+        min_gb = 1.0
     free_gb = get_free_space_gb()
-    if free_gb < (min_mb / 1024):
-        safe_print(f"[!] Critically low disk space ({free_gb*1024:.0f}MB free) — stopping")
+    if free_gb < min_gb:
+        safe_print(f"[!] Critically low disk space ({free_gb:.2f}GB free, limit is {min_gb:.2f}GB) — stopping")
         return False
     return True
 
@@ -997,13 +1003,15 @@ def download_with_aria2c(url, folder, filename, summary,
     """
     import shutil
     config = config or {}  # Config dict with resolver_timeout, etc.
-    if 'download_timeout' not in config:
-        try:
-            import json as _json
-            with open(os.path.join(BASE_DIR, '.config.json')) as _f:
-                config = {**config, 'download_timeout': _json.load(_f).get('download_timeout', 120)}
-        except Exception:
-            pass
+    try:
+        import json as _json
+        config_path = os.path.join(BASE_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as _f:
+                config = {**config, **_json.load(_f)}
+    except Exception:
+        pass
+    retries = int(config.get('download_retries', 3))
     
     has_aria2c = shutil.which('aria2c') is not None
     if not has_aria2c:

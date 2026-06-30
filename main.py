@@ -90,6 +90,16 @@ DEFAULT_CONFIG = {
     'parallel_mode':        'queue',    # 'queue' (recommended) or 'thread' (legacy)
     'resolver_threads':     4,          # Parallel resolvers when using queue mode
     
+    # Search settings
+    'search_timeout':       45,         # Max seconds to wait for search results
+    'search_cache':         True,       # Cache search results for 24h
+    
+    # Storage
+    'storage_guard_gb':     1.0,        # Stop downloads if free space below this (GB)
+    
+    # App behaviour
+    'auto_resume':          True,       # Show resume prompt on startup
+    
     # Logging
     'enable_progress_log':  True,       # Log downloads to .download.log
     'log_level':            'normal',   # 'normal' or 'debug'
@@ -424,115 +434,411 @@ def queue_run(session, cfg):
 
 # ─── SETTINGS ─────────────────────────────────────────────────
 def handle_settings(parts, cfg):
-    if len(parts) == 1:
-        _show_settings(cfg)
-        return cfg
-    key = parts[1].lower()
-    if key == 'quality' and len(parts) >= 3:
-        q = parts[2]
-        if q in ('360p', '480p', '720p', '1080p', 'best'):
-            cfg['quality'] = q
-            save_config(cfg)
-            print(f"[ok] Quality: {q}")
-        else:
-            print("[!] Valid: 360p 480p 720p 1080p best")
-    elif key == 'parallel' and len(parts) >= 3:
-        try:
-            n = int(parts[2])
-            if 1 <= n <= 3:
-                cfg['parallel'] = n
+    # Backwards compatibility: if user types "settings quality 720p" directly
+    if len(parts) > 1:
+        key = parts[1].lower()
+        if key == 'quality' and len(parts) >= 3:
+            q = parts[2].lower()
+            if q in ('360p', '480p', '720p', '1080p', 'best'):
+                cfg['quality'] = q
                 save_config(cfg)
-                print(f"[ok] Parallel: {n}")
+                print(f"[ok] Quality set to: {q}")
             else:
-                print("[!] Parallel must be 1-3")
-        except ValueError:
-            print("[!] Invalid number")
-    elif key == 'bandwidth' and len(parts) >= 3:
-        try:
-            bw = int(parts[2])
-            cfg['bandwidth'] = bw
-            save_config(cfg)
-            print(f"[ok] Bandwidth: {'unlimited' if not bw else f'{bw}KB/s'}")
-        except ValueError:
-            print("[!] Use KB/s number, e.g. 'settings bandwidth 500'")
-    elif key in ('log', 'mode') and len(parts) >= 3:
-        mode = parts[2].lower()
-        if mode in ('normal', 'debug'):
-            cfg['log_level'] = mode
-            save_config(cfg)
+                print("[!] Valid values: 360p, 480p, 720p, 1080p, best")
+        elif key == 'parallel' and len(parts) >= 3:
             try:
-                from downloader import set_output_mode
-                set_output_mode(mode)
-            except Exception:
-                pass
-            print(f"[ok] Output mode: {mode}")
-        else:
-            print("[!] Valid: settings log normal | settings log debug")
-    elif key in ('social-quality', 'social_quality') and len(parts) >= 3:
-        q = parts[2].lower()
-        if q in ('360p', '480p', '720p', '1080p', 'best'):
-            cfg['social_quality'] = q
-            save_config(cfg)
-            print(f"[ok] Social quality: {q}")
-        else:
-            print("[!] Valid: 360p 480p 720p 1080p best")
-    elif key in ('auto-update', 'autoupdate') and len(parts) >= 3:
-        try:
-            days = int(parts[2])
-            if 1 <= days <= 30:
-                cfg['auto_update_days'] = days
+                n = int(parts[2])
+                if 1 <= n <= 3:
+                    cfg['parallel'] = n
+                    save_config(cfg)
+                    print(f"[ok] Parallel set to: {n}")
+                else:
+                    print("[!] Parallel must be between 1 and 3")
+            except ValueError:
+                print("[!] Invalid number")
+        elif key == 'bandwidth' and len(parts) >= 3:
+            try:
+                bw = int(parts[2])
+                cfg['bandwidth'] = bw
                 save_config(cfg)
-                print(f"[ok] Auto-update: every {days} day(s)")
-            else:
-                print("[!] Use 1-30 days")
-        except ValueError:
-            print("[!] Use days, e.g. settings auto-update 7")
-    elif key == 'timeout' and len(parts) >= 3:
-        try:
-            secs = int(parts[2])
-            if 30 <= secs <= 600:
-                cfg['download_timeout'] = secs
+                print(f"[ok] Bandwidth: {'unlimited' if not bw else f'{bw}KB/s'}")
+            except ValueError:
+                print("[!] Enter bandwidth in KB/s (e.g. 500), or 0 for unlimited")
+        elif key == 'timeout' and len(parts) >= 3:
+            try:
+                secs = int(parts[2])
+                if 30 <= secs <= 600:
+                    cfg['download_timeout'] = secs
+                    save_config(cfg)
+                    print(f"[ok] Timeout set to: {secs}s")
+                else:
+                    print("[!] Timeout must be between 30 and 600 seconds")
+            except ValueError:
+                print("[!] Invalid number")
+        elif key == 'retries' and len(parts) >= 3:
+            try:
+                r = int(parts[2])
+                if 1 <= r <= 10:
+                    cfg['download_retries'] = r
+                    save_config(cfg)
+                    print(f"[ok] Retries set to: {r} attempts")
+                else:
+                    print("[!] Retries must be between 1 and 10")
+            except ValueError:
+                print("[!] Invalid number")
+        elif key in ('search-timeout', 'search_timeout') and len(parts) >= 3:
+            try:
+                s = int(parts[2])
+                if 10 <= s <= 300:
+                    cfg['search_timeout'] = s
+                    save_config(cfg)
+                    print(f"[ok] Search timeout set to: {s}s")
+                else:
+                    print("[!] Search timeout must be between 10 and 300 seconds")
+            except ValueError:
+                print("[!] Invalid number")
+        elif key in ('search-cache', 'search_cache') and len(parts) >= 3:
+            val = parts[2].lower()
+            if val in ('on', 'off', 'true', 'false'):
+                cfg['search_cache'] = val in ('on', 'true')
                 save_config(cfg)
-                print(f"[ok] Timeout: {secs}s")
+                print(f"[ok] Search Cache: {'Enabled' if cfg['search_cache'] else 'Disabled'}")
             else:
-                print("[!] Use 30-600 seconds")
-        except ValueError:
-            print("[!] Use seconds, e.g. settings timeout 180")
-    elif key == 'ytdlp-channel' and len(parts) >= 3:
-        channel = parts[2].lower()
-        if channel in ('master', 'stable'):
-            cfg['ytdlp_channel'] = channel
-            save_config(cfg)
-            print(f"[ok] yt-dlp channel: {channel}")
-            if channel == 'stable':
-                print("[*] Run 'update' to switch the installed yt-dlp back to stable now")
+                print("[!] Use 'on' or 'off'")
+        elif key in ('auto-update', 'autoupdate') and len(parts) >= 3:
+            try:
+                days = int(parts[2])
+                if 1 <= days <= 30:
+                    cfg['auto_update_days'] = days
+                    save_config(cfg)
+                    print(f"[ok] Auto-update: every {days} day(s)")
+                else:
+                    print("[!] Use 1-30 days")
+            except ValueError:
+                print("[!] Use days, e.g. settings auto-update 7")
+        elif key in ('storage-guard', 'storage_guard') and len(parts) >= 3:
+            try:
+                gb = float(parts[2])
+                if 0.1 <= gb <= 50.0:
+                    cfg['storage_guard_gb'] = gb
+                    save_config(cfg)
+                    print(f"[ok] Storage Guard threshold set to: {gb} GB")
+                else:
+                    print("[!] Threshold must be between 0.1 and 50.0 GB")
+            except ValueError:
+                print("[!] Invalid float number")
+        elif key in ('auto-resume', 'autoresume') and len(parts) >= 3:
+            val = parts[2].lower()
+            if val in ('on', 'off', 'true', 'false'):
+                cfg['auto_resume'] = val in ('on', 'true')
+                save_config(cfg)
+                print(f"[ok] Auto Resume: {'Enabled' if cfg['auto_resume'] else 'Disabled'}")
+            else:
+                print("[!] Use 'on' or 'off'")
+        elif key in ('log', 'mode') and len(parts) >= 3:
+            mode = parts[2].lower()
+            if mode in ('normal', 'debug'):
+                cfg['log_level'] = mode
+                save_config(cfg)
+                try:
+                    from downloader import set_output_mode
+                    set_output_mode(mode)
+                except Exception:
+                    pass
+                print(f"[ok] Output mode: {mode}")
+            else:
+                print("[!] Use normal or debug")
+        elif key in ('social-quality', 'social_quality') and len(parts) >= 3:
+            q = parts[2].lower()
+            if q in ('360p', '480p', '720p', '1080p', 'best'):
+                cfg['social_quality'] = q
+                save_config(cfg)
+                print(f"[ok] Social quality: {q}")
+            else:
+                print("[!] Valid: 360p 480p 720p 1080p best")
+        elif key == 'ytdlp-channel' and len(parts) >= 3:
+            channel = parts[2].lower()
+            if channel in ('master', 'stable'):
+                cfg['ytdlp_channel'] = channel
+                save_config(cfg)
+                print(f"[ok] yt-dlp channel: {channel}")
+            else:
+                print("[!] Use master or stable")
+        elif key == 'disable' and len(parts) >= 3:
+            site = parts[2].lower()
+            disabled = cfg.get('disabled_sites', [])
+            if site not in disabled:
+                disabled.append(site)
+                cfg['disabled_sites'] = disabled
+                save_config(cfg)
+                print(f"[ok] Disabled: {site}")
+            else:
+                print("[*] Already disabled")
+        elif key == 'enable' and len(parts) >= 3:
+            site = parts[2].lower()
+            disabled = cfg.get('disabled_sites', [])
+            if site in disabled:
+                disabled.remove(site)
+                cfg['disabled_sites'] = disabled
+                save_config(cfg)
+                print(f"[ok] Enabled: {site}")
+            else:
+                print("[*] Not disabled")
         else:
-            print("[!] Use master or stable")
-    elif key == 'disable' and len(parts) >= 3:
-        site     = parts[2].lower()
-        disabled = cfg.get('disabled_sites', [])
-        if site not in disabled:
-            disabled.append(site)
-            cfg['disabled_sites'] = disabled
-            save_config(cfg)
-            print(f"[ok] Disabled: {site}")
-        else:
-            print("[*] Already disabled")
-    elif key == 'enable' and len(parts) >= 3:
-        site     = parts[2].lower()
-        disabled = cfg.get('disabled_sites', [])
-        if site in disabled:
-            disabled.remove(site)
-            cfg['disabled_sites'] = disabled
-            save_config(cfg)
-            print(f"[ok] Enabled: {site}")
-        else:
-            print("[*] Not disabled")
-    else:
+            print("[!] Invalid settings command. Type settings to open menu.")
+        return cfg
+
+    # Interactive Wizard Mode (if user just types "settings")
+    while True:
         _show_settings(cfg)
+        try:
+            choice = input("Select setting to change (0-13): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            break
+
+        if not choice or choice == '0':
+            break
+
+        if choice == '1':
+            print("\n┌── Change Download Quality ──────────────────────┐")
+            print("│  1) 360p                                        │")
+            print("│  2) 480p                                        │")
+            print("│  3) 720p                                        │")
+            print("│  4) 1080p                                       │")
+            print("│  5) Best                                        │")
+            print("│  0) Back                                        │")
+            print("└─────────────────────────────────────────────────┘")
+            try:
+                opt = input("Select option (0-5): ").strip()
+                if opt == '1': cfg['quality'] = '360p'
+                elif opt == '2': cfg['quality'] = '480p'
+                elif opt == '3': cfg['quality'] = '720p'
+                elif opt == '4': cfg['quality'] = '1080p'
+                elif opt == '5': cfg['quality'] = 'best'
+                if opt in ('1','2','3','4','5'):
+                    save_config(cfg)
+                    print(f"[ok] Quality set to: {cfg['quality']}")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '2':
+            try:
+                p = input("Enter parallel downloads count (1-3): ").strip()
+                n = int(p)
+                if 1 <= n <= 3:
+                    cfg['parallel'] = n
+                    save_config(cfg)
+                    print(f"[ok] Parallel set to: {n}")
+                else:
+                    print("[!] Must be between 1 and 3")
+            except ValueError:
+                print("[!] Invalid number")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '3':
+            try:
+                bw = input("Enter limit in KB/s (0 for unlimited): ").strip()
+                cfg['bandwidth'] = int(bw)
+                save_config(cfg)
+                print(f"[ok] Bandwidth: {'unlimited' if not cfg['bandwidth'] else f'{cfg['bandwidth']}KB/s'}")
+            except ValueError:
+                print("[!] Invalid number")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '4':
+            try:
+                t = input("Enter stall timeout in seconds (30-600): ").strip()
+                secs = int(t)
+                if 30 <= secs <= 600:
+                    cfg['download_timeout'] = secs
+                    save_config(cfg)
+                    print(f"[ok] Timeout set to: {secs}s")
+                else:
+                    print("[!] Timeout must be 30 to 600")
+            except ValueError:
+                print("[!] Invalid number")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '5':
+            try:
+                r = input("Enter retry limit (1-10): ").strip()
+                ret = int(r)
+                if 1 <= ret <= 10:
+                    cfg['download_retries'] = ret
+                    save_config(cfg)
+                    print(f"[ok] Retry limit: {ret}")
+                else:
+                    print("[!] Must be 1 to 10")
+            except ValueError:
+                print("[!] Invalid number")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '6':
+            try:
+                st = input("Enter search timeout in seconds (10-300): ").strip()
+                secs = int(st)
+                if 10 <= secs <= 300:
+                    cfg['search_timeout'] = secs
+                    save_config(cfg)
+                    print(f"[ok] Search timeout: {secs}s")
+                else:
+                    print("[!] Must be 10 to 300")
+            except ValueError:
+                print("[!] Invalid number")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '7':
+            print("\n┌── Search Cache ─────────────────────────────────┐")
+            print("│  1) Enable (Save results for 24h)               │")
+            print("│  2) Disable (Always search fresh)               │")
+            print("│  0) Back                                        │")
+            print("└─────────────────────────────────────────────────┘")
+            try:
+                opt = input("Select option (0-2): ").strip()
+                if opt == '1':
+                    cfg['search_cache'] = True
+                    save_config(cfg)
+                    print("[ok] Search Cache: Enabled")
+                elif opt == '2':
+                    cfg['search_cache'] = False
+                    save_config(cfg)
+                    print("[ok] Search Cache: Disabled")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '8':
+            try:
+                days = input("Enter auto-update interval in days (1-30): ").strip()
+                d = int(days)
+                if 1 <= d <= 30:
+                    cfg['auto_update_days'] = d
+                    save_config(cfg)
+                    print(f"[ok] Auto-update: every {d} day(s)")
+                else:
+                    print("[!] Must be 1 to 30")
+            except ValueError:
+                print("[!] Invalid number")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '9':
+            try:
+                guard = input("Enter storage guard limit in GB (e.g. 1.0): ").strip()
+                g = float(guard)
+                if 0.1 <= g <= 50.0:
+                    cfg['storage_guard_gb'] = g
+                    save_config(cfg)
+                    print(f"[ok] Storage Guard limit: {g} GB")
+                else:
+                    print("[!] Must be between 0.1 and 50.0 GB")
+            except ValueError:
+                print("[!] Invalid number")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '10':
+            print("\n┌── Auto Resume ──────────────────────────────────┐")
+            print("│  1) Enable (Auto-prompt to resume on startup)   │")
+            print("│  2) Disable                                     │")
+            print("│  0) Back                                        │")
+            print("└─────────────────────────────────────────────────┘")
+            try:
+                opt = input("Select option (0-2): ").strip()
+                if opt == '1':
+                    cfg['auto_resume'] = True
+                    save_config(cfg)
+                    print("[ok] Auto Resume: Enabled")
+                elif opt == '2':
+                    cfg['auto_resume'] = False
+                    save_config(cfg)
+                    print("[ok] Auto Resume: Disabled")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '11':
+            print("\n┌── Log Level ────────────────────────────────────┐")
+            print("│  1) Normal (Clean download progress bars)        │")
+            print("│  2) Debug (Full aria2c / yt-dlp details)        │")
+            print("│  0) Back                                        │")
+            print("└─────────────────────────────────────────────────┘")
+            try:
+                opt = input("Select option (0-2): ").strip()
+                if opt in ('1', '2'):
+                    mode = 'normal' if opt == '1' else 'debug'
+                    cfg['log_level'] = mode
+                    save_config(cfg)
+                    try:
+                        from downloader import set_output_mode
+                        set_output_mode(mode)
+                    except Exception:
+                        pass
+                    print(f"[ok] Output mode: {mode}")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '12':
+            print("\n┌── yt-dlp Channel ───────────────────────────────┐")
+            print("│  1) Master (Pre-release, latest fixes)          │")
+            print("│  2) Stable (Standard releases)                  │")
+            print("│  0) Back                                        │")
+            print("└─────────────────────────────────────────────────┘")
+            try:
+                opt = input("Select option (0-2): ").strip()
+                if opt in ('1', '2'):
+                    channel = 'master' if opt == '1' else 'stable'
+                    cfg['ytdlp_channel'] = channel
+                    save_config(cfg)
+                    print(f"[ok] yt-dlp channel: {channel}")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '13':
+            # Manage Sites loop
+            while True:
+                disabled = cfg.get('disabled_sites', [])
+                all_sites = ['nkiri', '9jarocks', 'plutomovies', 'dramakey', 'dramarain', 'socials']
+                print("\n┌── Disable/Enable Sites ─────────────────────────┐")
+                for idx, s in enumerate(all_sites, 1):
+                    status = "[Disabled]" if s in disabled else "[Enabled]"
+                    print(f"│  {idx}) {s.capitalize():<12} {status:<24} │")
+                print("│  0) Back                                        │")
+                print("└─────────────────────────────────────────────────┘")
+                try:
+                    s_choice = input("Enter site number to toggle (0-6): ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    break
+                if not s_choice or s_choice == '0':
+                    break
+                try:
+                    s_idx = int(s_choice)
+                    if 1 <= s_idx <= len(all_sites):
+                        site = all_sites[s_idx - 1]
+                        if site in disabled:
+                            disabled.remove(site)
+                            print(f"[ok] Enabled: {site}")
+                        else:
+                            disabled.append(site)
+                            print(f"[ok] Disabled: {site}")
+                        cfg['disabled_sites'] = disabled
+                        save_config(cfg)
+                    else:
+                        print("[!] Invalid option")
+                except ValueError:
+                    print("[!] Invalid option")
+        else:
+            print("[!] Invalid choice")
+            time.sleep(1)
+
     return cfg
 
 def _show_settings(cfg):
+    from downloader import get_free_space_gb
     bw  = cfg.get('bandwidth', 0)
     dis = cfg.get('disabled_sites', [])
     q   = cfg.get('quality', '480p')
@@ -541,31 +847,52 @@ def _show_settings(cfg):
     social_q = cfg.get('social_quality', '720p')
     auto_days = cfg.get('auto_update_days', 7)
     timeout = cfg.get('download_timeout', 120)
+    retries = cfg.get('download_retries', 3)
     ytdlp_channel = cfg.get('ytdlp_channel', 'master')
-    print(f"\n{'='*50}")
-    print(f"  SETTINGS")
-    print(f"{'='*50}")
-    print(f"  Quality:   {q}")
-    print(f"  Parallel:  {p}")
-    print(f"  Bandwidth: {'unlimited' if not bw else f'{bw}KB/s'}")
-    print(f"  Output:    {mode}")
-    print(f"  Social:    {social_q} auto")
-    print(f"  Update:    every {auto_days} day(s)")
-    print(f"  Timeout:   {timeout}s (aria2c stall limit)")
-    print(f"  yt-dlp:    {ytdlp_channel} channel (used by 'update' command)")
-    print(f"  Disabled:  {', '.join(dis) if dis else 'none'}")
+    search_timeout = cfg.get('search_timeout', 45)
+    search_cache = cfg.get('search_cache', True)
+    guard = cfg.get('storage_guard_gb', 1.0)
+    auto_resume = cfg.get('auto_resume', True)
+    
+    try:
+        free_gb = get_free_space_gb()
+        space_s = f"{free_gb:.1f} GB Free (Guard Active)"
+    except Exception:
+        space_s = "unknown"
+
+    print(f"\n==================================================")
+    print(f"  ANONRODE SETTINGS")
+    print(f"==================================================")
+    print(f"  Quality:   {q:<17} Parallel:  {p}")
+    print(f"  Bandwidth: {'unlimited' if not bw else f'{bw}KB/s':<17} Output:    {mode}")
+    print(f"  Social:    {social_q:<17} Update:    {auto_days} days")
+    print(f"  Timeout:   {timeout}s{' ':<15} Channel:   {ytdlp_channel}")
     print(f"  Save dir:  {BASE_DIR}")
-    print(f"{'='*50}")
-    print(f"  settings quality <360p|480p|720p|1080p>")
-    print(f"  settings parallel <1|2|3>")
-    print(f"  settings bandwidth <KB/s or 0=unlimited>")
-    print(f"  settings log <normal|debug>")
-    print(f"  settings social-quality <360p|480p|720p|1080p|best>")
-    print(f"  settings auto-update <days>")
-    print(f"  settings timeout <seconds (30-600)>")
-    print(f"  settings ytdlp-channel <master|stable>")
-    print(f"  settings disable/enable <site>")
-    print(f"{'='*50}")
+    print(f"  Storage:   {space_s}")
+    print(f"==================================================")
+    print(f"  Active Features:")
+    print(f"  [✓] Parallel Search           [✓] Pause/Resume (Ctrl+P)")
+    print(f"  [✓] Expired Link Refresh      [✓] Smart Queue")
+    print(f"==================================================")
+    print(f"  Supported Sites (6):")
+    print(f"  🔍 Searchable:  NKiri | DramaKey | PlutoMovies")
+    print(f"  🔗 Link Only:   9JaRocks | DramaRain | Socials")
+    print(f"==================================================")
+    print(f"  1) Download Quality   ➜  [{q}]")
+    print(f"  2) Parallel Downloads ➜  [{p}]")
+    print(f"  3) Bandwidth Limit    ➜  [{'unlimited' if not bw else f'{bw} KB/s'}]")
+    print(f"  4) Stall Timeout      ➜  [{timeout}s]")
+    print(f"  5) Max Retry Limit    ➜  [{retries} attempts]")
+    print(f"  6) Search Timeout     ➜  [{search_timeout}s]")
+    print(f"  7) Search Cache       ➜  [{'Enabled' if search_cache else 'Disabled'}]")
+    print(f"  8) Auto Update Days   ➜  [{auto_days} days]")
+    print(f"  9) Storage Guard      ➜  [{guard} GB]")
+    print(f" 10) Auto Resume        ➜  [{'Enabled' if auto_resume else 'Disabled'}]")
+    print(f" 11) Log level          ➜  [{mode}]")
+    print(f" 12) yt-dlp Channel     ➜  [{ytdlp_channel}]")
+    print(f" 13) Manage Sites       ➜  [{len(dis)} disabled]")
+    print(f"  0) Back to command prompt")
+    print(f"==================================================")
 
 # ─── RESUME ───────────────────────────────────────────────────
 def handle_resume_command(session, cfg):
@@ -689,26 +1016,48 @@ def setup_android():
 # ─── BANNER ───────────────────────────────────────────────────
 def print_banner(cfg):
     import shutil as _shutil
-    from downloader import get_free_space_gb, ui_screen, update_status
-    q         = cfg.get('quality', '480p')
-    p         = cfg.get('parallel', 1)
-    aria2c_ok = bool(_shutil.which('aria2c'))
-    ytdlp_ok  = bool(_shutil.which('yt-dlp'))
     try:
-        free_gb = get_free_space_gb()
-        space_s = f"{free_gb:.1f}GB free"
+        columns, _ = _shutil.get_terminal_size(fallback=(80, 24))
     except Exception:
-        space_s = "unknown"
-    update_status(screen='Ready', status='Idle')
-    ui_screen('Ready', [
-        ('Quality', q),
-        ('Parallel', p),
-        ('Output', cfg.get('log_level', 'normal')),
-        ('Social', f"{cfg.get('social_quality', '720p')} auto"),
-        ('aria2c', 'OK' if aria2c_ok else 'Missing'),
-        ('yt-dlp', 'OK' if ytdlp_ok else 'Missing'),
-        ('Storage', space_s),
-    ], footer="Type help for commands.")
+        columns = 80
+
+    if columns >= 115:
+        # Layout A (Landscape)
+        print("┌───────────────────────────────────────────────────────┬───────────────────────────────────────────────────────┐")
+        print("│ 📥 ANONRODE v2.2                                      │ 🎬 SUPPORTED SITES                                    │")
+        print("├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤")
+        print("│ ⚡ KEY FEATURES                                       │ 🎬 Movies & Series:                                   │")
+        print("│  • 🔍 Parallel Search  - Search all sites at once     │  • NKiri        [⚡ Very Fast]  Korean & Nollywood    │")
+        print("│  • ⏸ Pause & Resume   - Press Ctrl+P anytime          │  • 9JaRocks     [⚡ Very Fast]  Nollywood & Hollywood │")
+        print("│  • 🔄 Link Auto-Update - Refreshes expired downloads  │  • PlutoMovies  [🚀 Fast]       Blockbusters & Shows  │")
+        print("│  • 📋 Smart Queue      - Queue up multiple series     │ 🎎 Asian Dramas:                                      │")
+        print("│  • 💾 Storage Guard    - Auto-pauses if space is full │  • DramaKey     [⏱ Normal]      Chinese & Korean      │")
+        print("│                                                       │  • DramaRain    [⏱ Normal]      Chinese & Japanese    │")
+        print("│                                                       │ 📱 Social Media:                                      │")
+        print("│                                                       │  • YouTube      [🚀 Fast]       Videos & Playlists    │")
+        print("│                                                       │  • Pinterest    [🚀 Fast]       Pins & Boards         │")
+        print("└───────────────────────────────────────────────────────┴───────────────────────────────────────────────────────┘")
+    else:
+        # Layout B (Portrait / Mobile)
+        print("┌────────────────────────────────────────────────────────┐")
+        print("│  📥 ANONRODE v2.2                                      │")
+        print("├────────────────────────────────────────────────────────┤")
+        print("│  ⚡ KEY FEATURES                                       │")
+        print("│   • 🔍 Parallel Search  - Search all sites at once     │")
+        print("│   • ⏸ Pause & Resume   - Press Ctrl+P anytime          │")
+        print("│   • 🔄 Link Auto-Update - Refreshes expired downloads  │")
+        print("│   • 📋 Smart Queue      - Queue up multiple series     │")
+        print("│   • 💾 Storage Guard    - Auto-pauses if space is full │")
+        print("├────────────────────────────────────────────────────────┤")
+        print("│  🎬 SUPPORTED SITES                                    │")
+        print("│   • NKiri        [⚡ Very Fast]  Korean & Nollywood    │")
+        print("│   • 9JaRocks     [⚡ Very Fast]  Nollywood & Hollywood │")
+        print("│   • PlutoMovies  [🚀 Fast]       Blockbusters & Shows  │")
+        print("│   • DramaKey     [⏱ Normal]     Chinese & Korean       │")
+        print("│   • DramaRain    [⏱ Normal]     Chinese & Japanese     │")
+        print("│   • YouTube      [🚀 Fast]       Videos & Playlists    │")
+        print("│   • Pinterest    [🚀 Fast]       Pins & Boards         │")
+        print("└────────────────────────────────────────────────────────┘")
 
 # ─── SESSION FACTORY ──────────────────────────────────────────
 def make_session():
@@ -898,30 +1247,22 @@ def main():
             print(f"\n{'='*50}")
             print(f"  COMMANDS")
             print(f"{'='*50}")
-            print(f"  search <title>              find a show on NKiri / DramaKey")
-            print(f"  fsearch <title> [hint]      fast search — proven patterns first")
-            print(f"    hints: korean chinese thai nollywood japanese")
-            print(f"  <url>                       paste any supported URL")
-            print(f"  clip                        read URL from clipboard")
-            print(f"  resume                      resume a paused download")
-            print(f"  status                      show current app/download state")
-            print(f"  doctor                      check dependencies and environment")
-            print(f"  history                     show download history")
-            print(f"  retry failed                retry failed downloads")
-            print(f"  cleanup                     remove stale helper/tiny files")
-            print(f"  download <range> <url>      download selected episodes, e.g. 1-5,8")
-            print(f"  queue add <url>             add URL to queue")
-            print(f"  queue list                  show queue")
-            print(f"  queue start                 start downloading queue")
-            print(f"  queue remove <n>            remove item from queue")
-            print(f"  queue clear                 clear entire queue")
-            print(f"  settings                    view / change settings")
-            print(f"  settings log normal|debug   clean output or detailed logs")
-            print(f"  cache clear                 clear search result cache")
-            print(f"  update                      force update from GitHub")
-            print(f"  exit                        quit")
+            print(f"  search <title>         - Find a show/movie across all search sites")
+            print(f"  fsearch <title> [hint] - Fast search (korean|chinese|nollywood|etc)")
+            print(f"  <url>                  - Paste direct URL to start downloading")
+            print(f"  clip                   - Download link copied to clipboard")
+            print(f"  resume                 - Select a paused download to resume")
+            print(f"  status                 - Show current download speed & status")
+            print(f"  queue add <url>        - Add a link to download queue")
+            print(f"  queue list/clear/run   - Manage download queue")
+            print(f"  settings               - Open interactive settings menu")
+            print(f"  update                 - Update toolkit & yt-dlp resolvers")
+            print(f"  doctor                 - Check Termux dependencies")
+            print(f"  cleanup                - Delete temporary/stale files")
+            print(f"  history                - Show past download history")
+            print(f"  exit                   - Quit app")
             print(f"{'='*50}")
-            print(f"  Ctrl+C once = pause   Ctrl+C twice = stop batch   Ctrl+C 3x = exit")
+            print(f"  Ctrl+P = Pause/Resume | Ctrl+C = Stop active batch")
             print(f"{'='*50}")
 
         elif lower == 'history':
