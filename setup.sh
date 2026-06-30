@@ -149,7 +149,13 @@ if [ -n "$TMUX" ]; then
 else
     # Kill any existing session and start fresh
     tmux kill-session -t download 2>/dev/null
-    cd ~/download-toolkit && git pull -q
+    cd ~/download-toolkit
+    # Skip the pull if the tree is dirty — git pull -q silently no-ops on a
+    # dirty tree (exit code 0, no output) which would otherwise hide a real
+    # update failure. Run `update` from inside the toolkit to see why.
+    if [ -z "$(git status --porcelain 2>/dev/null)" ]; then
+        git pull -q
+    fi
     tmux new-session -s download python main.py
 fi
 CHECKEOF
@@ -171,7 +177,13 @@ if [ -n "$TMUX" ]; then
 else
     # Kill any existing session and start fresh
     tmux kill-session -t download 2>/dev/null
-    cd ~/download-toolkit && git pull -q
+    cd ~/download-toolkit
+    # Skip the pull if the tree is dirty — git pull -q silently no-ops on a
+    # dirty tree (exit code 0, no output) which would otherwise hide a real
+    # update failure. Run `update` from inside the toolkit to see why.
+    if [ -z "$(git status --porcelain 2>/dev/null)" ]; then
+        git pull -q
+    fi
     tmux new-session -s download python main.py
 fi
 EOF

@@ -30,6 +30,7 @@ _CTRL_C_COUNT   = [0]
 CURRENT_PROCESS = [None]
 STOP_FLAG       = [False]   # stops current batch — extractor loops check this
 EXIT_FLAG       = [False]   # exits entire script — REPL loop checks this
+PAUSE_FLAG      = [False]   # toggles aria2c SIGSTOP/SIGCONT — Ctrl+P
 
 # Track current download so we can mark_paused() on Ctrl+C
 CURRENT_SERIES_URL   = [None]
@@ -81,6 +82,9 @@ DEFAULT_CONFIG = {
     'download_timeout':     120,        # HTTP timeout in seconds
     'min_file_size_mb':     5,          # Minimum file size to consider complete
     'resumable_downloads':  True,       # Resume from byte offset on reconnect
+    'ytdlp_channel':        'master',   # 'master' (--pre, newest fixes) or 'stable'
+                                         # — only affects the explicit `update` command;
+                                         # silent background auto-update always uses stable
     
     # Parallel download settings
     'parallel_mode':        'queue',    # 'queue' (recommended) or 'thread' (legacy)
@@ -233,6 +237,70 @@ def setup_signal_handler():
     except Exception:
         pass
 
+def _start_pause_listener():
+    """
+    Background thread that reads raw keypresses from /dev/tty.
+    Ctrl+P (0x10) toggles SIGSTOP/SIGCONT on the active aria2c process.
+    Exits cleanly when EXIT_FLAG is set.
+    Only active on platforms that have /dev/tty (Termux/Linux).
+    """
+    import os
+    if not os.path.exists('/dev/tty'):
+        return  # Git Bash / Windows — silently skip
+
+    def _reader():
+        try:
+            import termios, tty
+            fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
+            old = termios.tcgetattr(fd)
+            tty.setraw(fd)
+            try:
+                while not EXIT_FLAG[0]:
+                    # Non-blocking read — poll every 100ms
+                    import select
+                    r, _, _ = select.select([fd], [], [], 0.1)
+                    if not r:
+                        continue
+                    ch = os.read(fd, 1)
+                    if ch == b'\x10':  # Ctrl+P
+                        proc = CURRENT_PROCESS[0]
+                        if proc is None:
+                            continue
+                        if PAUSE_FLAG[0]:
+                            # Currently paused — resume
+                            PAUSE_FLAG[0] = False
+                            try:
+                                import signal as _sig
+                                os.kill(proc.pid, _sig.SIGCONT)
+                            except Exception:
+                                pass
+                            try:
+                                sys.stdout.write('\n  [▶] Resumed\n')
+                                sys.stdout.flush()
+                            except Exception:
+                                pass
+                        else:
+                            # Currently running — pause
+                            PAUSE_FLAG[0] = True
+                            try:
+                                import signal as _sig
+                                os.kill(proc.pid, _sig.SIGSTOP)
+                            except Exception:
+                                pass
+                            try:
+                                sys.stdout.write('\n  [‖] Paused — Ctrl+P to resume\n')
+                                sys.stdout.flush()
+                            except Exception:
+                                pass
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                os.close(fd)
+        except Exception:
+            pass  # Any failure — silently give up, don't break downloads
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+
 def _quality_str(q):
     q = str(q)
     if '1080' in q: return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
@@ -245,6 +313,7 @@ def _make_ctx(cfg):
     return {
         'stop':            STOP_FLAG,
         'exit':            EXIT_FLAG,
+        'pause':           PAUSE_FLAG,
         'bandwidth':       cfg.get('bandwidth', 0),
         'quality':         _quality_str(cfg.get('quality', '480p')),
         'social_quality':  cfg.get('social_quality', '720p'),
@@ -416,6 +485,27 @@ def handle_settings(parts, cfg):
                 print("[!] Use 1-30 days")
         except ValueError:
             print("[!] Use days, e.g. settings auto-update 7")
+    elif key == 'timeout' and len(parts) >= 3:
+        try:
+            secs = int(parts[2])
+            if 30 <= secs <= 600:
+                cfg['download_timeout'] = secs
+                save_config(cfg)
+                print(f"[ok] Timeout: {secs}s")
+            else:
+                print("[!] Use 30-600 seconds")
+        except ValueError:
+            print("[!] Use seconds, e.g. settings timeout 180")
+    elif key == 'ytdlp-channel' and len(parts) >= 3:
+        channel = parts[2].lower()
+        if channel in ('master', 'stable'):
+            cfg['ytdlp_channel'] = channel
+            save_config(cfg)
+            print(f"[ok] yt-dlp channel: {channel}")
+            if channel == 'stable':
+                print("[*] Run 'update' to switch the installed yt-dlp back to stable now")
+        else:
+            print("[!] Use master or stable")
     elif key == 'disable' and len(parts) >= 3:
         site     = parts[2].lower()
         disabled = cfg.get('disabled_sites', [])
@@ -448,6 +538,8 @@ def _show_settings(cfg):
     mode = cfg.get('log_level', 'normal')
     social_q = cfg.get('social_quality', '720p')
     auto_days = cfg.get('auto_update_days', 7)
+    timeout = cfg.get('download_timeout', 120)
+    ytdlp_channel = cfg.get('ytdlp_channel', 'master')
     print(f"\n{'='*50}")
     print(f"  SETTINGS")
     print(f"{'='*50}")
@@ -457,6 +549,8 @@ def _show_settings(cfg):
     print(f"  Output:    {mode}")
     print(f"  Social:    {social_q} auto")
     print(f"  Update:    every {auto_days} day(s)")
+    print(f"  Timeout:   {timeout}s (aria2c stall limit)")
+    print(f"  yt-dlp:    {ytdlp_channel} channel (used by 'update' command)")
     print(f"  Disabled:  {', '.join(dis) if dis else 'none'}")
     print(f"  Save dir:  {BASE_DIR}")
     print(f"{'='*50}")
@@ -466,6 +560,8 @@ def _show_settings(cfg):
     print(f"  settings log <normal|debug>")
     print(f"  settings social-quality <360p|480p|720p|1080p|best>")
     print(f"  settings auto-update <days>")
+    print(f"  settings timeout <seconds (30-600)>")
+    print(f"  settings ytdlp-channel <master|stable>")
     print(f"  settings disable/enable <site>")
     print(f"{'='*50}")
 
@@ -753,7 +849,7 @@ def main():
         except Exception:
             pass
 
-    from downloader import check_disk_space, show_history, register_state_callback, set_output_mode
+    from downloader import show_history, register_state_callback, set_output_mode
     from extractors import process_link_queue
     from search import search, fsearch, rebuild_index_command, clear_search_cache
 
@@ -763,8 +859,8 @@ def main():
     set_output_mode(cfg.get('log_level', 'normal'))
     session = make_session()
     setup_signal_handler()
+    _start_pause_listener()
     
-    check_disk_space()
     print_banner(cfg)
 
     while True:
@@ -776,6 +872,7 @@ def main():
         _reset_current_state()
         _CTRL_C_COUNT[0] = 0
         STOP_FLAG[0]     = False
+        PAUSE_FLAG[0]    = False
 
         try:
             raw = input("\n> ").strip()
@@ -907,29 +1004,52 @@ def main():
                     cwd=script_dir, capture_output=True,
                     text=True, timeout=5, stdin=subprocess.DEVNULL
                 ).stdout.strip()
-                subprocess.run(
-                    ['git', 'pull', '-q'],
-                    cwd=script_dir, capture_output=True,
-                    text=True, timeout=30, stdin=subprocess.DEVNULL
-                )
-                try:
-                    open(stamp_file, 'w').write(str(time.time()))
-                except Exception:
-                    pass
-                print("[*] Updating yt-dlp...")
-                _update_ytdlp()
-                after = subprocess.run(
-                    ['git', 'rev-parse', 'HEAD'],
+
+                # Check for local changes BEFORE pulling — these silently
+                # block `git pull` even with exit code 0, causing false
+                # "Already up to date" reports.
+                dirty = subprocess.run(
+                    ['git', 'status', '--porcelain'],
                     cwd=script_dir, capture_output=True,
                     text=True, timeout=5, stdin=subprocess.DEVNULL
                 ).stdout.strip()
-                if before and after and before != after:
-                    print("[ok] Updated — restarting...")
-                    sys.stdout.flush()
-                    time.sleep(0.5)
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+                if dirty:
+                    print("[!] Local changes detected — these block updates:")
+                    for line in dirty.splitlines()[:10]:
+                        print(f"      {line}")
+                    print("[!] Run 'git stash' or 'git checkout -- .' in the toolkit folder, then update again")
                 else:
-                    print("[*] Already up to date")
+                    pull = subprocess.run(
+                        ['git', 'pull', '--ff-only'],
+                        cwd=script_dir, capture_output=True,
+                        text=True, timeout=30, stdin=subprocess.DEVNULL
+                    )
+                    try:
+                        open(stamp_file, 'w').write(str(time.time()))
+                    except Exception:
+                        pass
+
+                    if pull.returncode != 0:
+                        print("[!] git pull failed:")
+                        err = (pull.stderr or pull.stdout or '').strip()
+                        print(f"      {err[:400]}")
+                    else:
+                        channel = cfg.get('ytdlp_channel', 'master')
+                        print(f"[*] Updating yt-dlp ({channel})...")
+                        _update_ytdlp(channel=channel)
+                        after = subprocess.run(
+                            ['git', 'rev-parse', 'HEAD'],
+                            cwd=script_dir, capture_output=True,
+                            text=True, timeout=5, stdin=subprocess.DEVNULL
+                        ).stdout.strip()
+                        if before and after and before != after:
+                            print("[ok] Updated — restarting...")
+                            sys.stdout.flush()
+                            time.sleep(0.5)
+                            os.execv(sys.executable, [sys.executable] + sys.argv)
+                        else:
+                            print("[*] Already up to date")
             except Exception as e:
                 print(f"[!] Update failed: {e}")
 

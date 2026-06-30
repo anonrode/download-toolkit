@@ -68,9 +68,9 @@ def safe_get(session, url, timeout=20, referer=None, retries=3):
                     redirect_url = m.group(1)
                     if not redirect_url.startswith('http'):
                         redirect_url = urljoin(url, redirect_url)
-                    debug_print(f"  [*] Following JS redirect from 403: {redirect_url[:60]}...")
+                    safe_print(f"  [*] Following JS redirect from 403: {redirect_url[:60]}...")
                     if retries > 1:
-                        return safe_get(session, redirect_url, referer, retries - 1)
+                        return safe_get(session, redirect_url, referer=referer, retries=retries - 1)
             
             if not r.ok:
                 safe_print(f"  [!] HTTP {r.status_code}: {url[:60]}")
@@ -104,6 +104,7 @@ def _ctx(ctx):
         ctx.get('quality',         None),
         ctx.get('parallel',        1),
         ctx.get('current_process', [None]),
+        ctx.get('pause',           [False]),
     )
 
 def _stopped(ctx):
@@ -564,7 +565,7 @@ def resolve_plutomovies_dl(dl_url, session):
 
 # ─── SHARED DOWNLOADWELLA EXTRACTOR ───────────────────────────
 def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print(f"[*] {site_label} mode")
     slug   = url.rstrip('/').split('/')[-1]
@@ -634,7 +635,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                               series_url=url, series_name=name,
                               bandwidth_limit=bw, quality=quality,
                               current_process=cur_proc,
-                              stop_flag=stop, wait_fn=ctx.get('wait'))
+                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
             else:
                 safe_print(f"  [✗] Could not extract link")
                 summary.add_failed(ep_name)
@@ -680,7 +681,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                             series_url=url, series_name=name,
                             bandwidth_limit=per_thread_bw, quality=quality,
                             current_process=thread_proc,
-                            stop_flag=stop, wait_fn=ctx.get('wait'),
+                            stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
                             parallel_mode=True,
                         )
                         thread_futures[f] = ep_name
@@ -716,6 +717,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                               retry_summary, series_url=url, series_name=name,
                               bandwidth_limit=bw, quality=quality,
                               current_process=cur_proc, stop_flag=stop,
+                              pause_flag=pause,
                               wait_fn=ctx.get('wait'))
             else:
                 safe_print(f"  [✗] Could not extract link on retry")
@@ -726,7 +728,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
 
 def extract_nkiri(url, session, ctx=None):
     ctx  = ctx or {}
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print("[*] NKiri/TheNkiri mode")
     slug = url.rstrip('/').split('/')[-1]
@@ -790,7 +792,7 @@ def extract_nkiri(url, session, ctx=None):
                     download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
                                   series_url=url, series_name=name,
                                   bandwidth_limit=bw, current_process=cur_proc,
-                                  stop_flag=stop, wait_fn=ctx.get('wait'))
+                                  stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
                 else:
                     safe_print(f"  [✗] Could not extract link")
                     summary.add_failed(ep_name)
@@ -831,7 +833,7 @@ def extract_nkiri(url, session, ctx=None):
                                 series_url=url, series_name=name,
                                 bandwidth_limit=per_thread_bw, quality=quality,
                                 current_process=thread_proc,
-                                stop_flag=stop, wait_fn=ctx.get('wait'),
+                                stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
                                 parallel_mode=True,
                             )] = fname
                         for f in as_completed(tfutures):
@@ -861,7 +863,7 @@ def extract_nkiri(url, session, ctx=None):
                     download_file(direct, folder, safe_filename(f"{stem}.{ext}"),
                                   retry_summary, series_url=url, series_name=name,
                                   bandwidth_limit=bw, current_process=cur_proc,
-                                  stop_flag=stop, wait_fn=ctx.get('wait'))
+                                  stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
                 else:
                     retry_summary.add_failed(failed_fname)
             retry_summary.report(f"{name} (retry)")
@@ -894,6 +896,7 @@ def extract_nkiri(url, session, ctx=None):
                            series_url=url, series_name=name,
                            bandwidth_limit=bw, quality=quality,
                            current_process=cur_proc, stop_flag=stop,
+                           pause_flag=pause,
                            wait_fn=ctx.get('wait'))
         if summary.failed == 0 and not _stopped(ctx):
             mark_series_complete(url)
@@ -913,7 +916,7 @@ def extract_dramakey_com(url, session, ctx=None):
 
 def extract_9jarocks(url, session, ctx=None):
     ctx = ctx or {}
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print("[*] 9jaRocks mode")
     slug   = url.rstrip('/').split('/')[-1]
@@ -956,7 +959,7 @@ def extract_9jarocks(url, session, ctx=None):
             download_file(direct, folder, safe_filename(f"{base_fname}.{ext}"), summary,
                           series_url=url, series_name=name,
                           bandwidth_limit=bw, current_process=cur_proc,
-                          stop_flag=stop, wait_fn=ctx.get('wait'))
+                          stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
         else:
             safe_print(f"  [✗] Could not extract: {base_fname}")
             summary.add_failed(base_fname)
@@ -965,7 +968,7 @@ def extract_9jarocks(url, session, ctx=None):
 
 def extract_naijaprey(url, session, ctx=None):
     ctx = ctx or {}
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print("[*] NaijaPrey mode")
     slug   = url.rstrip('/').split('/')[-1]
@@ -1016,7 +1019,7 @@ def extract_naijaprey(url, session, ctx=None):
                     download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
                                   series_url=url, series_name=name,
                                   bandwidth_limit=bw, current_process=cur_proc,
-                                  stop_flag=stop, wait_fn=ctx.get('wait'))
+                                  stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
                 else:
                     safe_print(f"  [✗] Wildshare failed")
                     summary.add_failed(ep_name)
@@ -1031,7 +1034,7 @@ def extract_naijaprey(url, session, ctx=None):
 
 def extract_myasiantv(url, session, ctx=None):
     ctx = ctx or {}
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print("[*] MyAsianTV mode")
     slug = url.rstrip('/').split('/')[-1]
@@ -1096,7 +1099,7 @@ def extract_myasiantv(url, session, ctx=None):
             download_file(direct, folder, safe_filename(f"{ep_name}.mp4"), summary,
                           series_url=url, series_name=name,
                           bandwidth_limit=bw, quality=quality,
-                          current_process=cur_proc, stop_flag=stop, wait_fn=ctx.get('wait'))
+                          current_process=cur_proc, stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
         else:
             safe_print(f"  [✗] Could not extract video")
             summary.add_failed(ep_name)
@@ -1105,7 +1108,7 @@ def extract_myasiantv(url, session, ctx=None):
 
 def extract_dramarain(url, session, ctx=None):
     ctx  = ctx or {}
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
     site = 'DramaKey.cc' if DRAMAKEY_CC in url else 'DramaRain'
     safe_print(f"[*] {site} mode")
 
@@ -1146,7 +1149,7 @@ def extract_dramarain(url, session, ctx=None):
             download_file(link, folder, fname, summary,
                           series_url=url, series_name=name,
                           bandwidth_limit=bw, current_process=cur_proc,
-                          stop_flag=stop, wait_fn=ctx.get('wait'))
+                          stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
         summary.report()
         return
 
@@ -1180,7 +1183,7 @@ def extract_dramarain(url, session, ctx=None):
                 download_file(direct, folder, fname, summary,
                               series_url=url, series_name=name,
                               bandwidth_limit=bw, current_process=cur_proc,
-                              stop_flag=stop, wait_fn=ctx.get('wait'))
+                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
             else:
                 safe_print(f"  [✗] Could not resolve link")
                 summary.add_failed(fname)
@@ -1193,7 +1196,7 @@ def extract_dramarain(url, session, ctx=None):
 
 def extract_naijavault(url, session, ctx=None):
     ctx  = ctx or {}
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print("[*] NaijaVault mode")
     slug = url.rstrip('/').split('/')[-1]
@@ -1273,7 +1276,7 @@ def extract_naijavault(url, session, ctx=None):
         download_file(direct, folder, safe_filename(fname), summary,
                       series_url=url, series_name=name,
                       bandwidth_limit=bw, current_process=cur_proc,
-                      stop_flag=stop, wait_fn=ctx.get('wait'))
+                      stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
 
     # ── Process Format A (/dl- pages) — resolve & download immediately ──
     for i, (label, dl_url) in enumerate(format_a, 1):
@@ -1315,7 +1318,7 @@ def extract_naijavault(url, session, ctx=None):
                     download_file(zip_url, folder, ep_name, summary,
                                   series_url=url, series_name=name,
                                   bandwidth_limit=bw, current_process=cur_proc,
-                                  stop_flag=stop, wait_fn=ctx.get('wait'))
+                                  stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
                     zip_hit = True
                     break
             continue
@@ -1418,7 +1421,7 @@ def extract_naijavault(url, session, ctx=None):
 
 def extract_anitaku(url, session, ctx=None):
     ctx  = ctx or {}
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print("[*] Anitaku mode")
     slug       = url.rstrip('/').split('/')[-1]
@@ -1515,7 +1518,7 @@ def extract_anitaku(url, session, ctx=None):
 
 def extract_plutomovies(url, session, ctx=None):
     ctx  = ctx or {}
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print("[*] PlutoMovies mode")
     is_movie = '/movie/' in url
@@ -1542,7 +1545,7 @@ def extract_plutomovies(url, session, ctx=None):
                 download_file(direct, folder, safe_filename(f"{name}.{ext}"), summary,
                               series_url=url, series_name=name,
                               bandwidth_limit=bw, current_process=cur_proc,
-                              stop_flag=stop, wait_fn=ctx.get('wait'))
+                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
             else:
                 safe_print("[✗] Could not resolve download link")
                 summary.add_failed(name)
@@ -1710,7 +1713,7 @@ def extract_plutomovies(url, session, ctx=None):
                           series_url=url, series_name=name,
                           bandwidth_limit=bw, quality=quality,
                           current_process=cur_proc,
-                          stop_flag=stop, wait_fn=ctx.get('wait'))
+                          stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
             time.sleep(0.5)
 
     summary.report()
@@ -1818,7 +1821,7 @@ def _yt_playlist_items_prompt(count):
 
 def extract_social(url, session, ctx=None):
     ctx  = ctx or {}
-    stop, wait, bw, quality, parallel, cur_proc = _ctx(ctx)
+    stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     bd     = base_domain(url).replace('https://', '').replace('www.', '')
     is_yt  = 'youtube.com' in url or 'youtu.be' in url

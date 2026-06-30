@@ -430,13 +430,14 @@ def _media_scan(filepath):
         pass
 
 def log_download(name, url, filepath):
-    history = load_history()
-    if name not in history:
-        history[name] = []
-    entry = {'url': url, 'file': filepath, 'time': time.strftime('%Y-%m-%d %H:%M')}
-    if entry not in history[name]:
-        history[name].append(entry)
-    save_history(history)
+    with HISTORY_LOCK:
+        history = load_history()
+        if name not in history:
+            history[name] = []
+        entry = {'url': url, 'file': filepath, 'time': time.strftime('%Y-%m-%d %H:%M')}
+        if entry not in history[name]:
+            history[name].append(entry)
+        save_history(history)
     _media_scan(filepath)
 
 def show_history():
@@ -528,7 +529,8 @@ def categorize_error(exception, status_code=None):
     return ('unknown', True, 'Unknown error — will retry')
 
 
-RESUME_LOCK = threading.Lock()
+RESUME_LOCK  = threading.Lock()
+HISTORY_LOCK = threading.Lock()
 
 def _load_resume_state_unlocked():
     return _atomic_read_json(RESUME_FILE, {})
@@ -717,8 +719,11 @@ def fetch_expected_size(url, session=None):
     """
     try:
         import requests as _req
-        s = _req.Session()
-        s.headers['User-Agent'] = UA_DESKTOP
+        if session:
+            s = session
+        else:
+            s = _req.Session()
+            s.headers['User-Agent'] = UA_DESKTOP
         r = s.head(url, timeout=10, allow_redirects=True)
         cl = r.headers.get('Content-Length') or r.headers.get('content-length')
         if cl and str(cl).isdigit():
@@ -727,7 +732,7 @@ def fetch_expected_size(url, session=None):
         pass
     return None
 
-def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
+def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
     """
     Check if file is complete using receipt system (primary) + filesystem check (fallback).
     Returns: (is_complete, filepath)
@@ -766,12 +771,25 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
     
     # Fallback: filesystem check (for files without receipt records)
     base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
+
+    def _resolve_expected(filepath):
+        """Get expected size: stored state first, HEAD request if needed."""
+        if series_url:
+            stored = get_episode_size(series_url, filename)
+            if stored:
+                return stored
+        if url:
+            fetched = fetch_expected_size(url)
+            if fetched and series_url:
+                save_episode_size(series_url, filename, fetched)
+            return fetched
+        return None
     
     # First try exact filename match
     if os.path.exists(os.path.join(folder, filename)):
         filepath = os.path.join(folder, filename)
         actual = os.path.getsize(filepath)
-        expected = get_episode_size(series_url, filename) if series_url else None
+        expected = _resolve_expected(filepath)
         
         if expected:
             if actual >= expected * 0.99:
@@ -782,8 +800,14 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
                 if receipt.get('status') == 'paused':
                     safe_print(f"  [*] Resuming: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB")
                     return False, None
+            safe_print(f"  [!] Incomplete: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB — re-downloading")
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
+            return False, None
         else:
-            # No expected size: use file size heuristic
+            # No expected size and no URL to HEAD — use file size heuristic
             min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
             if actual >= min_bytes:
                 safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
@@ -797,7 +821,7 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
             receipt_path = receipt.get('filepath')
             if os.path.exists(receipt_path):
                 actual = os.path.getsize(receipt_path)
-                expected = get_episode_size(series_url, filename) if series_url else None
+                expected = _resolve_expected(receipt_path)
                 if expected:
                     if actual >= expected * 0.99:
                         safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
@@ -813,22 +837,18 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
         filepath = os.path.join(folder, f"{base}.{ext}")
         if os.path.exists(filepath):
             actual = os.path.getsize(filepath)
-            expected = get_episode_size(series_url, filename) if series_url else None
+            expected = _resolve_expected(filepath)
             
             if expected:
-                # Verify against expected size (allow 1% tolerance)
                 if actual >= expected * 0.99:
                     safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
                     return True, filepath
                 else:
-                    # Incomplete file — only delete if genuinely broken, NOT paused
-                    # Check again if receipt says paused (shouldn't reach here but be safe)
                     if ep_key:
                         receipt = DownloadReceipt.get_receipt(ep_key)
                         if receipt.get('status') == 'paused':
                             safe_print(f"  [*] Resuming: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB")
                             return False, None  # Don't delete!
-                    
                     safe_print(f"  [!] Incomplete: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB — re-downloading")
                     try:
                         os.remove(filepath)
@@ -836,14 +856,12 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None):
                         pass
                     return False, None
             else:
-                # No expected size: use file size heuristic
-                # If file is large enough, consider it complete and skip
+                # No expected size and no URL — use heuristic
                 min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
                 if actual >= min_bytes:
                     safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
                     return True, filepath
                 else:
-                    # File too small - likely corrupted, safe to delete
                     safe_print(f"  [!] File too small ({actual/(1024*1024):.1f}MB) — likely incomplete or corrupted")
                     try:
                         os.remove(filepath)
@@ -940,21 +958,33 @@ def _install_ytdlp():
         safe_print(f"[!] Failed to install yt-dlp: {e}")
         return False
 
-def _update_ytdlp():
-    """Silent yt-dlp update — called in a daemon thread from auto_update()."""
+def _update_ytdlp(channel='stable'):
+    """
+    Update yt-dlp. channel='stable' (default) installs the latest stable
+    release. channel='master' installs the latest pre-release/nightly
+    build via --pre, which carries newer site fixes (e.g. Instagram) but
+    is less tested.
+
+    The silent background auto-update path always calls this with no
+    args (stable) so an unattended update can't silently put a
+    less-tested yt-dlp build in front of a running download. Only the
+    explicit `update` command — where the user is watching and can react
+    — respects the configured ytdlp_channel setting.
+    """
     try:
-        subprocess.run(
-            [sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp',
-             '--break-system-packages', '-q'],
-            check=True, capture_output=True
-        )
+        cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade']
+        if channel == 'master':
+            cmd.append('--pre')
+        cmd += ['yt-dlp', '--break-system-packages', '-q']
+        subprocess.run(cmd, check=True, capture_output=True)
     except Exception:
         pass
 
 # ─── DOWNLOAD BACKENDS ────────────────────────────────────────
 def download_with_aria2c(url, folder, filename, summary,
                          bandwidth_limit=0, current_process=None,
-                         retries=3, stop_flag=None, parallel_mode=False,
+                         retries=3, stop_flag=None, pause_flag=None,
+                         parallel_mode=False,
                          series_url=None, series_name=None,
                          expected_size=0, config=None):
     """
@@ -967,6 +997,13 @@ def download_with_aria2c(url, folder, filename, summary,
     """
     import shutil
     config = config or {}  # Config dict with resolver_timeout, etc.
+    if 'download_timeout' not in config:
+        try:
+            import json as _json
+            with open(os.path.join(BASE_DIR, '.config.json')) as _f:
+                config = {**config, 'download_timeout': _json.load(_f).get('download_timeout', 120)}
+        except Exception:
+            pass
     
     has_aria2c = shutil.which('aria2c') is not None
     if not has_aria2c:
@@ -1018,7 +1055,7 @@ def download_with_aria2c(url, folder, filename, summary,
             cmd = [
                 'aria2c',
                 '-c',  # Continue/resume support (key for resumable downloads!)
-                f'--max-tries={max(1, int(retries))}',
+                f'--max-tries=0',
                 '--retry-wait=10',
                 '--timeout=' + str(config.get('download_timeout', 120)),
                 '--connect-timeout=60',
@@ -1066,6 +1103,11 @@ def download_with_aria2c(url, folder, filename, summary,
                     proc.terminate()
                     stopped = True
                     break
+                # While paused (SIGSTOP), don't advance the stall clock
+                if pause_flag and pause_flag[0]:
+                    last_progress = time.time()
+                    time.sleep(0.5)
+                    continue
                 current_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
                 if current_size > last_size:
                     last_size = current_size
@@ -1269,7 +1311,7 @@ def download_with_ytdlp(url, folder, filename, summary,
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
-                'aria2c:-x 16 -s 16 -c --max-tries=3 --retry-wait=10 --timeout=120 '
+                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=10 --timeout=120 '
                 '--connect-timeout=60 --file-allocation=none --min-split-size=1M'
             ]
         cmd.append(url)
@@ -1437,7 +1479,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
-                'aria2c:-x 16 -s 16 -c --max-tries=3 --retry-wait=10 '
+                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=10 '
                 '--timeout=120 --connect-timeout=60 --file-allocation=none --min-split-size=1M'
             ]
         cmd.append(url)
@@ -1506,9 +1548,9 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
 
 # ─── SMART DOWNLOAD FILE ──────────────────────────────────────
 def download_file(url, folder, filename, summary,
-                  check_expiry=True, series_url=None, series_name=None,
+                  check_expiry=False, series_url=None, series_name=None,
                   bandwidth_limit=0, quality=None,
-                  current_process=None, stop_flag=None, paused_flag=None,
+                  current_process=None, stop_flag=None, pause_flag=None,
                   wait_fn=None, parallel_mode=False):
     """
     Smart downloader — handles resume state, expiry check, disk space,
@@ -1526,7 +1568,7 @@ def download_file(url, folder, filename, summary,
         summary.add_failed(filename)
         return False
 
-    done, _ = already_downloaded(folder, filename, series_url=series_url)
+    done, _ = already_downloaded(folder, filename, series_url=series_url, url=url)
     if done:
         safe_print(f"  [✓] Already downloaded — skipping")
         summary.add_skipped()
@@ -1583,6 +1625,7 @@ def download_file(url, folder, filename, summary,
                                       bandwidth_limit=bandwidth_limit,
                                       current_process=current_process,
                                       stop_flag=stop_flag,
+                                      pause_flag=pause_flag,
                                       parallel_mode=parallel_mode,
                                       series_url=series_url,
                                       series_name=series_name or folder,
@@ -1649,7 +1692,8 @@ class Prefetcher:
 def download_batch(items, folder, summary, parallel=1,
                    series_url=None, series_name=None,
                    bandwidth_limit=0, quality=None,
-                   current_process=None, stop_flag=None, wait_fn=None):
+                   current_process=None, stop_flag=None,
+                   pause_flag=None, wait_fn=None):
     if not items:
         return
     if parallel == 1:
@@ -1660,7 +1704,8 @@ def download_batch(items, folder, summary, parallel=1,
                           series_url=series_url, series_name=series_name,
                           bandwidth_limit=bandwidth_limit, quality=quality,
                           current_process=current_process,
-                          stop_flag=stop_flag, wait_fn=wait_fn,
+                          stop_flag=stop_flag, pause_flag=pause_flag,
+                          wait_fn=wait_fn,
                           parallel_mode=False)
     else:
         # Divide bandwidth evenly across threads so total stays within limit
@@ -1674,13 +1719,14 @@ def download_batch(items, folder, summary, parallel=1,
                 f = executor.submit(
                     download_file,
                     url, folder, filename, summary,
-                    check_expiry=True,
+                    check_expiry=False,
                     series_url=series_url,
                     series_name=series_name,
                     bandwidth_limit=per_thread_bw,
                     quality=quality,
                     current_process=thread_proc,
                     stop_flag=stop_flag,
+                    pause_flag=pause_flag,
                     wait_fn=wait_fn,
                     parallel_mode=True,
                 )

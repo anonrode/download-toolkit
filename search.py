@@ -20,6 +20,7 @@ import time
 import datetime
 import threading
 import requests
+from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from downloader import safe_print, UA_DESKTOP, BASE_DIR
@@ -115,6 +116,22 @@ CONTENT_HINTS = {
     'nollywood':('{base}-complete-nollywood',     None),
     'japanese': ('{base}-complete-japanese-drama',None),
 }
+
+# ─── PLUTOMOVIES (real search engine, no slug-guessing) ───────
+# Unlike NKiri/DramaKey, PlutoMovies URLs carry an internal numeric ID
+# (e.g. /movie/901465/mortal-kombat-ii-2026) that can't be derived from
+# the title — slug-probing doesn't apply here. PlutoMovies instead has
+# a real server-side search at /search/{query}/page/{n}, so this is a
+# single HTTP GET + HTML parse rather than the wave1/wave2 pattern walk.
+PLUTOMOVIES_RESULT_RE = re.compile(
+    r'<a href="(/(movie|series)/\d+/[a-z0-9-]+)" data-href="[^"]*" title="([^"]+)">\s*<strong>',
+    re.IGNORECASE
+)
+# Series search results include every individual episode alongside the
+# season entry itself — this filters those out, applied to 'series' kind
+# only (movies never carry an SxxEyy marker in their title).
+PLUTOMOVIES_EPISODE_RE = re.compile(r'\bS\d{1,2}\s?E\d{1,3}\b', re.IGNORECASE)
+PLUTOMOVIES_MAX_RESULTS = 12
 
 # ─── QUERY PARSING ────────────────────────────────────────────
 
@@ -228,6 +245,66 @@ def _probe_patterns(base_url, patterns, base, season_slug, year, cancel_event=No
 
     return None
 
+def _plutomovies_fetch_page(query_clean, page, timeout=15):
+    url = f"https://plutomovies.com/search/{quote(query_clean)}/page/{page}"
+    s = requests.Session()
+    s.headers.update({
+        'User-Agent': UA_DESKTOP,
+        'Referer': 'https://plutomovies.com/',
+        'Accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
+    })
+    try:
+        r = s.get(url, timeout=timeout)
+        if r.status_code != 200:
+            return None
+        return r.text
+    except Exception:
+        return None
+
+def _search_plutomovies(query, results, lock, timeout=15):
+    """
+    Real search engine — no slug-guessing. Single GET request (with a
+    page-2 fallback only if page 1 is fully empty). Filters out
+    individual-episode results, keeping season/series/movie-level
+    entries only.
+    """
+    # Apostrophes break PlutoMovies' backend search entirely (confirmed —
+    # site has no issue with the rest of the query, only the apostrophe
+    # character itself) — must strip before encoding.
+    query_clean = query.replace("'", "").replace("\u2019", "")
+    if not query_clean.strip():
+        return
+
+    html = _plutomovies_fetch_page(query_clean, 1, timeout)
+    matches = PLUTOMOVIES_RESULT_RE.findall(html) if html else []
+
+    if not matches:
+        html2 = _plutomovies_fetch_page(query_clean, 2, timeout)
+        if html2:
+            matches = PLUTOMOVIES_RESULT_RE.findall(html2)
+
+    if not matches:
+        return
+
+    seen = set()
+    found_any = False
+    for link, kind, title in matches:
+        title = title.strip()
+        if kind == 'series' and PLUTOMOVIES_EPISODE_RE.search(title):
+            continue  # skip individual episode entries, keep season-level only
+        full_url = "https://plutomovies.com" + link
+        if full_url in seen:
+            continue
+        seen.add(full_url)
+        with lock:
+            results.append((f"PlutoMovies ({kind}): {title}", full_url))
+        found_any = True
+        if len(seen) >= PLUTOMOVIES_MAX_RESULTS:
+            break
+
+    if found_any:
+        safe_print("  [✓] Found on PlutoMovies")
+
 # ─── SITE SEARCHERS ───────────────────────────────────────────
 
 def _search_site(domain, wave1, wave2, base, season_slug, year,
@@ -255,7 +332,7 @@ def _search_site(domain, wave1, wave2, base, season_slug, year,
                     w2.remove(hint_pat)
                     w1.insert(0, hint_pat)
 
-        url = _probe_patterns(domain, w1, base, season_slug, year)
+        url = _probe_patterns(domain, w1, base, season_slug, year, cancel_event)
         if url:
             if cancel_event:
                 cancel_event.set()
@@ -297,7 +374,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
     cancel_event = threading.Event() if fast else None
 
     threads = []
-    if site_filter != 'dramakey':
+    if site_filter not in ('dramakey', 'plutomovies'):
         t1 = threading.Thread(
             target=_search_site,
             args=('https://thenkiri.com', NKIRI_WAVE1, NKIRI_WAVE2,
@@ -306,7 +383,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
             daemon=True
         )
         threads.append(t1)
-    if site_filter != 'nkiri':
+    if site_filter not in ('nkiri', 'plutomovies'):
         t2 = threading.Thread(
             target=_search_site,
             args=('https://dramakey.com', DRAMAKEY_WAVE1, DRAMAKEY_WAVE2,
@@ -315,6 +392,14 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
             daemon=True
         )
         threads.append(t2)
+    if site_filter not in ('nkiri', 'dramakey'):
+        t3 = threading.Thread(
+            target=_search_plutomovies,
+            args=(query, results, lock),
+            kwargs={'timeout': timeout},
+            daemon=True
+        )
+        threads.append(t3)
 
     for t in threads:
         t.start()
@@ -368,6 +453,9 @@ def search(raw_query, session=None):
     elif query.lower().endswith(' dramakey'):
         site_filter = 'dramakey'
         query = query[:-9].strip()
+    elif query.lower().endswith(' plutomovies'):
+        site_filter = 'plutomovies'
+        query = query[:-12].strip()
 
     safe_print(f"\n[*] Searching: {query}")
     results = _run_search(query, site_filter=site_filter, fast=False, timeout=45)
@@ -388,6 +476,9 @@ def fsearch(raw_query, session=None):
     elif query.lower().endswith(' dramakey'):
         site_filter = 'dramakey'
         query = query[:-9].strip()
+    elif query.lower().endswith(' plutomovies'):
+        site_filter = 'plutomovies'
+        query = query[:-12].strip()
 
     if hint:
         safe_print(f"\n[*] Fast search ({hint}): {query}")
