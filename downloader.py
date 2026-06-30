@@ -1395,7 +1395,7 @@ def download_with_ytdlp(url, folder, filename, summary,
             '--retry-sleep', '10',
             '--no-warnings', '--progress', '--newline',
         ]
-        if has_aria2c:
+        if _check_aria2c_availability():
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
@@ -1589,7 +1589,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             '--retries', '3', '--fragment-retries', '3',
             '--no-warnings', '--progress', '--newline',
         ]
-        if has_aria2c:
+        if _check_aria2c_availability():
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
