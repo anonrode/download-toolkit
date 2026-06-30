@@ -964,6 +964,8 @@ def extract_9jarocks(url, session, ctx=None):
             safe_print(f"  [✗] Could not extract: {base_fname}")
             summary.add_failed(base_fname)
         time.sleep(0.5)
+    if summary.failed == 0 and not _stopped(ctx):
+        mark_series_complete(url)
     summary.report()
 
 def extract_naijaprey(url, session, ctx=None):
@@ -1030,6 +1032,8 @@ def extract_naijaprey(url, session, ctx=None):
             safe_print(f"  [!] Error: {e}")
             summary.add_failed(ep_name)
         time.sleep(1)
+    if summary.failed == 0 and not _stopped(ctx):
+        mark_series_complete(url)
     summary.report()
 
 def extract_myasiantv(url, session, ctx=None):
@@ -1104,6 +1108,8 @@ def extract_myasiantv(url, session, ctx=None):
             safe_print(f"  [✗] Could not extract video")
             summary.add_failed(ep_name)
         time.sleep(1)
+    if summary.failed == 0 and not _stopped(ctx):
+        mark_series_complete(url)
     summary.report()
 
 def extract_dramarain(url, session, ctx=None):
@@ -1150,6 +1156,8 @@ def extract_dramarain(url, session, ctx=None):
                           series_url=url, series_name=name,
                           bandwidth_limit=bw, current_process=cur_proc,
                           stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
+        if summary.failed == 0 and not _stopped(ctx):
+            mark_series_complete(url)
         summary.report()
         return
 
@@ -1188,6 +1196,8 @@ def extract_dramarain(url, session, ctx=None):
                 safe_print(f"  [✗] Could not resolve link")
                 summary.add_failed(fname)
             time.sleep(0.5)
+        if summary.failed == 0 and not _stopped(ctx):
+            mark_series_complete(url)
         summary.report()
         return
 
@@ -1417,6 +1427,8 @@ def extract_naijavault(url, session, ctx=None):
             time.sleep(0.5)
 
 
+    if summary.failed == 0 and not _stopped(ctx):
+        mark_series_complete(url)
     summary.report(name=name)
 
 def extract_anitaku(url, session, ctx=None):
@@ -1514,6 +1526,8 @@ def extract_anitaku(url, session, ctx=None):
             download_episode(ep_url, ep_name)
             time.sleep(1)
 
+    if summary.failed == 0 and not _stopped(ctx):
+        mark_series_complete(url)
     summary.report()
 
 def extract_plutomovies(url, session, ctx=None):
@@ -1552,6 +1566,8 @@ def extract_plutomovies(url, session, ctx=None):
         else:
             safe_print("[✗] No download link found on page")
             summary.add_failed(name)
+        if summary.failed == 0 and not _stopped(ctx):
+            mark_series_complete(url)
         summary.report()
         return
 
@@ -1716,6 +1732,8 @@ def extract_plutomovies(url, session, ctx=None):
                           stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
             time.sleep(0.5)
 
+    if summary.failed == 0 and not _stopped(ctx):
+        mark_series_complete(url)
     summary.report()
 
 def _yt_quality_prompt(default_quality):

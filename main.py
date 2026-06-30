@@ -132,88 +132,60 @@ def save_config(cfg):
 
 # ─── SIGNAL HANDLING (Ctrl+C) ─────────────────────────────────
 def setup_signal_handler():
-    global _CTRL_C_COUNT, CURRENT_PROCESS, STOP_FLAG, EXIT_FLAG
+    global CURRENT_PROCESS, STOP_FLAG, EXIT_FLAG
     global CURRENT_SERIES_URL, CURRENT_FILEPATH, CURRENT_EXPECTED_SIZE
 
     def handler(sig, frame):
-        _CTRL_C_COUNT[0] += 1
+        if STOP_FLAG[0]:
+            try:
+                sys.stdout.write('\n\n  [exit] Force exiting...\n\n')
+                sys.stdout.flush()
+            except Exception:
+                pass
+            sys.exit(0)
+
+        STOP_FLAG[0] = True
         proc = CURRENT_PROCESS[0]
 
-        if _CTRL_C_COUNT[0] == 1:
-            STOP_FLAG[0] = True
-            if proc:
-                try: proc.terminate()
-                except Exception: pass
+        if proc:
+            try: proc.terminate()
+            except Exception: pass
+        try:
+            from downloader import terminate_active_processes
+            terminate_active_processes()
+        except Exception:
+            pass
+        
+        # Mark download as paused in both receipt and resume state
+        if CURRENT_SERIES_URL[0] and CURRENT_EPISODE_NAME[0] and CURRENT_FILEPATH[0]:
             try:
-                from downloader import terminate_active_processes
-                terminate_active_processes()
-            except Exception:
-                pass
-            
-            # Mark download as paused in both receipt and resume state
-            if CURRENT_SERIES_URL[0] and CURRENT_EPISODE_NAME[0] and CURRENT_FILEPATH[0]:
-                try:
-                    from downloader import DownloadReceipt, mark_episode_current
-                    progress_bytes = os.path.getsize(CURRENT_FILEPATH[0]) if os.path.exists(CURRENT_FILEPATH[0]) else 0
-                    episode_key = f"{CURRENT_SERIES_URL[0]}:{CURRENT_EPISODE_NAME[0]}"
-                    
-                    # Update receipt (per-episode)
-                    DownloadReceipt.mark_paused(
-                        episode_key,
-                        CURRENT_FILEPATH[0],
-                        progress_bytes,
-                        CURRENT_EXPECTED_SIZE[0]
+                from downloader import DownloadReceipt, mark_episode_current
+                progress_bytes = os.path.getsize(CURRENT_FILEPATH[0]) if os.path.exists(CURRENT_FILEPATH[0]) else 0
+                episode_key = f"{CURRENT_SERIES_URL[0]}:{CURRENT_EPISODE_NAME[0]}"
+                
+                # Update receipt (per-episode)
+                DownloadReceipt.mark_paused(
+                    episode_key,
+                    CURRENT_FILEPATH[0],
+                    progress_bytes,
+                    CURRENT_EXPECTED_SIZE[0]
+                )
+                
+                # Update resume state (series-level) so it shows in resume list
+                if CURRENT_SERIES_NAME[0] and CURRENT_EPISODE_NAME[0]:
+                    mark_episode_current(
+                        CURRENT_SERIES_URL[0],
+                        CURRENT_SERIES_NAME[0],
+                        CURRENT_EPISODE_NAME[0]
                     )
-                    
-                    # Update resume state (series-level) so it shows in resume list
-                    if CURRENT_SERIES_NAME[0] and CURRENT_EPISODE_NAME[0]:
-                        mark_episode_current(
-                            CURRENT_SERIES_URL[0],
-                            CURRENT_SERIES_NAME[0],
-                            CURRENT_EPISODE_NAME[0]
-                        )
-                except Exception:
-                    pass
-            
-            try:
-                sys.stdout.write('\n\n  [pause] Paused — use the resume command to continue. Ctrl+C again to exit.\n\n')
-                sys.stdout.flush()
             except Exception:
                 pass
-
-        elif _CTRL_C_COUNT[0] == 2:
-            STOP_FLAG[0] = True
-            EXIT_FLAG[0] = False
-            if proc:
-                try: proc.terminate()
-                except Exception: pass
-            try:
-                from downloader import terminate_active_processes
-                terminate_active_processes()
-            except Exception:
-                pass
-            try:
-                sys.stdout.write('\n\n  [stop] Batch stopped — back to prompt. Ctrl+C again to exit.\n\n')
-                sys.stdout.flush()
-            except Exception:
-                pass
-
-        else:
-            STOP_FLAG[0] = True
-            EXIT_FLAG[0] = True
-            if proc:
-                try: proc.terminate()
-                except Exception: pass
-            try:
-                from downloader import terminate_active_processes
-                terminate_active_processes()
-            except Exception:
-                pass
-            try:
-                sys.stdout.write('\n\n  [exit] Exiting...\n\n')
-                sys.stdout.flush()
-            except Exception:
-                pass
+        
+        try:
+            sys.stdout.write('\n\n  [cancel] Download cancelled — returning to prompt. Press Ctrl+C again to force exit.\n\n')
+            sys.stdout.flush()
+        except Exception:
+            pass
 
     def sigterm_handler(sig, frame):
         """Called when Android kills Termux from notification or app switcher."""
@@ -1119,7 +1091,7 @@ def handle_cleanup():
 
 # ─── MAIN REPL ────────────────────────────────────────────────
 def main():
-    global _CTRL_C_COUNT, STOP_FLAG, EXIT_FLAG
+    global STOP_FLAG, EXIT_FLAG
 
     wake_proc = setup_android()
     cfg = load_config()
@@ -1159,7 +1131,6 @@ def main():
             break
         # Reset batch state between commands
         _reset_current_state()
-        _CTRL_C_COUNT[0] = 0
         STOP_FLAG[0]     = False
         PAUSE_FLAG[0]    = False
 
