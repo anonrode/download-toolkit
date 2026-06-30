@@ -445,12 +445,14 @@ def _present_results(results, raw_query):
     print()
     print(f"  {'─'*55}")
     for i, (site, url) in enumerate(display_results, 1):
-        # Format: [1] [NKiri] Vincenzo (Korean Drama)
-        # We strip the "PlutoMovies" prefix if it exists to keep it short
-        source = site
         if site.startswith("PlutoMovies "):
             source = site.replace("PlutoMovies ", "Pluto")
-        print(f"  [{i}] [{source}]")
+            print(f"  [{i}] [{source}]")
+        else:
+            # NKiri / DramaKey / DramaRain
+            slug = url.rstrip('/').split('/')[-1]
+            title = slug.replace('-', ' ').title()
+            print(f"  [{i}] [{site}] {title}")
     print(f"  {'─'*55}")
     try:
         choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(display_results)).strip())

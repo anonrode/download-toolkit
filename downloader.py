@@ -1739,6 +1739,27 @@ def download_file(url, folder, filename, summary,
         if series_url:
             mark_episode_done(series_url, series_name or folder, filename)
         return True
+    else:
+        # Self-healing: if file is actually incomplete on disk, remove it from completed lists
+        if series_url:
+            with RESUME_LOCK:
+                try:
+                    state = _load_resume_state_unlocked()
+                    if series_url in state and 'done' in state[series_url]:
+                        if filename in state[series_url]['done']:
+                            state[series_url]['done'].remove(filename)
+                            _save_resume_state_unlocked(state)
+                except Exception:
+                    pass
+            with STATE_LOCK:
+                try:
+                    receipts = DownloadReceipt.load_all()
+                    ep_key = f"{series_url}:{filename}"
+                    if ep_key in receipts and receipts[ep_key].get('status') == 'done':
+                        receipts[ep_key]['status'] = 'paused'
+                        DownloadReceipt.save_all(receipts)
+                except Exception:
+                    pass
 
     if series_url and is_episode_done_in_state(series_url, filename):
         safe_print(f"  [✓] Done in previous session — skipping")
