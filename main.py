@@ -289,36 +289,47 @@ def _start_pause_listener():
                 try:
                     old = termios.tcgetattr(fd)
                     tty.setraw(fd)
-                    while (CURRENT_PROCESS[0] is not None or PAUSE_FLAG[0]) and not EXIT_FLAG[0]:
+                    last_ctrl_c = 0.0
+                    while (CURRENT_PROCESS[0] is not None or PAUSE_FLAG[0]) and not EXIT_FLAG[0] and not STOP_FLAG[0]:
                         # Non-blocking read — poll every 100ms
                         r, _, _ = select.select([fd], [], [], 0.1)
                         if not r:
                             continue
                         ch = os.read(fd, 1)
-                        if ch == b'\x10':  # Ctrl+P
+                        if ch == b'\x03':  # Ctrl+C
+                            now = time.time()
                             proc = CURRENT_PROCESS[0]
                             if PAUSE_FLAG[0]:
-                                # Currently paused — resume (downloader will re-launch aria2c)
-                                PAUSE_FLAG[0] = False
-                                try:
-                                    sys.stdout.write('\n  [▶] Resumed\n')
-                                    sys.stdout.flush()
-                                except Exception:
-                                    pass
+                                # Currently paused: check if second Ctrl+C is pressed quickly to quit
+                                if now - last_ctrl_c < 1.5:
+                                    PAUSE_FLAG[0] = False
+                                    STOP_FLAG[0] = True
+                                    import signal
+                                    os.kill(os.getpid(), signal.SIGINT)
+                                else:
+                                    PAUSE_FLAG[0] = False
+                                    last_ctrl_c = now
+                                    try:
+                                        sys.stdout.write('\n  [▶] Resumed\n')
+                                        sys.stdout.flush()
+                                    except Exception:
+                                        pass
                             else:
-                                # Currently running — pause (downloader will terminate aria2c)
                                 if proc is None:
                                     continue
                                 PAUSE_FLAG[0] = True
+                                last_ctrl_c = now
                                 try:
-                                    sys.stdout.write('\n  [‖] Paused — Ctrl+P to resume\n')
+                                    sys.stdout.write('\n  [‖] Paused — press Ctrl+C to resume | Ctrl+C again quickly to stop\n')
                                     sys.stdout.flush()
                                 except Exception:
                                     pass
-                        elif ch == b'\x03':  # Ctrl+C
-                            # Trigger SIGINT manually since raw mode intercepts it
-                            import signal
-                            os.kill(os.getpid(), signal.SIGINT)
+                        elif ch in (b'q', b'Q', b'\r', b'\n'):  # Allow q/Q/Enter to exit while paused
+                            if PAUSE_FLAG[0]:
+                                PAUSE_FLAG[0] = False
+                                STOP_FLAG[0] = True
+                                import signal
+                                os.kill(os.getpid(), signal.SIGINT)
                 finally:
                     # Safely restore terminal mode and close file descriptor to prevent leaks
                     try:
@@ -893,7 +904,7 @@ def _show_settings(cfg):
     print(f"  Storage:   {space_s}")
     print(f"==================================================")
     print(f"  Active Features:")
-    print(f"  [✓] Parallel Search           [✓] Pause/Resume (Ctrl+P)")
+    print(f"  [✓] Parallel Search           [✓] Pause/Resume (Ctrl+C)")
     print(f"  [✓] Expired Link Refresh      [✓] Smart Queue")
     print(f"==================================================")
     print(f"  Supported Sites (6):")
@@ -1050,7 +1061,7 @@ def print_banner(cfg):
         print("├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤")
         print("│ ⚡ KEY FEATURES                                       │ 🎬 Movies & Series:                                   │")
         print("│  • 🔍 Parallel Search  - Search all sites at once     │  • NKiri        [⚡ Very Fast]  Korean & Nollywood    │")
-        print("│  • ⏸ Pause & Resume   - Press Ctrl+P anytime          │  • 9JaRocks     [⚡ Very Fast]  Nollywood & Hollywood │")
+        print("│  • ⏸ Pause & Resume   - Press Ctrl+C anytime          │  • 9JaRocks     [⚡ Very Fast]  Nollywood & Hollywood │")
         print("│  • 🔄 Link Auto-Update - Refreshes expired downloads  │  • PlutoMovies  [🚀 Fast]       Blockbusters & Shows  │")
         print("│  • 📋 Smart Queue      - Queue up multiple series     │ 🎎 Asian Dramas:                                      │")
         print("│  • 💾 Storage Guard    - Auto-pauses if space is full │  • DramaKey     [⏱ Normal]      Chinese & Korean      │")
@@ -1066,7 +1077,7 @@ def print_banner(cfg):
         print("├────────────────────────────────────────────────────────┤")
         print("│  ⚡ KEY FEATURES                                       │")
         print("│   • 🔍 Parallel Search  - Search all sites at once     │")
-        print("│   • ⏸ Pause & Resume   - Press Ctrl+P anytime          │")
+        print("│   • ⏸ Pause & Resume   - Press Ctrl+C anytime          │")
         print("│   • 🔄 Link Auto-Update - Refreshes expired downloads  │")
         print("│   • 📋 Smart Queue      - Queue up multiple series     │")
         print("│   • 💾 Storage Guard    - Auto-pauses if space is full │")
@@ -1284,7 +1295,7 @@ def main():
             print(f"  history                - Show past download history")
             print(f"  exit                   - Quit app")
             print(f"{'='*50}")
-            print(f"  Ctrl+P = Pause/Resume | Ctrl+C = Stop active batch")
+            print(f"  Ctrl+C = Pause/Resume | Ctrl+C twice = Stop active batch")
             print(f"{'='*50}")
 
         elif lower == 'history':

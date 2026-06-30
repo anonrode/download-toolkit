@@ -766,12 +766,17 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
             # File missing but receipt says paused - clear it
             DownloadReceipt.mark_failed(ep_key)
         
-        # If done: return complete
+        # If done: return complete (only if no incomplete files exist on disk!)
         if receipt.get('status') == 'done':
             path = receipt.get('filepath')
             if path and os.path.exists(path):
-                safe_print(f"  [✓] Already downloaded (receipt verified)")
-                return True, path
+                # If there are incomplete files on disk, it means the done status is corrupt/outdated
+                if os.path.exists(path + '.aria2') or os.path.exists(path + '.part'):
+                    receipt['status'] = 'paused'
+                    DownloadReceipt.save_all(DownloadReceipt.load_all())  # Save state change
+                else:
+                    safe_print(f"  [✓] Already downloaded (receipt verified)")
+                    return True, path
             # Receipt says done but file missing — clean up receipt and re-download
             DownloadReceipt.mark_failed(ep_key)
     
@@ -1376,7 +1381,7 @@ def download_with_ytdlp(url, folder, filename, summary,
                     proc.kill()
                 if current_process is not None:
                     current_process[0] = None
-                safe_print("  [‖] Paused — press Ctrl+P to resume")
+                safe_print("  [‖] Paused — press Ctrl+C to resume")
                 # Block here until unpaused or stopped
                 while pause_flag[0]:
                     if stop_flag and stop_flag[0]:
