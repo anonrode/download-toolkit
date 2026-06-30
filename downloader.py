@@ -1021,12 +1021,11 @@ def download_with_aria2c(url, folder, filename, summary,
 
     os.makedirs(folder, exist_ok=True)
     safe_fname    = re.sub(r'[^\w]', '_', filename)[:30]
-    # Add thread ID and hash to prevent collision in parallel downloads
-    import threading
+    # Use file hash only (no thread_id) so aria2c can find its session
+    # file across pause/resume cycles even if the thread changes.
     import hashlib
-    thread_id = threading.get_ident()
     file_hash = hashlib.md5(filename.encode()).hexdigest()[:8]
-    session_file  = os.path.join(folder, f'.aria2_{safe_fname}_{file_hash}_{thread_id}.txt')
+    session_file  = os.path.join(folder, f'.aria2_{safe_fname}_{file_hash}.txt')
     filepath      = os.path.join(folder, filename)
     referer       = get_referer_for_url(url)
     
@@ -1103,10 +1102,33 @@ def download_with_aria2c(url, folder, filename, summary,
                     proc.terminate()
                     stopped = True
                     break
-                # While paused (SIGSTOP), don't advance the stall clock
+                # Pause: gracefully terminate aria2c instead of SIGSTOP.
+                # SIGSTOP causes kernel TCP buffers to fill up and then
+                # flush all at once on SIGCONT, creating a misleading
+                # 40MB+ instant jump and often killing the connection.
+                # aria2c's -c flag ensures it resumes from the partial
+                # file when we re-launch it after unpause.
                 if pause_flag and pause_flag[0]:
+                    safe_print("  [‖] Pausing download...")
+                    proc.terminate()
+                    finish_process(proc)
+                    unregister_process(proc)
+                    if current_process is not None:
+                        current_process[0] = None
+                    # Block until user unpauses
+                    while pause_flag[0] and not (stop_flag and stop_flag[0]):
+                        time.sleep(0.3)
+                    if stop_flag and stop_flag[0]:
+                        stopped = True
+                        break
+                    # Re-launch aria2c — it picks up from the partial file
+                    safe_print("  [▶] Resuming download...")
+                    last_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
                     last_progress = time.time()
-                    time.sleep(0.5)
+                    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+                    register_process(proc)
+                    if current_process is not None:
+                        current_process[0] = proc
                     continue
                 current_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
                 if current_size > last_size:

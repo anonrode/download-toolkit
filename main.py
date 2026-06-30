@@ -261,7 +261,7 @@ def _start_pause_listener():
                 try:
                     old = termios.tcgetattr(fd)
                     tty.setraw(fd)
-                    while CURRENT_PROCESS[0] is not None and not EXIT_FLAG[0]:
+                    while (CURRENT_PROCESS[0] is not None or PAUSE_FLAG[0]) and not EXIT_FLAG[0]:
                         # Non-blocking read — poll every 100ms
                         r, _, _ = select.select([fd], [], [], 0.1)
                         if not r:
@@ -269,29 +269,19 @@ def _start_pause_listener():
                         ch = os.read(fd, 1)
                         if ch == b'\x10':  # Ctrl+P
                             proc = CURRENT_PROCESS[0]
-                            if proc is None:
-                                continue
                             if PAUSE_FLAG[0]:
-                                # Currently paused — resume
+                                # Currently paused — resume (downloader will re-launch aria2c)
                                 PAUSE_FLAG[0] = False
-                                try:
-                                    import signal as _sig
-                                    os.kill(proc.pid, _sig.SIGCONT)
-                                except Exception:
-                                    pass
                                 try:
                                     sys.stdout.write('\n  [▶] Resumed\n')
                                     sys.stdout.flush()
                                 except Exception:
                                     pass
                             else:
-                                # Currently running — pause
+                                # Currently running — pause (downloader will terminate aria2c)
+                                if proc is None:
+                                    continue
                                 PAUSE_FLAG[0] = True
-                                try:
-                                    import signal as _sig
-                                    os.kill(proc.pid, _sig.SIGSTOP)
-                                except Exception:
-                                    pass
                                 try:
                                     sys.stdout.write('\n  [‖] Paused — Ctrl+P to resume\n')
                                     sys.stdout.flush()
