@@ -249,7 +249,7 @@ def _start_pause_listener():
         return  # Git Bash / Windows — silently skip
 
     def _reader():
-        import termios, tty, select
+        import os, time, termios, tty, select
         while not EXIT_FLAG[0]:
             # Wait until there is an active download process before capturing keystrokes
             if CURRENT_PROCESS[0] is None:
@@ -258,9 +258,9 @@ def _start_pause_listener():
 
             try:
                 fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
-                old = termios.tcgetattr(fd)
-                tty.setraw(fd)
                 try:
+                    old = termios.tcgetattr(fd)
+                    tty.setraw(fd)
                     while CURRENT_PROCESS[0] is not None and not EXIT_FLAG[0]:
                         # Non-blocking read — poll every 100ms
                         r, _, _ = select.select([fd], [], [], 0.1)
@@ -298,9 +298,15 @@ def _start_pause_listener():
                                 except Exception:
                                     pass
                 finally:
-                    # Restore cooked terminal mode as soon as the download finishes
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
-                    os.close(fd)
+                    # Safely restore terminal mode and close file descriptor to prevent leaks
+                    try:
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    except Exception:
+                        pass
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
             except Exception:
                 time.sleep(0.5)  # Avoid tight loop in case of errors
 
