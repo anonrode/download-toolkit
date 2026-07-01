@@ -1,0 +1,6 @@
+.last_pull
+.search_cache.json
+.config.json
+.download_receipts.json
+__pycache__/
+*.pyc
