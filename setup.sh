@@ -113,6 +113,9 @@ pip install yt-dlp --break-system-packages -q \
 pip install curl_cffi --break-system-packages -q \
   && ok "curl_cffi installed" || warn "curl_cffi install failed (wildshare/naijaprey may not work)"
 
+pip install cryptography --break-system-packages -q \
+  && ok "cryptography installed" || warn "cryptography install failed (anime provider decryption may not work)"
+
 # ─── CLONE OR UPDATE REPO ────────────────────────
 echo ""
 if [ -d "$HOME/download-toolkit" ]; then

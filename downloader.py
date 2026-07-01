@@ -10,8 +10,7 @@ import time
 import threading
 import subprocess
 import tempfile
-import hashlib
-from queue import Queue
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -1040,6 +1039,31 @@ def _check_ytdlp_availability():
                 _YTDLP_AVAILABLE[0] = False
         return _YTDLP_AVAILABLE[0]
 
+def _auto_install_system_pkg(pkg_name):
+    """Install a system package via pkg (Termux) or apt (Linux)."""
+    import shutil
+    if shutil.which(pkg_name):
+        return True
+    safe_print(f'  [*] {pkg_name} not found — installing...')
+    for installer in (['pkg', 'install', pkg_name, '-y'],
+                      ['apt-get', 'install', pkg_name, '-y', '-q']):
+        try:
+            result = subprocess.run(
+                installer,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if result.returncode == 0 and shutil.which(pkg_name):
+                safe_print(f'  [\u2713] {pkg_name} installed')
+                return True
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+    safe_print(f'  [!] Could not auto-install {pkg_name} — install manually: pkg install {pkg_name}')
+    return False
+
 def _check_ffmpeg_availability():
     global _FFMPEG_AVAILABLE
     with _TOOL_LOCK:
@@ -1049,8 +1073,7 @@ def _check_ffmpeg_availability():
         if shutil.which('ffmpeg') is not None:
             _FFMPEG_AVAILABLE[0] = True
         else:
-            safe_print("[!] ffmpeg not found — install with: pkg install ffmpeg")
-            _FFMPEG_AVAILABLE[0] = False
+            _FFMPEG_AVAILABLE[0] = _auto_install_system_pkg('ffmpeg')
         return _FFMPEG_AVAILABLE[0]
 
 # ─── DOWNLOAD BACKENDS ────────────────────────────────────────
@@ -1068,7 +1091,6 @@ def download_with_aria2c(url, folder, filename, summary,
       - Use aria2c's --continue flag to resume from byte offset
       - Much faster than starting over
     """
-    import shutil
     config = config or {}  # Config dict with resolver_timeout, etc.
     try:
         import json as _json
@@ -1119,7 +1141,7 @@ def download_with_aria2c(url, folder, filename, summary,
             pass
 
     progress = LiveProgress(filename, parallel=parallel_mode)
-    start_time = time.time()
+
 
     for attempt in range(retries):
         try:
@@ -1289,7 +1311,7 @@ def download_with_aria2c(url, folder, filename, summary,
 def download_with_requests(url, folder, filename, summary, stop_flag=None,
                            parallel_mode=False, series_url=None,
                            series_name=None, expected_size=0):
-    import requests
+
     filepath = os.path.join(folder, filename)
     os.makedirs(folder, exist_ok=True)
     safe_print(f"  [↓] Downloading: {filename}")

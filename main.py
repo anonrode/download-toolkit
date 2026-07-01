@@ -4,7 +4,7 @@ Handles: REPL, signal handling, settings, download queue, auto-update.
 """
 
 import os
-import re
+
 import sys
 import json
 import time
@@ -106,6 +106,7 @@ DEFAULT_CONFIG = {
     'log_level':            'normal',   # 'normal' or 'debug'
     'auto_update_days':     7,          # Weekly auto-update cadence
     'social_quality':       '720p',     # Prefer 720p for non-YouTube social videos
+    'anime_mode':           'sub',      # 'sub' or 'dub' for anime downloads
 }
 
 def load_config():
@@ -466,6 +467,14 @@ def handle_settings(parts, cfg):
                 print(f"[ok] Social quality: {q}")
             else:
                 print("[!] Valid: 360p 480p 720p 1080p best")
+        elif key in ('anime-mode', 'anime_mode') and len(parts) >= 3:
+            val = parts[2].lower()
+            if val in ('sub', 'dub'):
+                cfg['anime_mode'] = val
+                save_config(cfg)
+                print(f"[ok] Anime mode: {val}")
+            else:
+                print("[!] Use 'sub' or 'dub'")
         elif key == 'ytdlp-channel' and len(parts) >= 3:
             channel = parts[2].lower()
             if channel in ('master', 'stable'):
@@ -502,7 +511,7 @@ def handle_settings(parts, cfg):
     while True:
         _show_settings(cfg)
         try:
-            choice = input("Select setting to change (0-13): ").strip()
+            choice = input("Select setting to change (0-14): ").strip()
         except (KeyboardInterrupt, EOFError):
             print()
             break
@@ -708,6 +717,22 @@ def handle_settings(parts, cfg):
             except (KeyboardInterrupt, EOFError):
                 pass
 
+        elif choice == '14':
+            print("\n┌── Anime Mode ───────────────────────────────────┐")
+            print("│  1) Sub (Subtitled — default)                   │")
+            print("│  2) Dub (English dubbed)                        │")
+            print("│  0) Back                                        │")
+            print("└─────────────────────────────────────────────────┘")
+            try:
+                opt = input("Select option (0-2): ").strip()
+                if opt in ('1', '2'):
+                    mode = 'sub' if opt == '1' else 'dub'
+                    cfg['anime_mode'] = mode
+                    save_config(cfg)
+                    print(f"[ok] Anime mode: {mode}")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
         elif choice == '13':
             # Manage Sites loop
             while True:
@@ -785,7 +810,7 @@ def _show_settings(cfg):
     print(f"  [✓] Expired Link Refresh      [✓] Smart Queue")
     print(f"==================================================")
     print(f"  Supported Sites (6):")
-    print(f"  🔍 Searchable:  NKiri | DramaKey | PlutoMovies")
+    print(f"  🔍 Searchable:  NKiri | DramaKey | PlutoMovies | AllAnime")
     print(f"  🔗 Link Only:   9JaRocks | DramaRain | Socials")
     print(f"==================================================")
     print(f"  1) Download Quality   ➜  [{q}]")
@@ -801,6 +826,7 @@ def _show_settings(cfg):
     print(f" 11) Log level          ➜  [{mode}]")
     print(f" 12) yt-dlp Channel     ➜  [{ytdlp_channel}]")
     print(f" 13) Manage Sites       ➜  [{len(dis)} disabled]")
+    print(f" 14) Anime Mode         ➜  [{cfg.get('anime_mode', 'sub')}]")
     print(f"  0) Back to command prompt")
     print(f"==================================================")
 
@@ -1053,7 +1079,7 @@ def handle_retry_failed(session, cfg):
         process_link_queue([url], session, ctx)
 
 def handle_cleanup():
-    from downloader import BASE_DIR, RECEIPT_FILE, DownloadReceipt, ui_screen
+    from downloader import BASE_DIR, DownloadReceipt, ui_screen
     removed = 0
     bytes_removed = 0
     if os.path.exists(BASE_DIR):
@@ -1089,6 +1115,124 @@ def handle_cleanup():
         ('Receipts', f'{len(receipts) - len(cleaned_receipts)} stale removed'),
     ])
 
+# ─── ANIME ────────────────────────────────────────────────────
+def cmd_anime(query, session, cfg):
+    from extractors import search_allanime, _get_episode_list, extract_allanime
+
+
+    print(f'\n[*] Searching AllAnime for "{query}"...')
+
+    shows = search_allanime(query)
+    if not shows:
+        print('[!] No results found — try different spelling')
+        return
+
+    # ── Show list ──────────────────────────────────────────────
+    print()
+    print(f"  {'─'*50}")
+    for i, show in enumerate(shows, 1):
+        sub = show['sub_eps']
+        dub = show['dub_eps']
+        avail = []
+        if sub: avail.append(f'sub:{sub}')
+        if dub: avail.append(f'dub:{dub}')
+        avail_str = ', '.join(avail) if avail else 'unknown'
+        print(f"  [{i}] {show['name']} ({avail_str} eps)")
+    print(f"  {'─'*50}")
+
+    try:
+        choice = input(f'  Pick a show (1-{len(shows)}) or 0 to cancel: ').strip()
+        choice = int(choice)
+    except (ValueError, EOFError, KeyboardInterrupt):
+        return
+    if choice == 0 or not (1 <= choice <= len(shows)):
+        return
+
+    selected  = shows[choice - 1]
+    show_id   = selected['id']
+    show_name = selected['name']
+    mode      = cfg.get('anime_mode', 'sub')
+    eps_count = selected['dub_eps'] if mode == 'dub' else selected['sub_eps']
+
+    # Fallback: if chosen mode has 0 episodes, switch to the other
+    if eps_count == 0:
+        fallback = 'sub' if mode == 'dub' else 'dub'
+        fallback_count = selected['sub_eps'] if mode == 'dub' else selected['dub_eps']
+        if fallback_count > 0:
+            print(f'  [!] No {mode} available — falling back to {fallback}')
+            mode      = fallback
+            eps_count = fallback_count
+        else:
+            print(f'  [!] No episodes available for this show')
+            return
+
+    print(f'\n[ok] {show_name} — {eps_count} episode(s) available ({mode})')
+
+    # ── Fetch full episode list ────────────────────────────────
+    print('[*] Fetching episode list...')
+    ep_list = _get_episode_list(show_id, mode=mode)
+    if not ep_list:
+        print('[!] Could not fetch episode list')
+        return
+
+    total = len(ep_list)
+    print(f'[ok] {total} episode(s) found (Episodes: {ep_list[0]}–{ep_list[-1]})')
+
+    # ── All or specific ────────────────────────────────────────
+    print()
+    print('  [1] Download all episodes')
+    print('  [2] Pick specific episode(s)')
+    try:
+        dl_choice = input('  Choice: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if dl_choice == '1':
+        if total >= 10:
+            try:
+                confirm = input(f'\n  [!] This will download {total} episodes. Continue? (y/n): ').strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if confirm not in ('y', 'yes'):
+                print('[*] Cancelled')
+                return
+        episodes = ep_list
+
+    elif dl_choice == '2':
+        ep_display = f'1–{total}' if total > 1 else '1'
+        print(f'  Episodes available: {ep_display}')
+        try:
+            spec = input('  Enter episode(s) — e.g. 1, 1-5, 1-5,10: ').strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if not spec:
+            return
+        try:
+            selected_nums = _parse_episode_selection(spec)
+        except (ValueError, Exception):
+            print('[!] Invalid episode range — use format like 1-5 or 1,3,7')
+            return
+        # Filter ep_list by selected numbers
+        episodes = []
+        for ep_str in ep_list:
+            try:
+                n = int(float(ep_str))
+                if n in selected_nums:
+                    episodes.append(ep_str)
+            except ValueError:
+                pass
+        if not episodes:
+            print('[!] No matching episodes found')
+            return
+        print(f'[*] Downloading {len(episodes)} episode(s)')
+    else:
+        return
+
+    # ── Hand off to extractor ──────────────────────────────────
+    ctx = _make_ctx(cfg)
+    extract_allanime(show_id, show_name, episodes, mode=mode, ctx=ctx)
+
+
 # ─── MAIN REPL ────────────────────────────────────────────────
 def main():
     global STOP_FLAG, EXIT_FLAG
@@ -1112,7 +1256,7 @@ def main():
 
     from downloader import show_history, register_state_callback, set_output_mode
     from extractors import process_link_queue
-    from search import search, fsearch, rebuild_index_command, clear_search_cache
+    from search import search, fsearch, clear_search_cache
 
     # Register callback for download state tracking
     register_state_callback(_set_current_state)
@@ -1156,6 +1300,7 @@ def main():
             print(f"\n{'='*50}")
             print(f"  COMMANDS")
             print(f"{'='*50}")
+            print(f"  anime <title>          - Search and download anime (AllAnime/sub)")
             print(f"  search <title>         - Find a show/movie across all search sites")
             print(f"  fsearch <title> [hint] - Fast search (korean|chinese|nollywood|etc)")
             print(f"  <url>                  - Paste direct URL to start downloading")
@@ -1311,6 +1456,13 @@ def main():
                             print("[*] Already up to date")
             except Exception as e:
                 print(f"[!] Update failed: {e}")
+
+        elif lower.startswith('anime '):
+            query = raw.split(' ', 1)[1].strip()
+            if query:
+                cmd_anime(query, session, cfg)
+            else:
+                print('[!] Usage: anime <title>')
 
         elif lower.startswith('search ') or lower.startswith('s '):
             query = raw.split(' ', 1)[1].strip()
