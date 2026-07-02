@@ -68,6 +68,14 @@ PLUTO_DOMAIN      = 'plutomovies.com'
 PLUTO_BASE        = f'https://{PLUTO_DOMAIN}'
 ANITAKU_BASE      = f'https://{ANITAKU_DOMAIN}'
 
+# waffi.cloud CDN subdomain rotates (seen: drip, japa) — match generically
+WAFFI_CLOUD_RE = re.compile(r'https?://[a-z0-9-]+\.waffi\.cloud/\S+', re.IGNORECASE)
+
+def _strip_preview_param(url):
+    """waffi.cloud serves an HTML placeholder (no Content-Length) when
+    ?preview is present, and the real file (Content-Length set) without it."""
+    return url.split('?preview')[0] if '?preview' in url else url
+
 EP_KEYWORDS = ['-e', 'episode', 's0', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9']
 
 SOCIAL_DOMAINS = [
@@ -439,12 +447,12 @@ def resolve_drip_waffi(url, session):
             return None
         m = re.search(r'window\.location\.href\s*=\s*"([^"]+)"', r.text)
         if m:
-            return m.group(1)
-        if 'drip.waffi.cloud' in url:
-            return url
-        m2 = re.search(r'https://drip[.]waffi[.]cloud/\S+', r.text)
+            return _strip_preview_param(m.group(1))
+        if WAFFI_CLOUD_RE.search(url):
+            return _strip_preview_param(url)
+        m2 = WAFFI_CLOUD_RE.search(r.text)
         if m2:
-            return m2.group(0)
+            return _strip_preview_param(m2.group(0))
         return None
     except Exception as e:
         safe_print(f"  [!] Drip: {e}")
@@ -1157,27 +1165,28 @@ def extract_dramarain(url, session, ctx=None):
     soup    = BeautifulSoup(r.text, 'html.parser')
     summary = DownloadSummary()
 
-    # Method 1: direct drip links
-    drip_links = [(a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
-                  if 'drip.waffi.cloud' in a['href']]
-    if drip_links:
-        drip_links = _filter_by_episode_range(drip_links, ctx)
-        if not drip_links:
+    # Method 1: direct waffi.cloud links (CDN subdomain rotates — drip, japa, etc.)
+    waffi_links = [(a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
+                   if WAFFI_CLOUD_RE.search(a['href'])]
+    if waffi_links:
+        waffi_links = _filter_by_episode_range(waffi_links, ctx)
+        if not waffi_links:
             safe_print("[!] No episodes matched that range")
             return
-        safe_print(f"[*] Found {len(drip_links)} direct link(s) — saving to: {folder}")
-        _notify_start(name, len(drip_links))
-        for i, (label, link) in enumerate(drip_links, 1):
+        safe_print(f"[*] Found {len(waffi_links)} direct link(s) — saving to: {folder}")
+        _notify_start(name, len(waffi_links))
+        for i, (label, link) in enumerate(waffi_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
             fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
-            safe_print(f"\n[{i}/{len(drip_links)}] {fname}")
+            safe_print(f"\n[{i}/{len(waffi_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
                 continue
-            download_file(link, folder, fname, summary,
+            direct = _strip_preview_param(link)
+            download_file(direct, folder, fname, summary,
                           series_url=url, series_name=name,
                           bandwidth_limit=bw, current_process=cur_proc,
                           stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
@@ -1186,10 +1195,45 @@ def extract_dramarain(url, session, ctx=None):
         summary.report()
         return
 
-    # Method 2: download page links
+    # Method 2: downloadwella.com / wetafiles.com intermediate links
+    dw_links = [(a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
+                if 'downloadwella.com' in a['href'] or 'wetafiles.com' in a['href']]
+    if dw_links:
+        dw_links = _filter_by_episode_range(dw_links, ctx)
+        if not dw_links:
+            safe_print("[!] No episodes matched that range")
+            return
+        safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) — saving to: {folder}")
+        _notify_start(name, len(dw_links))
+        for i, (label, ep_url) in enumerate(dw_links, 1):
+            if _stopped(ctx): break
+            _wait(ctx)
+            fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
+            safe_print(f"\n[{i}/{len(dw_links)}] {fname}")
+            done, _ = already_downloaded(folder, fname, series_url=url)
+            if done:
+                safe_print(f"  [✓] Already downloaded — skipping")
+                summary.add_skipped()
+                continue
+            direct = resolve_downloadwella(ep_url, session)
+            if direct:
+                download_file(direct, folder, fname, summary,
+                              series_url=url, series_name=name,
+                              bandwidth_limit=bw, current_process=cur_proc,
+                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
+            else:
+                safe_print(f"  [✗] Could not resolve link")
+                summary.add_failed(fname)
+            time.sleep(0.5)
+        if summary.failed == 0 and not _stopped(ctx):
+            mark_series_complete(url)
+        summary.report()
+        return
+
+    # Method 3: /download intermediate pages (legacy layout fallback)
     dl_links = [(a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
                 if any(x in a['href'] for x in
-                       [f'{DRAMARAIN_DOMAIN}/download', f'{DRAMAKEY_CC}/download', 'drip.waffi.cloud'])]
+                       [f'{DRAMARAIN_DOMAIN}/download', f'{DRAMAKEY_CC}/download'])]
     if dl_links:
         dl_links = _filter_by_episode_range(dl_links, ctx)
         if not dl_links:
@@ -1207,11 +1251,8 @@ def extract_dramarain(url, session, ctx=None):
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
                 continue
-            if 'drip.waffi.cloud' in dl_url:
-                direct = dl_url
-            else:
-                session.headers['Referer'] = site_referer
-                direct = resolve_drip_waffi(dl_url, session)
+            session.headers['Referer'] = site_referer
+            direct = resolve_drip_waffi(dl_url, session)
             if direct:
                 download_file(direct, folder, fname, summary,
                               series_url=url, series_name=name,
@@ -1227,7 +1268,7 @@ def extract_dramarain(url, session, ctx=None):
         return
 
     safe_print(f"[!] No download links found")
-    diagnose_page(soup, url, "drip.waffi.cloud links")
+    diagnose_page(soup, url, "waffi.cloud or downloadwella.com links")
 
 def extract_naijavault(url, session, ctx=None):
     ctx  = ctx or {}
