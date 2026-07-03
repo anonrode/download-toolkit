@@ -70,11 +70,26 @@ ANITAKU_BASE      = f'https://{ANITAKU_DOMAIN}'
 
 # waffi.cloud CDN subdomain rotates (seen: drip, japa) — match generically
 WAFFI_CLOUD_RE = re.compile(r'https?://[a-z0-9-]+\.waffi\.cloud/\S+', re.IGNORECASE)
+EPISODE_TAG_RE = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,3})')
 
 def _strip_preview_param(url):
     """waffi.cloud serves an HTML placeholder (no Content-Length) when
     ?preview is present, and the real file (Content-Length set) without it."""
     return url.split('?preview')[0] if '?preview' in url else url
+
+def _episode_label(url, link_text, fallback_index):
+    """The anchor text on dramakey.cc/dramarain.com is literally the word
+    'Download' for every episode — not useful as a filename. The real
+    episode number lives in the file URL itself (…S01E01…), so pull it
+    from there. Fall back to link text only if it's not a generic label,
+    then to a plain index."""
+    m = EPISODE_TAG_RE.search(url)
+    if m:
+        return f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}"
+    text = (link_text or '').strip()
+    if text and text.lower() not in ('download', 'click here', 'link', 'watch'):
+        return text
+    return f"episode-{fallback_index}"
 
 EP_KEYWORDS = ['-e', 'episode', 's0', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9']
 
@@ -1178,7 +1193,7 @@ def extract_dramarain(url, session, ctx=None):
         for i, (label, link) in enumerate(waffi_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
-            fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
+            fname = safe_filename(f"{_episode_label(link, label, i)}.mp4")
             safe_print(f"\n[{i}/{len(waffi_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
@@ -1208,7 +1223,7 @@ def extract_dramarain(url, session, ctx=None):
         for i, (label, ep_url) in enumerate(dw_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
-            fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
+            fname = safe_filename(f"{_episode_label(ep_url, label, i)}.mp4")
             safe_print(f"\n[{i}/{len(dw_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
@@ -1244,7 +1259,7 @@ def extract_dramarain(url, session, ctx=None):
         for i, (label, dl_url) in enumerate(dl_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
-            fname = safe_filename(f"{label or f'episode-{i}'}.mp4")
+            fname = safe_filename(f"{_episode_label(dl_url, label, i)}.mp4")
             safe_print(f"\n[{i}/{len(dl_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
