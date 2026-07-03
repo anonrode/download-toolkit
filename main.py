@@ -1425,7 +1425,7 @@ def main():
                     print("[!] Run 'git stash' or 'git checkout -- .' in the toolkit folder, then update again")
                 else:
                     pull = subprocess.run(
-                        ['git', 'pull', '--ff-only'],
+                        ['git', 'pull'],
                         cwd=script_dir, capture_output=True,
                         text=True, timeout=30, stdin=subprocess.DEVNULL
                     )
@@ -1439,6 +1439,14 @@ def main():
                         err = (pull.stderr or pull.stdout or '').strip()
                         print(f"      {err[:400]}")
                     else:
+                        out = (pull.stdout or '').strip()
+                        if 'Already up to date' in out:
+                            print("[*] Already up to date")
+                        else:
+                            print("[ok] New updates pulled")
+                            if out:
+                                for line in out.splitlines()[:5]:
+                                    print(f"      {line}")
                         channel = cfg.get('ytdlp_channel', 'master')
                         print(f"[*] Updating yt-dlp ({channel})...")
                         _update_ytdlp(channel=channel)

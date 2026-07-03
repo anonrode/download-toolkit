@@ -28,10 +28,26 @@ if [ "$IS_TERMUX" -ne 1 ]; then
     python -m pip install requests beautifulsoup4 yt-dlp curl_cffi -q \
       && ok "Python packages installed" || warn "Some Python packages failed to install"
 
+    info "Installing ffmpeg..."
+    if command -v winget >/dev/null 2>&1; then
+        winget install --id Gyan.FFmpeg -e --silent >/dev/null 2>&1 \
+          && ok "ffmpeg installed via winget" || warn "ffmpeg install failed — install manually from https://ffmpeg.org/download.html"
+    elif command -v ffmpeg >/dev/null 2>&1; then
+        ok "ffmpeg already installed"
+    else
+        warn "ffmpeg not found — install from https://ffmpeg.org/download.html and add to PATH"
+    fi
+
     if [ -d "$HOME/download-toolkit" ]; then
         info "Toolkit already installed — updating..."
-        cd "$HOME/download-toolkit" && git pull \
-          && ok "Toolkit updated" || warn "Update failed — continuing with existing files"
+        cd "$HOME/download-toolkit" && git pull 2>&1 | tee /tmp/gitpull.log
+        if grep -q "Already up to date" /tmp/gitpull.log; then
+            ok "Toolkit already up to date"
+        elif [ ${PIPESTATUS[0]} -eq 0 ]; then
+            ok "Toolkit updated"
+        else
+            warn "Update failed — $(cat /tmp/gitpull.log | tail -1)"
+        fi
     else
         info "Downloading toolkit..."
         git clone https://github.com/anonrode/download-toolkit.git "$HOME/download-toolkit" \
@@ -52,10 +68,34 @@ cd "$(dirname "$0")" && python main.py
 EOF
     chmod +x "$HOME/download-toolkit/run.sh"
     ok "Launcher created: ~/download-toolkit/run.sh"
+
+    # Add Python Scripts to PATH so yt-dlp, aria2c etc work as commands
+    PYTHON_SCRIPTS=$(python -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2>/dev/null | tr '\\' '/')
+    if [ -n "$PYTHON_SCRIPTS" ] && ! echo "$PATH" | grep -qF "$PYTHON_SCRIPTS"; then
+        echo "export PATH=\"\$PATH:$PYTHON_SCRIPTS\"" >> ~/.bashrc
+        export PATH="$PATH:$PYTHON_SCRIPTS"
+        ok "Python Scripts added to PATH — yt-dlp and friends now work"
+    else
+        ok "Python Scripts already in PATH"
+    fi
+
+    # Create desktop shortcut
+    DESKTOP=$(python -c "import os; print(os.path.join(os.path.expanduser('~'), 'Desktop'))" 2>/dev/null | tr '\\' '/')
+    if [ -d "$DESKTOP" ]; then
+        cat > "$DESKTOP/Anonrode.bat" << 'BATEOF'
+@echo off
+bash "%USERPROFILE%/download-toolkit/run.sh"
+BATEOF
+        ok "Desktop shortcut created: Anonrode.bat"
+    else
+        warn "Could not find Desktop folder — shortcut not created"
+    fi
+
     echo ""
     echo "================================================"
     echo "  SETUP COMPLETE!"
     echo "  Start with: bash ~/download-toolkit/run.sh"
+    echo "  Or double-click Anonrode.bat on your Desktop"
     echo "================================================"
     exit 0
 fi
@@ -113,15 +153,21 @@ pip install yt-dlp --break-system-packages -q \
 pip install curl_cffi --break-system-packages -q \
   && ok "curl_cffi installed" || warn "curl_cffi install failed (wildshare/naijaprey may not work)"
 
-pip install cryptography --break-system-packages -q \
-  && ok "cryptography installed" || warn "cryptography install failed (anime provider decryption may not work)"
+# cryptography requires Rust to compile on Termux — skipped (openssl handles decryption instead)
 
 # ─── CLONE OR UPDATE REPO ────────────────────────
 echo ""
 if [ -d "$HOME/download-toolkit" ]; then
     info "Toolkit already installed — updating..."
-    cd "$HOME/download-toolkit" && git pull \
-      && ok "Toolkit updated" || warn "Update failed — check your internet connection"
+    cd "$HOME/download-toolkit"
+    git stash -q 2>/dev/null
+    git pull 2>&1 | tee /tmp/gitpull.log
+    git stash pop -q 2>/dev/null
+    if grep -q "Already up to date" /tmp/gitpull.log; then
+        ok "Toolkit already up to date"
+    else
+        ok "Toolkit updated"
+    fi
 else
     info "Downloading toolkit..."
     git clone https://github.com/anonrode/download-toolkit.git "$HOME/download-toolkit" \
@@ -153,12 +199,9 @@ else
     # Kill any existing session and start fresh
     tmux kill-session -t download 2>/dev/null
     cd ~/download-toolkit
-    # Skip the pull if the tree is dirty — git pull -q silently no-ops on a
-    # dirty tree (exit code 0, no output) which would otherwise hide a real
-    # update failure. Run `update` from inside the toolkit to see why.
-    if [ -z "$(git status --porcelain 2>/dev/null)" ]; then
-        git pull -q
-    fi
+    git stash -q 2>/dev/null
+    git pull -q
+    git stash pop -q 2>/dev/null
     tmux new-session -s download python main.py
 fi
 CHECKEOF
@@ -181,12 +224,9 @@ else
     # Kill any existing session and start fresh
     tmux kill-session -t download 2>/dev/null
     cd ~/download-toolkit
-    # Skip the pull if the tree is dirty — git pull -q silently no-ops on a
-    # dirty tree (exit code 0, no output) which would otherwise hide a real
-    # update failure. Run `update` from inside the toolkit to see why.
-    if [ -z "$(git status --porcelain 2>/dev/null)" ]; then
-        git pull -q
-    fi
+    git stash -q 2>/dev/null
+    git pull -q
+    git stash pop -q 2>/dev/null
     tmux new-session -s download python main.py
 fi
 EOF

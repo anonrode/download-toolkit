@@ -1193,7 +1193,7 @@ def extract_dramarain(url, session, ctx=None):
         for i, (label, link) in enumerate(waffi_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
-            fname = safe_filename(f"{_episode_label(link, label, i)}.mp4")
+            fname = safe_filename(f"{name} {_episode_label(link, label, i)}.mp4")
             safe_print(f"\n[{i}/{len(waffi_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
@@ -1223,7 +1223,7 @@ def extract_dramarain(url, session, ctx=None):
         for i, (label, ep_url) in enumerate(dw_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
-            fname = safe_filename(f"{_episode_label(ep_url, label, i)}.mp4")
+            fname = safe_filename(f"{name} {_episode_label(ep_url, label, i)}.mp4")
             safe_print(f"\n[{i}/{len(dw_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
@@ -1259,7 +1259,7 @@ def extract_dramarain(url, session, ctx=None):
         for i, (label, dl_url) in enumerate(dl_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
-            fname = safe_filename(f"{_episode_label(dl_url, label, i)}.mp4")
+            fname = safe_filename(f"{name} {_episode_label(dl_url, label, i)}.mp4")
             safe_print(f"\n[{i}/{len(dl_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
