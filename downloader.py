@@ -783,6 +783,8 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
                         if ep_key in receipts:
                             receipts[ep_key]['status'] = 'paused'
                             DownloadReceipt.save_all(receipts)
+                    safe_print(f"  [*] Incomplete download found — will resume")
+                    return False, None
                 else:
                     safe_print(f"  [✓] Already downloaded (receipt verified)")
                     return True, path
@@ -811,6 +813,11 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
         actual = os.path.getsize(filepath)
         expected = _resolve_expected(filepath)
         
+        # Sidecar = ground truth. Check BEFORE size math so 99% files are never falsely skipped.
+        if os.path.exists(filepath + '.aria2') or os.path.exists(filepath + '.part'):
+            safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) — will resume")
+            return False, None
+
         if expected:
             if actual >= expected * 0.99:
                 safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
@@ -827,10 +834,6 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
                 pass
             return False, None
         else:
-            # No expected size — check for aria2c/yt-dlp incomplete markers first
-            if os.path.exists(filepath + '.aria2') or os.path.exists(filepath + '.part'):
-                safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) — will resume")
-                return False, None
             min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
             if actual >= min_bytes:
                 safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
@@ -845,14 +848,15 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
             if os.path.exists(receipt_path):
                 actual = os.path.getsize(receipt_path)
                 expected = _resolve_expected(receipt_path)
+                # Sidecar = ground truth. Check BEFORE size math.
+                if os.path.exists(receipt_path + '.aria2') or os.path.exists(receipt_path + '.part'):
+                    safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) — will resume")
+                    return False, None
                 if expected:
                     if actual >= expected * 0.99:
                         safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
                         return True, receipt_path
                 else:
-                    if os.path.exists(receipt_path + '.aria2') or os.path.exists(receipt_path + '.part'):
-                        safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) — will resume")
-                        return False, None
                     min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
                     if actual >= min_bytes:
                         safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
@@ -865,6 +869,11 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
             actual = os.path.getsize(filepath)
             expected = _resolve_expected(filepath)
             
+            # Sidecar = ground truth. Check BEFORE size math.
+            if os.path.exists(filepath + '.aria2') or os.path.exists(filepath + '.part'):
+                safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) — will resume")
+                return False, None
+
             if expected:
                 if actual >= expected * 0.99:
                     safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
@@ -882,10 +891,6 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
                         pass
                     return False, None
             else:
-                # No expected size — check for incomplete markers first
-                if os.path.exists(filepath + '.aria2') or os.path.exists(filepath + '.part'):
-                    safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) — will resume")
-                    return False, None
                 min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
                 if actual >= min_bytes:
                     safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
