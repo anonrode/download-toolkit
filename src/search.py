@@ -23,7 +23,7 @@ import requests
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from downloader import safe_print, UA_DESKTOP, BASE_DIR
+from .downloader import safe_print, UA_DESKTOP, BASE_DIR, CONFIG_DIR
 
 # ─── CACHE ────────────────────────────────────────────────────
 CACHE_FILE    = os.path.join(os.path.dirname(__file__), '.search_cache.json')
@@ -365,7 +365,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
 
     use_cache = True
     try:
-        config_path = os.path.join(BASE_DIR, '.config.json')
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
         if os.path.exists(config_path):
             with open(config_path) as f:
                 use_cache = json.load(f).get('search_cache', True)
@@ -488,7 +488,7 @@ def search(raw_query, session=None):
     # Load dynamic search timeout
     timeout = 45
     try:
-        config_path = os.path.join(BASE_DIR, '.config.json')
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
         if os.path.exists(config_path):
             with open(config_path) as f:
                 timeout = int(json.load(f).get('search_timeout', 45))

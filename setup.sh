@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 
 echo "================================================"
 echo "  DOWNLOAD TOOLKIT — SETUP"
@@ -84,7 +84,9 @@ EOF
     if [ -d "$DESKTOP" ]; then
         cat > "$DESKTOP/Anonrode.bat" << 'BATEOF'
 @echo off
-bash "%USERPROFILE%/download-toolkit/run.sh"
+cd /d "%USERPROFILE%\download-toolkit"
+python main.py
+pause
 BATEOF
         ok "Desktop shortcut created: Anonrode.bat"
     else

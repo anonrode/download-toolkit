@@ -22,23 +22,26 @@ except Exception:
 # ─── CONSTANTS ────────────────────────────────────────────────
 IS_ANDROID  = os.path.exists('/storage/emulated/0')
 BASE_DIR    = '/storage/emulated/0/Anon' if IS_ANDROID else os.path.join(os.path.expanduser('~'), 'Downloads', 'Anon')
-CONFIG_FILE = os.path.join(BASE_DIR, '.config.json')
-QUEUE_FILE  = os.path.join(BASE_DIR, '.queue.json')
+
+from src.downloader import CONFIG_DIR
+CONFIG_FILE = os.path.join(CONFIG_DIR, '.config.json')
+QUEUE_FILE  = os.path.join(CONFIG_DIR, '.queue.json')
 
 # ─── GLOBAL STATE ─────────────────────────────────────────────
-_CTRL_C_COUNT   = [0]
-CURRENT_PROCESS = [None]
-STOP_FLAG       = [False]   # stops current batch — extractor loops check this
-EXIT_FLAG       = [False]   # exits entire script — REPL loop checks this
-PAUSE_FLAG      = [False]   # toggles aria2c SIGSTOP/SIGCONT — Ctrl+P
+from src.downloader import ProcessContainer
 
+class DownloadState:
+    series_url = None
+    series_name = None
+    filepath = None
+    episode_name = None
+    expected_size = 0
 
-# Track current download so we can mark_paused() on Ctrl+C
-CURRENT_SERIES_URL   = [None]
-CURRENT_SERIES_NAME  = [None]
-CURRENT_FILEPATH     = [None]
-CURRENT_EPISODE_NAME = [None]
-CURRENT_EXPECTED_SIZE = [0]
+CURRENT_PROCESS = ProcessContainer()
+STOP_FLAG       = threading.Event()   # stops current batch — extractor loops check this
+EXIT_FLAG       = threading.Event()   # exits entire script — REPL loop checks this
+PAUSE_FLAG      = threading.Event()   # toggles aria2c SIGSTOP/SIGCONT — Ctrl+P
+_ctrl_c_count   = [0]                 # tracks Ctrl+C presses — reset on return to prompt
 
 # Lock for thread-safe access to CURRENT_* globals
 CURRENT_STATE_LOCK = threading.Lock()
@@ -47,20 +50,21 @@ def _set_current_state(series_url, series_name, episode_name, filepath, expected
     """Safely set CURRENT_* globals with locking for parallel downloads."""
     global CURRENT_SERIES_URL, CURRENT_SERIES_NAME, CURRENT_FILEPATH, CURRENT_EPISODE_NAME, CURRENT_EXPECTED_SIZE
     with CURRENT_STATE_LOCK:
-        CURRENT_SERIES_URL[0] = series_url
-        CURRENT_SERIES_NAME[0] = series_name
-        CURRENT_EPISODE_NAME[0] = episode_name
-        CURRENT_FILEPATH[0] = filepath
-        CURRENT_EXPECTED_SIZE[0] = expected_size or 0
+        DownloadState.series_url = series_url
+        DownloadState.series_name = series_name
+        DownloadState.episode_name = episode_name
+        DownloadState.filepath = filepath
+        DownloadState.expected_size = expected_size or 0
 
 def _reset_current_state():
     """Reset all CURRENT_* tracking variables between downloads."""
     global CURRENT_SERIES_URL, CURRENT_SERIES_NAME, CURRENT_FILEPATH, CURRENT_EPISODE_NAME, CURRENT_EXPECTED_SIZE
-    CURRENT_SERIES_URL[0]   = None
-    CURRENT_SERIES_NAME[0]  = None
-    CURRENT_FILEPATH[0]     = None
-    CURRENT_EPISODE_NAME[0] = None
-    CURRENT_EXPECTED_SIZE[0] = 0
+    DownloadState.series_url = None
+    DownloadState.series_name = None
+    DownloadState.filepath = None
+    DownloadState.episode_name = None
+    DownloadState.expected_size = 0
+    _ctrl_c_count[0] = 0
 
 # ─── CONFIG ───────────────────────────────────────────────────
 DEFAULT_CONFIG = {
@@ -106,7 +110,8 @@ DEFAULT_CONFIG = {
     'log_level':            'normal',   # 'normal' or 'debug'
     'auto_update_days':     7,          # Weekly auto-update cadence
     'social_quality':       '720p',     # Prefer 720p for non-YouTube social videos
-    'anime_mode':           'sub',      # 'sub' or 'dub' for anime downloads
+    'enable_android_notifications': True,       # Toggle Termux system notifications
+    'clipboard_check_interval_sec': 2,         # Clipboard watcher loop frequency in seconds
 }
 
 def load_config():
@@ -137,7 +142,10 @@ def setup_signal_handler():
     global CURRENT_SERIES_URL, CURRENT_FILEPATH, CURRENT_EXPECTED_SIZE
 
     def handler(sig, frame):
-        if STOP_FLAG[0]:
+        _ctrl_c_count[0] += 1
+        count = _ctrl_c_count[0]
+
+        if count >= 3:
             try:
                 sys.stdout.write('\n\n  [exit] Force exiting...\n\n')
                 sys.stdout.flush()
@@ -145,39 +153,56 @@ def setup_signal_handler():
                 pass
             sys.exit(0)
 
-        STOP_FLAG[0] = True
-        proc = CURRENT_PROCESS[0]
+        # If no download is running (at the prompt), don't escalate
+        if not STOP_FLAG.is_set() and not DownloadState.series_url and not CURRENT_PROCESS.proc:
+            # No active download — the KeyboardInterrupt will be caught by input()
+            _ctrl_c_count[0] = 0
+            return
+
+        if count == 2:
+            # Second press — kill remaining processes and reset counter
+            try:
+                from src.downloader import terminate_active_processes
+                terminate_active_processes()
+            except Exception:
+                pass
+            _ctrl_c_count[0] = 0  # Reset so next press at prompt doesn't force-exit
+            return
+
+        # First press — cancel gracefully
+        STOP_FLAG.set()
+        proc = CURRENT_PROCESS.proc
 
         if proc:
             try: proc.terminate()
             except Exception: pass
         try:
-            from downloader import terminate_active_processes
+            from src.downloader import terminate_active_processes
             terminate_active_processes()
         except Exception:
             pass
         
         # Mark download as paused in both receipt and resume state
-        if CURRENT_SERIES_URL[0] and CURRENT_EPISODE_NAME[0] and CURRENT_FILEPATH[0]:
+        if DownloadState.series_url and DownloadState.episode_name and DownloadState.filepath:
             try:
-                from downloader import DownloadReceipt, mark_episode_current
-                progress_bytes = os.path.getsize(CURRENT_FILEPATH[0]) if os.path.exists(CURRENT_FILEPATH[0]) else 0
-                episode_key = f"{CURRENT_SERIES_URL[0]}:{CURRENT_EPISODE_NAME[0]}"
+                from src.downloader import DownloadReceipt, mark_episode_current
+                progress_bytes = os.path.getsize(DownloadState.filepath) if os.path.exists(DownloadState.filepath) else 0
+                episode_key = f"{DownloadState.series_url}:{DownloadState.episode_name}"
                 
                 # Update receipt (per-episode)
                 DownloadReceipt.mark_paused(
                     episode_key,
-                    CURRENT_FILEPATH[0],
+                    DownloadState.filepath,
                     progress_bytes,
-                    CURRENT_EXPECTED_SIZE[0]
+                    DownloadState.expected_size
                 )
                 
                 # Update resume state (series-level) so it shows in resume list
-                if CURRENT_SERIES_NAME[0] and CURRENT_EPISODE_NAME[0]:
+                if DownloadState.series_name and DownloadState.episode_name:
                     mark_episode_current(
-                        CURRENT_SERIES_URL[0],
-                        CURRENT_SERIES_NAME[0],
-                        CURRENT_EPISODE_NAME[0]
+                        DownloadState.series_url,
+                        DownloadState.series_name,
+                        DownloadState.episode_name
                     )
             except Exception:
                 pass
@@ -190,12 +215,12 @@ def setup_signal_handler():
 
     def sigterm_handler(sig, frame):
         """Called when Android kills Termux from notification or app switcher."""
-        proc = CURRENT_PROCESS[0]
+        proc = CURRENT_PROCESS.proc
         if proc:
             try: proc.terminate()
             except Exception: pass
         try:
-            from downloader import terminate_active_processes
+            from src.downloader import terminate_active_processes
             terminate_active_processes()
         except Exception:
             pass
@@ -330,11 +355,11 @@ def queue_run(session, cfg):
         print("[*] Queue is empty — add URLs with: queue add <url>")
         return
     print(f"\n[*] Starting queue — {len(q)} item(s)")
-    from extractors import process_link_queue
+    from src.extractors import process_link_queue
     ctx = _make_ctx(cfg)
     completed = set()
     for url in q:
-        if STOP_FLAG[0]:
+        if STOP_FLAG.is_set():
             break
         process_link_queue([url], session, ctx)
         completed.add(url)
@@ -452,7 +477,7 @@ def handle_settings(parts, cfg):
                 cfg['log_level'] = mode
                 save_config(cfg)
                 try:
-                    from downloader import set_output_mode
+                    from src.downloader import set_output_mode
                     set_output_mode(mode)
                 except Exception:
                     pass
@@ -503,6 +528,25 @@ def handle_settings(parts, cfg):
                 print(f"[ok] Enabled: {site}")
             else:
                 print("[*] Not disabled")
+        elif key in ('notifications', 'android_notifications', 'enable_android_notifications') and len(parts) >= 3:
+            val = parts[2].lower()
+            if val in ('on', 'off', 'true', 'false'):
+                cfg['enable_android_notifications'] = val in ('on', 'true')
+                save_config(cfg)
+                print(f"[ok] Termux notifications: {'Enabled' if cfg['enable_android_notifications'] else 'Disabled'}")
+            else:
+                print("[!] Use 'on' or 'off'")
+        elif key in ('watch-interval', 'clipboard_interval', 'clipboard_check_interval_sec') and len(parts) >= 3:
+            try:
+                sec = int(parts[2])
+                if 1 <= sec <= 10:
+                    cfg['clipboard_check_interval_sec'] = sec
+                    save_config(cfg)
+                    print(f"[ok] Clipboard check interval: {sec}s")
+                else:
+                    print("[!] Interval must be between 1 and 10 seconds")
+            except ValueError:
+                print("[!] Invalid number")
         else:
             print("[!] Invalid settings command. Type settings to open menu.")
         return cfg
@@ -693,7 +737,7 @@ def handle_settings(parts, cfg):
                     cfg['log_level'] = mode
                     save_config(cfg)
                     try:
-                        from downloader import set_output_mode
+                        from src.downloader import set_output_mode
                         set_output_mode(mode)
                     except Exception:
                         pass
@@ -773,7 +817,7 @@ def handle_settings(parts, cfg):
     return cfg
 
 def _show_settings(cfg):
-    from downloader import get_free_space_gb
+    from src.downloader import get_free_space_gb
     bw  = cfg.get('bandwidth', 0)
     dis = cfg.get('disabled_sites', [])
     q   = cfg.get('quality', '480p')
@@ -832,8 +876,8 @@ def _show_settings(cfg):
 
 # ─── RESUME ───────────────────────────────────────────────────
 def handle_resume_command(session, cfg):
-    from downloader import show_resume_list, load_resume_state
-    from extractors import process_link_queue
+    from src.downloader import show_resume_list, load_resume_state
+    from src.extractors import process_link_queue
     if not show_resume_list():
         return
     try:
@@ -851,7 +895,7 @@ def handle_resume_command(session, cfg):
 
 # ─── AUTO UPDATE ──────────────────────────────────────────────
 def auto_update(cfg=None):
-    from downloader import _update_ytdlp
+    from src.downloader import _update_ytdlp
     script_dir  = os.path.dirname(os.path.abspath(__file__))
     stamp_file  = os.path.join(script_dir, '.last_pull')
     days = int((cfg or {}).get('auto_update_days', 7))
@@ -995,22 +1039,10 @@ def print_banner(cfg):
         print("│   • Pinterest    [🚀 Fast]       Pins & Boards         │")
         print("└────────────────────────────────────────────────────────┘")
 
-# ─── SESSION FACTORY ──────────────────────────────────────────
-def make_session():
-    from downloader import UA_DESKTOP
-    try:
-        from curl_cffi import requests as cf_requests
-        s = cf_requests.Session(impersonate='chrome120')
-        s.headers['User-Agent'] = UA_DESKTOP
-        return s
-    except ImportError:
-        import requests
-        s = requests.Session()
-        s.headers['User-Agent'] = UA_DESKTOP
-        return s
+# make_session has been centralized and is imported from downloader.py
 
 def handle_status(cfg):
-    from downloader import get_status, load_resume_state, get_free_space_gb, ui_screen
+    from src.downloader import get_status, load_resume_state, get_free_space_gb, ui_screen
     q = load_queue()
     resume = load_resume_state()
     failed = sum(len(v.get('failed', [])) for v in resume.values())
@@ -1030,7 +1062,7 @@ def handle_status(cfg):
     ])
 
 def handle_doctor(cfg):
-    from downloader import get_free_space_gb, ui_screen
+    from src.downloader import get_free_space_gb, ui_screen
     checks = []
     def ok_missing(name, ok, fix=''):
         checks.append((name, 'OK' if ok else f'Missing{(" - " + fix) if fix else ""}'))
@@ -1061,8 +1093,8 @@ def handle_doctor(cfg):
     ui_screen('Doctor', checks)
 
 def handle_retry_failed(session, cfg):
-    from downloader import load_resume_state, ui_screen
-    from extractors import process_link_queue
+    from src.downloader import load_resume_state, ui_screen
+    from src.extractors import process_link_queue
     state = load_resume_state()
     failed_urls = [(u, v) for u, v in state.items() if v.get('failed')]
     if not failed_urls:
@@ -1074,12 +1106,12 @@ def handle_retry_failed(session, cfg):
     ])
     ctx = _make_ctx(cfg)
     for url, _ in failed_urls:
-        if STOP_FLAG[0]:
+        if STOP_FLAG.is_set():
             break
         process_link_queue([url], session, ctx)
 
 def handle_cleanup():
-    from downloader import BASE_DIR, DownloadReceipt, ui_screen
+    from src.downloader import BASE_DIR, DownloadReceipt, ui_screen
     removed = 0
     bytes_removed = 0
     if os.path.exists(BASE_DIR):
@@ -1117,7 +1149,7 @@ def handle_cleanup():
 
 # ─── ANIME ────────────────────────────────────────────────────
 def cmd_anime(query, session, cfg):
-    from extractors import search_allanime, _get_episode_list, extract_allanime
+    from src.extractors import search_allanime, _get_episode_list, extract_allanime
 
 
     print(f'\n[*] Searching AllAnime for "{query}"...')
@@ -1233,6 +1265,87 @@ def cmd_anime(query, session, cfg):
     extract_allanime(show_id, show_name, episodes, mode=mode, ctx=ctx)
 
 
+def watch_clipboard(session, cfg):
+    print("[📋] Clipboard watcher active! Copy any movie/series link to automatically download...")
+    print("[📋] Press Ctrl+C once to exit watch mode and return to main menu.")
+    last_text = ""
+    interval = cfg.get('clipboard_check_interval_sec', 2)
+    STOP_FLAG.clear()
+    
+    # Pre-load/install pyperclip on Windows if termux-clipboard-get is not present
+    has_termux_clip = False
+    try:
+        subprocess.run(['termux-clipboard-get', '--help'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        has_termux_clip = True
+    except FileNotFoundError:
+        pass
+        
+    if not has_termux_clip:
+        try:
+            import pyperclip
+        except ImportError:
+            print("[*] pyperclip not found — installing...")
+            try:
+                subprocess.run(
+                    ['pip', 'install', 'pyperclip', '--break-system-packages', '-q'],
+                    check=True, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                import pyperclip
+            except Exception as e:
+                print(f"[!] Auto-install failed for pyperclip: {e}")
+                print("[!] Please install pyperclip manually or run in Termux with termux-api installed.")
+                return
+
+    def get_clip():
+        if has_termux_clip:
+            try:
+                res = subprocess.run(['termux-clipboard-get'], capture_output=True, text=True, timeout=2)
+                return res.stdout.strip()
+            except Exception:
+                return ""
+        else:
+            try:
+                import pyperclip
+                return pyperclip.paste().strip()
+            except Exception:
+                return ""
+
+    try:
+        last_text = get_clip()
+    except Exception:
+        pass
+
+    while not STOP_FLAG.is_set():
+        try:
+            text = get_clip()
+            if text and text != last_text:
+                last_text = text
+                if text.startswith('http'):
+                    from src.extractors import detect_site
+                    extractor = detect_site(text)
+                    if extractor:
+                        print(f"\n[📋] Detected download URL in clipboard: {text[:70]}")
+                        _reset_current_state()
+                        ctx = _make_ctx(cfg)
+                        from src.extractors import process_link_queue
+                        process_link_queue([text], session, ctx)
+                        try:
+                            last_text = get_clip()
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"[!] Clipboard watch error: {e}")
+            
+        for _ in range(int(interval * 10)):
+            if STOP_FLAG.is_set():
+                break
+            time.sleep(0.1)
+
+    STOP_FLAG.clear()
+    print("\n[📋] Clipboard watcher stopped.")
+
+
 # ─── MAIN REPL ────────────────────────────────────────────────
 def main():
     global STOP_FLAG, EXIT_FLAG
@@ -1254,9 +1367,9 @@ def main():
         except Exception:
             pass
 
-    from downloader import show_history, register_state_callback, set_output_mode
-    from extractors import process_link_queue
-    from search import search, fsearch, clear_search_cache
+    from src.downloader import show_history, register_state_callback, set_output_mode, make_session
+    from src.extractors import process_link_queue
+    from src.search import search, fsearch, clear_search_cache
 
     # Register callback for download state tracking
     register_state_callback(_set_current_state)
@@ -1269,21 +1382,26 @@ def main():
     print_banner(cfg)
 
     while True:
-        if EXIT_FLAG[0]:
+        if EXIT_FLAG.is_set():
             print("\n[*] Exiting...")
             _release_wake_lock()
             break
         # Reset batch state between commands
         _reset_current_state()
-        STOP_FLAG[0]     = False
-        PAUSE_FLAG[0]    = False
+        STOP_FLAG.clear()
+        PAUSE_FLAG.clear()
 
         try:
             raw = input("\n> ").strip()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             print("\n[*] Exiting...")
             _release_wake_lock()
             break
+        except KeyboardInterrupt:
+            # Ctrl+C at the prompt — just print a newline and stay in the REPL
+            _ctrl_c_count[0] = 0
+            print()
+            continue
 
         if not raw:
             continue
@@ -1305,6 +1423,7 @@ def main():
             print(f"  fsearch <title> [hint] - Fast search (korean|chinese|nollywood|etc)")
             print(f"  <url>                  - Paste direct URL to start downloading")
             print(f"  clip                   - Download link copied to clipboard")
+            print(f"  watch                  - Start clipboard watcher mode")
             print(f"  resume                 - Select a paused download to resume")
             print(f"  status                 - Show current download speed & status")
             print(f"  queue add <url>        - Add a link to download queue")
@@ -1356,6 +1475,9 @@ def main():
             except Exception as e:
                 print(f"[!] Clipboard error: {e}")
 
+        elif lower in ('watch', '/watch', 'watcher'):
+            watch_clipboard(session, cfg)
+
         elif lower.startswith('settings'):
             cfg = handle_settings(parts, cfg)
 
@@ -1395,7 +1517,7 @@ def main():
             stamp_file = os.path.join(script_dir, '.last_pull')
             print("[*] Checking for updates...")
             try:
-                from downloader import _update_ytdlp
+                from src.downloader import _update_ytdlp
                 before = subprocess.run(
                     ['git', 'rev-parse', 'HEAD'],
                     cwd=script_dir, capture_output=True,
