@@ -55,6 +55,53 @@ SOCIAL_DOMAINS = [
 ]
 
 # ─── HELPERS ──────────────────────────────────────────────────
+import threading
+import sys
+
+def run_with_spinner(func, msg="Working...", *args, **kwargs):
+    """
+    Runs `func` in a background thread while displaying a spinner on the main thread.
+    Catches KeyboardInterrupt cleanly.
+    """
+    result = [None]
+    exception = [None]
+    
+    def target():
+        try:
+            result[0] = func(*args, **kwargs)
+        except Exception as e:
+            exception[0] = e
+
+    t = threading.Thread(target=target)
+    t.daemon = True
+    t.start()
+    
+    spinner = ['|', '/', '-', '\\']
+    i = 0
+    try:
+        while t.is_alive():
+            # Use sys.stdout.write and \r so we don't mess up PRINT_LOCK or other safe_print outputs if possible,
+            # but ideally we just overwrite the current line
+            sys.stdout.write(f"\r  [{spinner[i]}] {msg}")
+            sys.stdout.flush()
+            i = (i + 1) % 4
+            t.join(0.1)
+        
+        # Clear the spinner line
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+        
+    except KeyboardInterrupt:
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+        safe_print(f"  [!] Cancelled: {msg}")
+        raise
+        
+    if exception[0]:
+        raise exception[0]
+        
+    return result[0]
+
 def safe_get(session, url, timeout=20, referer=None, retries=3):
     for attempt in range(retries):
         try:

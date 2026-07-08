@@ -1,6 +1,14 @@
 from .base import *
 
 def extract_naijavault(url, session, ctx=None):
+    """
+    NaijaVault extraction using direct resolving.
+    """
+    # Bypass curl_cffi for NaijaVault to prevent Termux/GitBash deadlocks
+    import requests
+    session = requests.Session()
+    session.headers['User-Agent'] = UA_DESKTOP
+
     ctx  = ctx or {}
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
@@ -101,7 +109,8 @@ def extract_naijavault(url, session, ctx=None):
             continue
 
         session.headers['Referer'] = url
-        r2 = safe_get(session, dl_url, timeout=20)
+        # Use spinner to avoid freezing the terminal
+        r2 = run_with_spinner(lambda: safe_get(session, dl_url, timeout=20), "Fetching dl page...")
         if not r2:
             safe_print(f"  [\u2717] Could not fetch dl page")
             summary.add_failed(ep_label)
@@ -116,9 +125,9 @@ def extract_naijavault(url, session, ctx=None):
             if du_m:
                 zip_url = du_m.group(1)
                 if 'vikingfile.com' in zip_url:
-                    zip_url = ResolverRegistry.resolve(zip_url, session) or zip_url
+                    zip_url = run_with_spinner(lambda: ResolverRegistry.resolve(zip_url, session), "Resolving...") or zip_url
                 elif 'lulacloud.com' in zip_url:
-                    zip_url = ResolverRegistry.resolve(zip_url, session) or zip_url
+                    zip_url = run_with_spinner(lambda: ResolverRegistry.resolve(zip_url, session), "Resolving...") or zip_url
                 if zip_url:
                     _wait(ctx)
                     download_file(zip_url, folder, ep_name, summary,
@@ -134,13 +143,13 @@ def extract_naijavault(url, session, ctx=None):
         if du_m:
             cdn_url = du_m.group(1)
             if 'vikingfile.com' in cdn_url:
-                direct = ResolverRegistry.resolve(cdn_url, session)
+                direct = run_with_spinner(lambda: ResolverRegistry.resolve(cdn_url, session), "Resolving...")
                 if not direct:
                     lc = re.search(r'https?://(?:www\.)?lulacloud\.com/d/\S+', r2.text)
                     if lc:
                         direct = ResolverRegistry.resolve(lc.group(0).rstrip('.,;)\"\''), session)
             elif 'lulacloud.com' in cdn_url:
-                direct = ResolverRegistry.resolve(cdn_url, session)
+                direct = run_with_spinner(lambda: ResolverRegistry.resolve(cdn_url, session), "Resolving...")
                 if not direct:
                     vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
                     if vf:
@@ -197,7 +206,7 @@ def extract_naijavault(url, session, ctx=None):
                 summary.add_skipped()
                 continue
 
-            direct = ResolverRegistry.resolve(lc_url, session)
+            direct = run_with_spinner(lambda: ResolverRegistry.resolve(lc_url, session), "Resolving...")
             if not direct:
                 r2 = safe_get(session, lc_url, timeout=20)
                 if r2:
@@ -205,15 +214,15 @@ def extract_naijavault(url, session, ctx=None):
                     if du_m:
                         cdn = du_m.group(1)
                         if 'vikingfile.com' in cdn:
-                            direct = ResolverRegistry.resolve(cdn, session)
+                            direct = run_with_spinner(lambda: ResolverRegistry.resolve(cdn, session), "Resolving...")
                         elif 'lulacloud.com' in cdn:
-                            direct = ResolverRegistry.resolve(cdn, session)
+                            direct = run_with_spinner(lambda: ResolverRegistry.resolve(cdn, session), "Resolving...")
                         else:
                             direct = cdn
                     if not direct:
                         vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
                         if vf:
-                            direct = ResolverRegistry.resolve(vf.group(0).rstrip('.,;)\"\''), session)
+                            direct = run_with_spinner(lambda: ResolverRegistry.resolve(vf.group(0).rstrip('.,;)\"\''), session), "Resolving...")
                     if not direct:
                         fv = re.search(r'https?://cdn\.filevault\.com\.ng/[^\s"\'<>]+', r2.text)
                         if fv:
