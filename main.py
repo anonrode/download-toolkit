@@ -112,6 +112,9 @@ DEFAULT_CONFIG = {
     'social_quality':       '720p',     # Prefer 720p for non-YouTube social videos
     'enable_android_notifications': True,       # Toggle Termux system notifications
     'clipboard_check_interval_sec': 2,         # Clipboard watcher loop frequency in seconds
+    'aria2c_connections': 16,                  # -x flag
+    'aria2c_splits': 16,                       # -s flag
+    'aria2c_min_split_size': '1M',             # --min-split-size flag
 }
 
 def load_config():
@@ -250,11 +253,13 @@ def setup_signal_handler():
 # Ctrl+C is handled natively via signal handler. Use 'resume' command to resume.
 
 def _quality_str(q):
-    q = str(q)
+    q = str(q).lower()
+    if '2160' in q or '4k' in q: return 'bestvideo[height<=2160]+bestaudio/best[height<=2160]'
     if '1080' in q: return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
     if '720'  in q: return 'bestvideo[height<=720]+bestaudio/best[height<=720]'
     if '480'  in q: return 'bestvideo[height<=480]+bestaudio/best[height<=480]'
     if '360'  in q: return 'bestvideo[height<=360]+bestaudio/best[height<=360]'
+    if 'best' in q: return 'bestvideo+bestaudio/best'
     return 'bestvideo[height<=480]+bestaudio/best[height<=480]'
 
 def _make_ctx(cfg):
@@ -570,16 +575,18 @@ def handle_settings(parts, cfg):
             print("│  3) 720p                                        │")
             print("│  4) 1080p                                       │")
             print("│  5) Best                                        │")
+            print("│  6) 4K (2160p)                                  │")
             print("│  0) Back                                        │")
             print("└─────────────────────────────────────────────────┘")
             try:
-                opt = input("Select option (0-5): ").strip()
+                opt = input("Select option (0-6): ").strip()
                 if opt == '1': cfg['quality'] = '360p'
                 elif opt == '2': cfg['quality'] = '480p'
                 elif opt == '3': cfg['quality'] = '720p'
                 elif opt == '4': cfg['quality'] = '1080p'
                 elif opt == '5': cfg['quality'] = 'best'
-                if opt in ('1','2','3','4','5'):
+                elif opt == '6': cfg['quality'] = '2160p'
+                if opt in ('1','2','3','4','5','6'):
                     save_config(cfg)
                     print(f"[ok] Quality set to: {cfg['quality']}")
             except (KeyboardInterrupt, EOFError):
@@ -776,6 +783,49 @@ def handle_settings(parts, cfg):
                     print(f"[ok] Anime mode: {mode}")
             except (KeyboardInterrupt, EOFError):
                 pass
+                
+        elif choice == '15':
+            try:
+                val = input("Enter aria2c connections per server (1-16): ").strip()
+                n = int(val)
+                if 1 <= n <= 16:
+                    cfg['aria2c_connections'] = n
+                    save_config(cfg)
+                    print(f"[ok] aria2c connections set to: {n}")
+                else:
+                    print("[!] Must be between 1 and 16")
+            except ValueError:
+                print("[!] Invalid number")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '16':
+            try:
+                val = input("Enter aria2c splits per file (1-32): ").strip()
+                n = int(val)
+                if 1 <= n <= 32:
+                    cfg['aria2c_splits'] = n
+                    save_config(cfg)
+                    print(f"[ok] aria2c splits set to: {n}")
+                else:
+                    print("[!] Must be between 1 and 32")
+            except ValueError:
+                print("[!] Invalid number")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        elif choice == '17':
+            try:
+                val = input("Enter aria2c min split size (e.g. 1M, 5M, 10M): ").strip().upper()
+                if val and val.endswith('M') and val[:-1].isdigit():
+                    cfg['aria2c_min_split_size'] = val
+                    save_config(cfg)
+                    print(f"[ok] aria2c min split size set to: {val}")
+                else:
+                    print("[!] Must be a number followed by M (e.g. 1M)")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
 
         elif choice == '13':
             # Manage Sites loop
@@ -871,6 +921,9 @@ def _show_settings(cfg):
     print(f" 12) yt-dlp Channel     ➜  [{ytdlp_channel}]")
     print(f" 13) Manage Sites       ➜  [{len(dis)} disabled]")
     print(f" 14) Anime Mode         ➜  [{cfg.get('anime_mode', 'sub')}]")
+    print(f" 15) aria2c Connections ➜  [{cfg.get('aria2c_connections', 16)}]")
+    print(f" 16) aria2c Splits      ➜  [{cfg.get('aria2c_splits', 16)}]")
+    print(f" 17) Min Split Size     ➜  [{cfg.get('aria2c_min_split_size', '1M')}]")
     print(f"  0) Back to command prompt")
     print(f"==================================================")
 
@@ -937,8 +990,9 @@ def auto_update(cfg=None):
     if IS_ANDROID:
         try:
             before = _get_commit()
+            subprocess.run(['git', 'fetch', '--all', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
             subprocess.run(
-                ['git', 'pull', '-q'],
+                ['git', 'reset', '--hard', 'origin/main', '-q'],
                 cwd=script_dir, capture_output=True,
                 text=True, timeout=30, stdin=subprocess.DEVNULL
             )
@@ -1541,16 +1595,16 @@ def main():
                 dirty = '\n'.join(dirty_lines)
 
                 if dirty:
-                    print("[!] Local changes detected — these block updates:")
-                    for line in dirty_lines[:10]:
-                        print(f"      {line}")
-                    print("[!] Run 'git stash' or 'git checkout -- .' in the toolkit folder, then update again")
-                else:
-                    pull = subprocess.run(
-                        ['git', 'pull'],
-                        cwd=script_dir, capture_output=True,
-                        text=True, timeout=30, stdin=subprocess.DEVNULL
-                    )
+                    print("[!] Local changes detected — wiping them for clean update...")
+                    subprocess.run(['git', 'stash', '-q'], cwd=script_dir, stdin=subprocess.DEVNULL)
+                    subprocess.run(['git', 'clean', '-fd', '-q'], cwd=script_dir, stdin=subprocess.DEVNULL)
+                
+                subprocess.run(['git', 'fetch', '--all', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
+                pull = subprocess.run(
+                    ['git', 'reset', '--hard', 'origin/main'],
+                    cwd=script_dir, capture_output=True,
+                    text=True, timeout=30, stdin=subprocess.DEVNULL
+                )
                     try:
                         open(stamp_file, 'w').write(str(time.time()))
                     except Exception:

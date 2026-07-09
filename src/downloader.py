@@ -1335,9 +1335,10 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--save-session', session_file,
                 '--save-session-interval=30',
                 '--file-allocation=none',
-                '-x', '16', '-s', '16',
-                '--min-split-size', '1M',
-                '--piece-length', '1M',
+                '-x', str(config.get('aria2c_connections', 16)),
+                '-s', str(config.get('aria2c_splits', 16)),
+                '--min-split-size', str(config.get('aria2c_min_split_size', '1M')),
+                '--piece-length', str(config.get('aria2c_min_split_size', '1M')),
                 '--max-concurrent-downloads', '1',
                 '--user-agent', UA_DESKTOP,
                 '--referer', referer,
@@ -1658,8 +1659,9 @@ def download_with_ytdlp(url, folder, filename, summary,
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
-                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=10 --timeout=120 '
-                '--connect-timeout=60 --file-allocation=none --min-split-size=1M'
+                f"aria2c:-x {config.get('aria2c_connections', 16)} -s {config.get('aria2c_splits', 16)} "
+                f"-c --max-tries=0 --retry-wait=10 --timeout=120 --connect-timeout=60 "
+                f"--file-allocation=none --min-split-size={config.get('aria2c_min_split_size', '1M')}"
             ]
         cmd.append(url)
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
@@ -1852,8 +1854,9 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
-                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=10 '
-                '--timeout=120 --connect-timeout=60 --file-allocation=none --min-split-size=1M'
+                f"aria2c:-x {config.get('aria2c_connections', 16)} -s {config.get('aria2c_splits', 16)} "
+                f"-c --max-tries=0 --retry-wait=10 --timeout=120 --connect-timeout=60 "
+                f"--file-allocation=none --min-split-size={config.get('aria2c_min_split_size', '1M')}"
             ]
         cmd.append(url)
         try:
