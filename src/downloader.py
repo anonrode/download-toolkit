@@ -1335,9 +1335,10 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--save-session', session_file,
                 '--save-session-interval=30',
                 '--file-allocation=none',
-                '-x', '16', '-s', '16',
-                '--min-split-size', '1M',
-                '--piece-length', '1M',
+                '-x', str(config.get('aria2c_connections', 16)),
+                '-s', str(config.get('aria2c_splits', 16)),
+                '--min-split-size', str(config.get('aria2c_min_split_size', '1M')),
+                '--piece-length', str(config.get('aria2c_min_split_size', '1M')),
                 '--max-concurrent-downloads', '1',
                 '--user-agent', UA_DESKTOP,
                 '--referer', referer,
@@ -1429,23 +1430,30 @@ def download_with_aria2c(url, folder, filename, summary,
                 summary.add_failed(filename)
                 return False
 
-            # Detect user cancellation: aria2c code 7, Windows Ctrl+C code,
-            # negative codes (terminated by signal), or stop_flag already set
-            is_user_cancel = (
-                code == 7 or
-                code == -1073741510 or   # Windows STATUS_CONTROL_C_EXIT
-                code < 0 or
-                _is_stopped(stop_flag)
-            )
-            if is_user_cancel:
-                progress.fail()
-                safe_print(f"[*] Download cancelled by user")
-                # Propagate stop to other parallel threads
-                if stop_flag is not None and hasattr(stop_flag, 'set'):
-                    stop_flag.set()
-                _cleanup_session_file(session_file)
-                summary.add_failed(filename)
-                return False
+            # Detect user cancellation: aria2c code 7 or Windows Ctrl+C code.
+            # NOTE: negative codes (code < 0) are NOT treated as cancellations —
+            # on Android/Termux, aria2c can exit with negative signal codes even
+            # after a successful download due to how Android's process model works.
+            # Treating code < 0 as cancel was poisoning stop_flag and blocking
+            # all episodes after ep1. Instead, check the file on disk first —
+            # if it exists and is a real size, it succeeded regardless of exit code.
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 100 * 1024:
+                # File is on disk and looks real — don't treat any exit code as cancel
+                pass
+            else:
+                is_user_cancel = (
+                    code == 7 or
+                    code == -1073741510   # Windows STATUS_CONTROL_C_EXIT
+                )
+                if is_user_cancel:
+                    progress.fail()
+                    safe_print(f"[*] Download cancelled by user")
+                    # Propagate stop to other parallel threads
+                    if stop_flag is not None and hasattr(stop_flag, 'set'):
+                        stop_flag.set()
+                    _cleanup_session_file(session_file)
+                    summary.add_failed(filename)
+                    return False
 
             if code == 0:
                 if os.path.exists(filepath):
@@ -1467,6 +1475,9 @@ def download_with_aria2c(url, folder, filename, summary,
                     size_mb = size / (1024 * 1024)
                     progress.done(size_mb)
                     _cleanup_session_file(session_file)
+                    # Clear any transient stop flag so the series loop continues
+                    if stop_flag is not None and hasattr(stop_flag, 'clear') and not _is_stopped(stop_flag):
+                        stop_flag.clear()
                     summary.add_success()
                     log_download(filename, url, filepath)
                     return True
@@ -1636,6 +1647,17 @@ def download_with_ytdlp(url, folder, filename, summary,
         return False
 
     os.makedirs(folder, exist_ok=True)
+    try:
+        import json as _json
+        config = {}
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
+        if not os.path.exists(config_path):
+            config_path = os.path.join(BASE_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as _f:
+                config = _json.load(_f)
+    except Exception:
+        config = {}
     base        = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
     out_template = os.path.join(folder, base + '.%(ext)s')
     quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
@@ -1658,8 +1680,9 @@ def download_with_ytdlp(url, folder, filename, summary,
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
-                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=10 --timeout=120 '
-                '--connect-timeout=60 --file-allocation=none --min-split-size=1M'
+                f"aria2c:-x {config.get('aria2c_connections', 16)} -s {config.get('aria2c_splits', 16)} "
+                f"-c --max-tries=0 --retry-wait=10 --timeout=120 --connect-timeout=60 "
+                f"--file-allocation=none --min-split-size={config.get('aria2c_min_split_size', '1M')}"
             ]
         cmd.append(url)
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
@@ -1720,6 +1743,9 @@ def download_with_ytdlp(url, folder, filename, summary,
                 if os.path.exists(p):
                     size_mb = os.path.getsize(p) / (1024 * 1024)
                     progress.done(size_mb)
+                    # Clear any transient stop flag so the series loop continues
+                    if stop_flag is not None and hasattr(stop_flag, 'clear'):
+                        stop_flag.clear()
                     summary.add_success()
                     log_download(filename, url, p)
                     return True
@@ -1815,6 +1841,17 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
         return False
 
     os.makedirs(folder, exist_ok=True)
+    try:
+        import json as _json
+        config = {}
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
+        if not os.path.exists(config_path):
+            config_path = os.path.join(BASE_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as _f:
+                config = _json.load(_f)
+    except Exception:
+        config = {}
     base = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
     if not out_template:
         out_template = os.path.join(folder, base + '.%(ext)s')
@@ -1852,8 +1889,9 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             cmd += [
                 '--external-downloader', 'aria2c',
                 '--external-downloader-args',
-                'aria2c:-x 16 -s 16 -c --max-tries=0 --retry-wait=10 '
-                '--timeout=120 --connect-timeout=60 --file-allocation=none --min-split-size=1M'
+                f"aria2c:-x {config.get('aria2c_connections', 16)} -s {config.get('aria2c_splits', 16)} "
+                f"-c --max-tries=0 --retry-wait=10 --timeout=120 --connect-timeout=60 "
+                f"--file-allocation=none --min-split-size={config.get('aria2c_min_split_size', '1M')}"
             ]
         cmd.append(url)
         try:
@@ -2086,7 +2124,17 @@ class Prefetcher:
         self._thread.start()
 
     def get(self, timeout=30):
-        self._ready.wait(timeout=timeout)
+        import sys
+        spinner = ['|', '/', '-', '\\']
+        i = 0
+        while not self._ready.wait(timeout=0.15):
+            sys.stdout.write(f"\r  [{spinner[i % 4]}] Preparing next episode...")
+            sys.stdout.flush()
+            i += 1
+            if i * 0.15 > timeout:
+                break
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
         return self._result
 
 # ─── BATCH DOWNLOADER ─────────────────────────────────────────
