@@ -1637,6 +1637,17 @@ def download_with_ytdlp(url, folder, filename, summary,
         return False
 
     os.makedirs(folder, exist_ok=True)
+    try:
+        import json as _json
+        config = {}
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
+        if not os.path.exists(config_path):
+            config_path = os.path.join(BASE_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as _f:
+                config = _json.load(_f)
+    except Exception:
+        config = {}
     base        = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
     out_template = os.path.join(folder, base + '.%(ext)s')
     quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
@@ -1817,6 +1828,17 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
         return False
 
     os.makedirs(folder, exist_ok=True)
+    try:
+        import json as _json
+        config = {}
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
+        if not os.path.exists(config_path):
+            config_path = os.path.join(BASE_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as _f:
+                config = _json.load(_f)
+    except Exception:
+        config = {}
     base = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
     if not out_template:
         out_template = os.path.join(folder, base + '.%(ext)s')
