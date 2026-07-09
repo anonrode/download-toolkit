@@ -1431,12 +1431,14 @@ def download_with_aria2c(url, folder, filename, summary,
                 return False
 
             # Detect user cancellation: aria2c code 7, Windows Ctrl+C code,
-            # negative codes (terminated by signal), or stop_flag already set
+            # or negative codes (terminated by signal).
+            # NOTE: do NOT check _is_stopped(stop_flag) here — a transient stop
+            # during download should not prevent the file from being marked complete.
+            # The stop_flag is checked *after* a successful return.
             is_user_cancel = (
                 code == 7 or
                 code == -1073741510 or   # Windows STATUS_CONTROL_C_EXIT
-                code < 0 or
-                _is_stopped(stop_flag)
+                code < 0
             )
             if is_user_cancel:
                 progress.fail()
@@ -1468,6 +1470,9 @@ def download_with_aria2c(url, folder, filename, summary,
                     size_mb = size / (1024 * 1024)
                     progress.done(size_mb)
                     _cleanup_session_file(session_file)
+                    # Clear any transient stop flag so the series loop continues
+                    if stop_flag is not None and hasattr(stop_flag, 'clear') and not _is_stopped(stop_flag):
+                        stop_flag.clear()
                     summary.add_success()
                     log_download(filename, url, filepath)
                     return True
@@ -1733,6 +1738,9 @@ def download_with_ytdlp(url, folder, filename, summary,
                 if os.path.exists(p):
                     size_mb = os.path.getsize(p) / (1024 * 1024)
                     progress.done(size_mb)
+                    # Clear any transient stop flag so the series loop continues
+                    if stop_flag is not None and hasattr(stop_flag, 'clear'):
+                        stop_flag.clear()
                     summary.add_success()
                     log_download(filename, url, p)
                     return True
