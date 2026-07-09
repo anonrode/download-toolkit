@@ -380,12 +380,14 @@ def handle_settings(parts, cfg):
         key = parts[1].lower()
         if key == 'quality' and len(parts) >= 3:
             q = parts[2].lower()
-            if q in ('360p', '480p', '720p', '1080p', 'best'):
+            if q in ('4k', '2160'):
+                q = '2160p'
+            if q in ('360p', '480p', '720p', '1080p', '2160p', 'best'):
                 cfg['quality'] = q
                 save_config(cfg)
                 print(f"[ok] Quality set to: {q}")
             else:
-                print("[!] Valid values: 360p, 480p, 720p, 1080p, best")
+                print("[!] Valid values: 360p, 480p, 720p, 1080p, 2160p/4k, best")
         elif key == 'parallel' and len(parts) >= 3:
             try:
                 n = int(parts[2])
@@ -491,12 +493,14 @@ def handle_settings(parts, cfg):
                 print("[!] Use normal or debug")
         elif key in ('social-quality', 'social_quality') and len(parts) >= 3:
             q = parts[2].lower()
-            if q in ('360p', '480p', '720p', '1080p', 'best'):
+            if q in ('4k', '2160'):
+                q = '2160p'
+            if q in ('360p', '480p', '720p', '1080p', '2160p', 'best'):
                 cfg['social_quality'] = q
                 save_config(cfg)
                 print(f"[ok] Social quality: {q}")
             else:
-                print("[!] Valid: 360p 480p 720p 1080p best")
+                print("[!] Valid: 360p 480p 720p 1080p 2160p/4k best")
         elif key in ('anime-mode', 'anime_mode') and len(parts) >= 3:
             val = parts[2].lower()
             if val in ('sub', 'dub'):
@@ -560,7 +564,7 @@ def handle_settings(parts, cfg):
     while True:
         _show_settings(cfg)
         try:
-            choice = input("Select setting to change (0-14): ").strip()
+            choice = input("Select setting to change (0-17): ").strip()
         except (KeyboardInterrupt, EOFError):
             print()
             break

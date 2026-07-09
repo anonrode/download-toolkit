@@ -173,13 +173,13 @@ def send_notification(title, message):
         return
         
     try:
-        # Run termux-notification in subprocess
-        subprocess.run([
+        # Fire-and-forget: Termux notification should never block the next episode.
+        subprocess.Popen([
             'termux-notification',
             '-t', title,
             '-c', message,
             '--id', 'anonrode_dl'
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
         pass
     except Exception:
@@ -1435,8 +1435,16 @@ def download_with_aria2c(url, folder, filename, summary,
             # aria2c can exit with a negative signal code even after a successful
             # download. Treating code < 0 as cancel was setting stop_flag and
             # blocking all episodes after ep1. Check file on disk first instead.
-            if os.path.exists(filepath) and os.path.getsize(filepath) > 100 * 1024:
-                pass  # File is real — not a cancel regardless of exit code
+            file_is_complete = False
+            if os.path.exists(filepath):
+                actual_size = os.path.getsize(filepath)
+                if expected_size:
+                    file_is_complete = actual_size >= expected_size * 0.99
+                else:
+                    file_is_complete = actual_size > 100 * 1024
+
+            if file_is_complete:
+                pass  # File is complete — not a cancel regardless of exit code
             else:
                 is_user_cancel = (
                     code == 7 or
@@ -1452,7 +1460,7 @@ def download_with_aria2c(url, folder, filename, summary,
                     summary.add_failed(filename)
                     return False
 
-            if code == 0:
+            if code == 0 or file_is_complete:
                 if os.path.exists(filepath):
                     size = os.path.getsize(filepath)
                     if size < 100 * 1024:

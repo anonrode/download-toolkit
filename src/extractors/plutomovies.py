@@ -214,19 +214,20 @@ def _yt_quality_prompt(default_quality):
         '2': ('480p',  'bestvideo[height<=480]+bestaudio/best[height<=480]'),
         '3': ('720p',  'bestvideo[height<=720]+bestaudio/best[height<=720]'),
         '4': ('1080p', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'),
+        '5': ('2160p', 'bestvideo[height<=2160]+bestaudio/best[height<=2160]'),
     }
     # Work out which number matches the current default
-    label_to_num = {'360p': '1', '480p': '2', '720p': '3', '1080p': '4'}
+    label_to_num = {'360p': '1', '480p': '2', '720p': '3', '1080p': '4', '2160': '5', '2160p': '5', '4k': '5'}
     default_label = '480p'
     for label in label_to_num:
         if label in default_quality:
-            default_label = label
+            default_label = '2160p' if label in ('2160', '4k') else label
             break
     default_num = label_to_num.get(default_label, '2')
 
-    safe_print(f"\n  Quality: [1] 360p  [2] 480p  [3] 720p  [4] 1080p  (default: {default_label})")
+    safe_print(f"\n  Quality: [1] 360p  [2] 480p  [3] 720p  [4] 1080p  [5] 4K  (default: {default_label})")
     try:
-        choice = input("  Pick [1-4] or Enter for default: ").strip()
+        choice = input("  Pick [1-5] or Enter for default: ").strip()
     except EOFError:
         choice = ''
     if not choice:
