@@ -1605,39 +1605,39 @@ def main():
                     cwd=script_dir, capture_output=True,
                     text=True, timeout=30, stdin=subprocess.DEVNULL
                 )
-                    try:
-                        open(stamp_file, 'w').write(str(time.time()))
-                    except Exception:
-                        pass
+                try:
+                    open(stamp_file, 'w').write(str(time.time()))
+                except Exception:
+                    pass
 
-                    if pull.returncode != 0:
-                        print("[!] git pull failed:")
-                        err = (pull.stderr or pull.stdout or '').strip()
-                        print(f"      {err[:400]}")
+                if pull.returncode != 0:
+                    print("[!] git pull failed:")
+                    err = (pull.stderr or pull.stdout or '').strip()
+                    print(f"      {err[:400]}")
+                else:
+                    out = (pull.stdout or '').strip()
+                    if 'Already up to date' in out:
+                        print("[*] Already up to date")
                     else:
-                        out = (pull.stdout or '').strip()
-                        if 'Already up to date' in out:
-                            print("[*] Already up to date")
-                        else:
-                            print("[ok] New updates pulled")
-                            if out:
-                                for line in out.splitlines()[:5]:
-                                    print(f"      {line}")
-                        channel = cfg.get('ytdlp_channel', 'master')
-                        print(f"[*] Updating yt-dlp ({channel})...")
-                        _update_ytdlp(channel=channel)
-                        after = subprocess.run(
-                            ['git', 'rev-parse', 'HEAD'],
-                            cwd=script_dir, capture_output=True,
-                            text=True, timeout=5, stdin=subprocess.DEVNULL
-                        ).stdout.strip()
-                        if before and after and before != after:
-                            print("[ok] Updated — restarting...")
-                            sys.stdout.flush()
-                            time.sleep(0.5)
-                            os.execv(sys.executable, [sys.executable] + sys.argv)
-                        else:
-                            print("[*] Already up to date")
+                        print("[ok] New updates pulled")
+                        if out:
+                            for line in out.splitlines()[:5]:
+                                print(f"      {line}")
+                    channel = cfg.get('ytdlp_channel', 'master')
+                    print(f"[*] Updating yt-dlp ({channel})...")
+                    _update_ytdlp(channel=channel)
+                    after = subprocess.run(
+                        ['git', 'rev-parse', 'HEAD'],
+                        cwd=script_dir, capture_output=True,
+                        text=True, timeout=5, stdin=subprocess.DEVNULL
+                    ).stdout.strip()
+                    if before and after and before != after:
+                        print("[ok] Updated — restarting...")
+                        sys.stdout.flush()
+                        time.sleep(0.5)
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
+                    else:
+                        print("[*] Already up to date")
             except Exception as e:
                 print(f"[!] Update failed: {e}")
 
