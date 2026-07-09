@@ -2089,7 +2089,17 @@ class Prefetcher:
         self._thread.start()
 
     def get(self, timeout=30):
-        self._ready.wait(timeout=timeout)
+        import sys
+        spinner = ['|', '/', '-', '\\']
+        i = 0
+        while not self._ready.wait(timeout=0.15):
+            sys.stdout.write(f"\r  [{spinner[i % 4]}] Preparing next episode...")
+            sys.stdout.flush()
+            i += 1
+            if i * 0.15 > timeout:
+                break
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
         return self._result
 
 # ─── BATCH DOWNLOADER ─────────────────────────────────────────
