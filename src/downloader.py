@@ -1430,25 +1430,27 @@ def download_with_aria2c(url, folder, filename, summary,
                 summary.add_failed(filename)
                 return False
 
-            # Detect user cancellation: aria2c code 7, Windows Ctrl+C code,
-            # or negative codes (terminated by signal).
-            # NOTE: do NOT check _is_stopped(stop_flag) here — a transient stop
-            # during download should not prevent the file from being marked complete.
-            # The stop_flag is checked *after* a successful return.
-            is_user_cancel = (
-                code == 7 or
-                code == -1073741510 or   # Windows STATUS_CONTROL_C_EXIT
-                code < 0
-            )
-            if is_user_cancel:
-                progress.fail()
-                safe_print(f"[*] Download cancelled by user")
-                # Propagate stop to other parallel threads
-                if stop_flag is not None and hasattr(stop_flag, 'set'):
-                    stop_flag.set()
-                _cleanup_session_file(session_file)
-                summary.add_failed(filename)
-                return False
+            # Detect user cancellation: aria2c code 7 or Windows Ctrl+C.
+            # NOTE: code < 0 is intentionally excluded — on Android/Termux,
+            # aria2c can exit with a negative signal code even after a successful
+            # download. Treating code < 0 as cancel was setting stop_flag and
+            # blocking all episodes after ep1. Check file on disk first instead.
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 100 * 1024:
+                pass  # File is real — not a cancel regardless of exit code
+            else:
+                is_user_cancel = (
+                    code == 7 or
+                    code == -1073741510   # Windows STATUS_CONTROL_C_EXIT
+                )
+                if is_user_cancel:
+                    progress.fail()
+                    safe_print(f"[*] Download cancelled by user")
+                    # Propagate stop to other parallel threads
+                    if stop_flag is not None and hasattr(stop_flag, 'set'):
+                        stop_flag.set()
+                    _cleanup_session_file(session_file)
+                    summary.add_failed(filename)
+                    return False
 
             if code == 0:
                 if os.path.exists(filepath):
