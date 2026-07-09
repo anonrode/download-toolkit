@@ -250,9 +250,7 @@ def setup_signal_handler():
 # Ctrl+C is handled natively via signal handler. Use 'resume' command to resume.
 
 def _quality_str(q):
-    q = str(q).lower()
-    if 'best' in q: return 'bestvideo+bestaudio/best'
-    if '2160' in q or '4k' in q: return 'bestvideo[height<=2160]+bestaudio/best[height<=2160]'
+    q = str(q)
     if '1080' in q: return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
     if '720'  in q: return 'bestvideo[height<=720]+bestaudio/best[height<=720]'
     if '480'  in q: return 'bestvideo[height<=480]+bestaudio/best[height<=480]'
