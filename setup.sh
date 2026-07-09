@@ -39,8 +39,8 @@ if [ "$IS_TERMUX" -ne 1 ]; then
     fi
 
     if [ -d "$HOME/download-toolkit" ]; then
-        info "Toolkit already installed — updating..."
-        cd "$HOME/download-toolkit" && git pull 2>&1 | tee /tmp/gitpull.log
+        info "Toolkit already installed - updating..."
+        cd "$HOME/download-toolkit" && git fetch --all -q && git reset --hard origin/main 2>&1 | tee /tmp/gitpull.log
         if grep -q "Already up to date" /tmp/gitpull.log; then
             ok "Toolkit already up to date"
         elif [ ${PIPESTATUS[0]} -eq 0 ]; then
@@ -160,11 +160,10 @@ pip install curl_cffi --break-system-packages -q \
 # ─── CLONE OR UPDATE REPO ────────────────────────
 echo ""
 if [ -d "$HOME/download-toolkit" ]; then
-    info "Toolkit already installed — updating..."
+    info "Toolkit already installed - updating..."
     cd "$HOME/download-toolkit"
-    git stash -q 2>/dev/null
-    git pull 2>&1 | tee /tmp/gitpull.log
-    git stash pop -q 2>/dev/null
+    git fetch --all -q
+    git reset --hard origin/main 2>&1 | tee /tmp/gitpull.log
     if grep -q "Already up to date" /tmp/gitpull.log; then
         ok "Toolkit already up to date"
     else
@@ -201,9 +200,8 @@ else
     # Kill any existing session and start fresh
     tmux kill-session -t download 2>/dev/null
     cd ~/download-toolkit
-    git stash -q 2>/dev/null
-    git pull -q
-    git stash pop -q 2>/dev/null
+    git fetch --all -q
+    git reset --hard origin/main -q
     tmux new-session -s download python main.py
 fi
 CHECKEOF
@@ -226,9 +224,8 @@ else
     # Kill any existing session and start fresh
     tmux kill-session -t download 2>/dev/null
     cd ~/download-toolkit
-    git stash -q 2>/dev/null
-    git pull -q
-    git stash pop -q 2>/dev/null
+    git fetch --all -q
+    git reset --hard origin/main -q
     tmux new-session -s download python main.py
 fi
 EOF
