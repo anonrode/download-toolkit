@@ -42,6 +42,7 @@ STOP_FLAG       = threading.Event()   # stops current batch — extractor loops 
 EXIT_FLAG       = threading.Event()   # exits entire script — REPL loop checks this
 PAUSE_FLAG      = threading.Event()   # toggles aria2c SIGSTOP/SIGCONT — Ctrl+P
 _ctrl_c_count   = [0]                 # tracks Ctrl+C presses — reset on return to prompt
+_last_ctrl_c_at = [0.0]               # helps distinguish quick stop from pause/resume
 
 # Lock for thread-safe access to CURRENT_* globals
 CURRENT_STATE_LOCK = threading.Lock()
@@ -145,7 +146,34 @@ def setup_signal_handler():
     global CURRENT_SERIES_URL, CURRENT_FILEPATH, CURRENT_EXPECTED_SIZE
 
     def handler(sig, frame):
+        if PAUSE_FLAG.is_set():
+            now = time.time()
+            if _ctrl_c_count[0] >= 1 and now - _last_ctrl_c_at[0] <= 1.5:
+                STOP_FLAG.set()
+                PAUSE_FLAG.clear()
+                try:
+                    from src.downloader import terminate_active_processes
+                    terminate_active_processes()
+                except Exception:
+                    pass
+                try:
+                    sys.stdout.write('\n\n  [cancel] Download cancelled — returning to prompt.\n\n')
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            else:
+                PAUSE_FLAG.clear()
+                try:
+                    sys.stdout.write('\n\n  [resume] Resuming download...\n\n')
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            _ctrl_c_count[0] = 0
+            _last_ctrl_c_at[0] = 0.0
+            return
+
         _ctrl_c_count[0] += 1
+        _last_ctrl_c_at[0] = time.time()
         count = _ctrl_c_count[0]
 
         if count >= 3:
@@ -160,31 +188,29 @@ def setup_signal_handler():
         if not STOP_FLAG.is_set() and not DownloadState.series_url and not CURRENT_PROCESS.proc:
             # No active download — the KeyboardInterrupt will be caught by input()
             _ctrl_c_count[0] = 0
+            _last_ctrl_c_at[0] = 0.0
             return
 
         if count == 2:
-            # Second press — kill remaining processes and reset counter
+            # Second press — full stop/cancel
+            STOP_FLAG.set()
+            PAUSE_FLAG.clear()
             try:
                 from src.downloader import terminate_active_processes
                 terminate_active_processes()
             except Exception:
                 pass
-            _ctrl_c_count[0] = 0  # Reset so next press at prompt doesn't force-exit
+            try:
+                sys.stdout.write('\n\n  [cancel] Download cancelled — returning to prompt. Press Ctrl+C again to force exit.\n\n')
+                sys.stdout.flush()
+            except Exception:
+                pass
+            _ctrl_c_count[0] = 0
             return
 
-        # First press — cancel gracefully
-        STOP_FLAG.set()
-        proc = CURRENT_PROCESS.proc
+        # First press — pause gracefully
+        PAUSE_FLAG.set()
 
-        if proc:
-            try: proc.terminate()
-            except Exception: pass
-        try:
-            from src.downloader import terminate_active_processes
-            terminate_active_processes()
-        except Exception:
-            pass
-        
         # Mark download as paused in both receipt and resume state
         if DownloadState.series_url and DownloadState.episode_name and DownloadState.filepath:
             try:
@@ -211,7 +237,7 @@ def setup_signal_handler():
                 pass
         
         try:
-            sys.stdout.write('\n\n  [cancel] Download cancelled — returning to prompt. Press Ctrl+C again to force exit.\n\n')
+            sys.stdout.write('\n\n  [pause] Download paused — wait a moment then press Ctrl+C to resume, or press Ctrl+C again quickly to stop.\n\n')
             sys.stdout.flush()
         except Exception:
             pass
@@ -935,17 +961,16 @@ def _show_settings(cfg):
 def handle_resume_command(session, cfg):
     from src.downloader import show_resume_list, load_resume_state
     from src.extractors import process_link_queue
-    if not show_resume_list():
+    items = show_resume_list()
+    if not items:
         return
     try:
         choice = int(input("\n  Pick number to resume (0 to cancel): ").strip())
     except (ValueError, EOFError):
         return
-    state = load_resume_state()
-    urls  = list(state.keys())
-    if choice == 0 or choice > len(urls):
+    if choice == 0 or choice > len(items):
         return
-    url = urls[choice - 1]
+    url = items[choice - 1][0]
     print(f"\n[*] Resuming: {url[:60]}")
     ctx = _make_ctx(cfg)
     process_link_queue([url], session, ctx)
@@ -993,13 +1018,25 @@ def auto_update(cfg=None):
 
     if IS_ANDROID:
         try:
+            # Never wipe local work — check for tracked dirty state first
+            status = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                cwd=script_dir, capture_output=True,
+                text=True, timeout=5, stdin=subprocess.DEVNULL
+            )
+            dirty = [l for l in status.stdout.splitlines() if l and not l.startswith('??')]
+            if dirty:
+                return  # Skip silently — don't destroy local changes
+
             before = _get_commit()
-            subprocess.run(['git', 'fetch', '--all', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
-            subprocess.run(
-                ['git', 'reset', '--hard', 'origin/main', '-q'],
+            subprocess.run(['git', 'fetch', 'origin', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
+            pull = subprocess.run(
+                ['git', 'merge', '--ff-only', 'origin/main', '-q'],
                 cwd=script_dir, capture_output=True,
                 text=True, timeout=30, stdin=subprocess.DEVNULL
             )
+            if pull.returncode != 0:
+                return  # Can't fast-forward — skip silently
             _stamp_pull()
             after = _get_commit()
             if before and after and before != after:
@@ -1012,13 +1049,22 @@ def auto_update(cfg=None):
             pass
     else:
         try:
-            result = subprocess.run(
-                ['git', 'pull'], cwd=script_dir,
-                capture_output=True, text=True, timeout=30,
-                stdin=subprocess.DEVNULL
+            status = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                cwd=script_dir, capture_output=True,
+                text=True, timeout=5, stdin=subprocess.DEVNULL
             )
-            _stamp_pull()
-            if result.returncode == 0 and 'Already up to date' not in result.stdout:
+            dirty = [l for l in status.stdout.splitlines() if l and not l.startswith('??')]
+            if dirty:
+                return
+            subprocess.run(['git', 'fetch', 'origin', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
+            result = subprocess.run(
+                ['git', 'merge', '--ff-only', 'origin/main', '-q'],
+                cwd=script_dir, capture_output=True,
+                text=True, timeout=30, stdin=subprocess.DEVNULL
+            )
+            if result.returncode == 0:
+                _stamp_pull()
                 print("[ok] Toolkit updated — restart to use latest version")
         except Exception:
             pass
@@ -1448,6 +1494,7 @@ def main():
         _reset_current_state()
         STOP_FLAG.clear()
         PAUSE_FLAG.clear()
+        _ctrl_c_count[0] = 0
 
         try:
             raw = input("\n> ").strip()
@@ -1512,7 +1559,11 @@ def main():
             handle_retry_failed(session, cfg)
 
         elif lower == 'resume':
-            handle_resume_command(session, cfg)
+            if PAUSE_FLAG.is_set() and DownloadState.series_url:
+                PAUSE_FLAG.clear()
+                print("[ok] Resuming current download...")
+            else:
+                handle_resume_command(session, cfg)
 
         elif lower == 'clip':
             try:
@@ -1599,13 +1650,14 @@ def main():
                 dirty = '\n'.join(dirty_lines)
 
                 if dirty:
-                    print("[!] Local changes detected — wiping them for clean update...")
-                    subprocess.run(['git', 'stash', '-q'], cwd=script_dir, stdin=subprocess.DEVNULL)
-                    subprocess.run(['git', 'clean', '-fd', '-q'], cwd=script_dir, stdin=subprocess.DEVNULL)
-                
-                subprocess.run(['git', 'fetch', '--all', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
+                    print("[!] Local changes detected — commit or stash before updating:")
+                    for line in dirty_lines[:8]:
+                        print(f"      {line}")
+                    continue
+
+                subprocess.run(['git', 'fetch', 'origin', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
                 pull = subprocess.run(
-                    ['git', 'reset', '--hard', 'origin/main'],
+                    ['git', 'merge', '--ff-only', 'origin/main'],
                     cwd=script_dir, capture_output=True,
                     text=True, timeout=30, stdin=subprocess.DEVNULL
                 )

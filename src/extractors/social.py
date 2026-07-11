@@ -24,7 +24,16 @@ def extract_social(url, session, ctx=None):
             folder = os.path.join(folder, board_slug)
             safe_print(f"[*] Board: {board_slug}")
             safe_print(f"[*] Saving to: {folder}")
-            fmt = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+            _sq = ctx.get('social_quality', '720p')
+            _sq_lower = str(_sq).lower()
+            if _sq_lower == 'best':
+                fmt = 'bestvideo+bestaudio/best'
+            elif _sq_lower in ('4k', '2160', '2160p'):
+                _h = 2160
+            else:
+                _m = re.search(r'(\d+)', _sq_lower)
+                _h = int(_m.group(1)) if _m else 720
+                fmt = f'bestvideo[height<={_h}]+bestaudio/best[height<={_h}]/best'
             os.makedirs(folder, exist_ok=True)
             out_template = os.path.join(folder, '%(playlist_index)s - %(title)s.%(ext)s')
             cmd = [
@@ -36,55 +45,31 @@ def extract_social(url, session, ctx=None):
                 '--no-warnings', '--progress', '--newline',
                 url
             ]
-        else:
-            pin_id  = re.search(r'/pin/(\d+)', url)
-            slug    = pin_id.group(1) if pin_id else 'pin'
-            filename = safe_filename(f"{slug}.mp4")
-            safe_print(f"[*] Pin: {slug}")
-            safe_print(f"[*] Saving to: {folder}")
-            fmt = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
-            os.makedirs(folder, exist_ok=True)
-            out_template = os.path.join(folder, safe_filename(slug) + '.%(ext)s')
-            cmd = [
-                'yt-dlp', '-f', fmt,
-                '--merge-output-format', 'mp4',
-                '-o', out_template,
-                '--no-playlist',
-                '--retries', '3', '--fragment-retries', '3',
-                '--no-warnings', '--progress', '--newline',
-                url
-        ]
-            download_social_ytdlp(url, folder, filename, summary,
-                                  current_process=cur_proc,
-                                  out_template=out_template,
-                                  stop_flag=stop,
-                                  preferred_quality=ctx.get('social_quality', '720p'),
-                                  smart_select=True)
-            summary.report()
-            return
-        proc = None
-        try:
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-            register_process(proc)
-            if cur_proc is not None:
-                cur_proc.proc = proc
-            while proc.poll() is None:
-                if _user_stopped():
-                    proc.terminate()
-                    break
-                time.sleep(0.5)
-            finish_process(proc)
-            if proc.returncode == 0 and not _user_stopped():
+            from src.downloader import run_ytdlp_command
+            ok = run_ytdlp_command(cmd, summary, 'pinterest',
+                                   current_process=cur_proc,
+                                   stop_flag=stop, pause_flag=pause)
+            if ok:
                 summary.add_success()
             else:
                 summary.add_failed('pinterest')
-        except Exception as e:
-            safe_print(f'[✗] Pinterest error: {e}')
-            summary.add_failed('pinterest')
-        finally:
-            unregister_process(proc)
-            if cur_proc is not None:
-                cur_proc.proc = None
+            summary.report()
+            return
+        # Single pin
+        pin_id   = re.search(r'/pin/(\d+)', url)
+        slug     = pin_id.group(1) if pin_id else 'pin'
+        filename = safe_filename(f"{slug}.mp4")
+        safe_print(f"[*] Pin: {slug}")
+        safe_print(f"[*] Saving to: {folder}")
+        os.makedirs(folder, exist_ok=True)
+        out_template = os.path.join(folder, safe_filename(slug) + '.%(ext)s')
+        download_social_ytdlp(url, folder, filename, summary,
+                              current_process=cur_proc,
+                              out_template=out_template,
+                              stop_flag=stop,
+                              pause_flag=pause,
+                              preferred_quality=ctx.get('social_quality', '720p'),
+                              smart_select=True)
         summary.report()
         return
 
@@ -145,29 +130,14 @@ def extract_social(url, session, ctx=None):
                 cmd += ['--playlist-items', items_sel]
             cmd.append(url)
             summary = DownloadSummary()
-            proc = None
-            try:
-                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-                register_process(proc)
-                if cur_proc is not None:
-                    cur_proc.proc = proc
-                while proc.poll() is None:
-                    if _user_stopped():
-                        proc.terminate()
-                        break
-                    time.sleep(0.5)
-                finish_process(proc)
-                if proc.returncode == 0 and not _user_stopped():
-                    summary.add_success()
-                else:
-                    summary.add_failed('playlist')
-            except Exception as e:
-                safe_print(f'[✗] Playlist error: {e}')
+            from src.downloader import run_ytdlp_command
+            ok = run_ytdlp_command(cmd, summary, 'playlist',
+                                   current_process=cur_proc,
+                                   stop_flag=stop, pause_flag=pause)
+            if ok:
+                summary.add_success()
+            else:
                 summary.add_failed('playlist')
-            finally:
-                unregister_process(proc)
-                if cur_proc is not None:
-                    cur_proc.proc = None
             summary.report()
             return
 
@@ -183,6 +153,7 @@ def extract_social(url, session, ctx=None):
                               quality_override=fmt,
                               out_template=out_template,
                               stop_flag=stop,
+                              pause_flag=pause,
                               smart_select=False)
         summary.report()
         return
@@ -202,6 +173,7 @@ def extract_social(url, session, ctx=None):
                           current_process=cur_proc,
                           out_template=out_template,
                           stop_flag=stop,
+                          pause_flag=pause,
                           preferred_quality=ctx.get('social_quality', '720p'),
                           smart_select=True)
     summary.report()

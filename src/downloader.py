@@ -453,7 +453,7 @@ class DownloadReceipt:
     def get_paused_download(episode_url):
         """Get paused download info (for resuming)."""
         receipt = DownloadReceipt.get_receipt(episode_url)
-        if receipt.get('status') == 'paused':
+        if receipt.get('status') in ('paused', 'partial'):
             return {
                 'filepath': receipt.get('filepath'),
                 'progress_bytes': receipt.get('progress_bytes', 0),
@@ -748,6 +748,10 @@ def mark_episode_current(series_url, series_name, ep_filename):
         state[key]['name'] = series_name
         _save_resume_state_unlocked(state)
 
+def mark_series_waiting_for_network(series_url, series_name='Queued download'):
+    """Keep an unresolved series visible in `resume` until its link can be retried."""
+    mark_episode_current(series_url, series_name, 'Waiting for network')
+
 def mark_series_complete(series_url):
     with RESUME_LOCK:
         state = _load_resume_state_unlocked()
@@ -791,10 +795,21 @@ def show_resume_list():
     if not state:
         safe_print("[*] No paused downloads found")
         return False
+
+    # Filter out fully completed series — those with no current episode and no failures
+    active = {
+        url: inf for url, inf in state.items()
+        if inf.get('current') or inf.get('failed')
+    }
+
+    if not active:
+        safe_print("[*] No paused downloads found")
+        return False
+
     print(f"\n{'='*50}")
     print(f"  PAUSED DOWNLOADS")
     print(f"{'='*50}")
-    for i, (url, inf) in enumerate(state.items(), 1):
+    for i, (url, inf) in enumerate(active.items(), 1):
         name    = inf.get('name', 'Unknown')
         done    = len(inf.get('done', []))
         current = inf.get('current', None)
@@ -803,7 +818,7 @@ def show_resume_list():
         print(f"       {status}")
         print(f"       {url[:60]}")
     print(f"{'='*50}")
-    return True
+    return list(active.items())
 
 # ─── DOWNLOAD SUMMARY ─────────────────────────────────────────
 class DownloadSummary:
@@ -924,6 +939,16 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
     # Per-episode receipt key: series_url + filename avoids all episodes sharing one slot
     ep_key = f"{series_url}:{filename}" if series_url else None
 
+    def _keep_partial(filepath, actual, expected=0):
+        """Preserve incomplete media and make it resumable instead of deleting it."""
+        if ep_key:
+            DownloadReceipt.mark_paused(ep_key, filepath, actual, expected or 0)
+        if expected:
+            safe_print(f"  [*] Resuming: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB")
+        else:
+            safe_print(f"  [*] Incomplete download found ({actual/(1024*1024):.1f}MB) - will resume")
+        return False, None
+
     # CRITICAL: Check receipt for "paused" FIRST (before any file checks)
     if ep_key:
         receipt = DownloadReceipt.get_receipt(ep_key)
@@ -989,7 +1014,9 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
             if actual >= expected * 0.99:
                 safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
                 return True, filepath
-            elif ep_key:
+            if actual < expected * 0.99:
+                return _keep_partial(filepath, actual, expected)
+            if ep_key:
                 receipt = DownloadReceipt.get_receipt(ep_key)
                 if receipt.get('status') == 'paused':
                     safe_print(f"  [*] Resuming: {actual/(1024*1024):.1f}MB of {expected/(1024*1024):.1f}MB")
@@ -1006,6 +1033,8 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
                 safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
                 return True, filepath
     
+            return _keep_partial(filepath, actual, expected)
+
     # If exact filename not found, check by extension (but prefer receipt filepath if available)
     receipt_path = None
     if ep_key:
@@ -1023,6 +1052,7 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
                     if actual >= expected * 0.99:
                         safe_print(f"  [✓] Found existing file ({actual/(1024*1024):.1f}MB)")
                         return True, receipt_path
+                    return _keep_partial(receipt_path, actual, expected)
                 else:
                     min_bytes = max(5 * 1024 * 1024, min_mb * 1024 * 1024)
                     if actual >= min_bytes:
@@ -1289,7 +1319,8 @@ def download_with_aria2c(url, folder, filename, summary,
             parallel_mode=parallel_mode,
             series_url=series_url,
             series_name=series_name,
-            expected_size=expected_size
+            expected_size=expected_size,
+            pause_flag=pause_flag
         )
 
     os.makedirs(folder, exist_ok=True)
@@ -1301,16 +1332,34 @@ def download_with_aria2c(url, folder, filename, summary,
     session_file  = os.path.join(folder, f'.aria2_{safe_fname}_{file_hash}.txt')
     filepath      = os.path.join(folder, filename)
     referer       = get_referer_for_url(url)
+    partial_size  = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+    aria2_sidecar = filepath + '.aria2'
     
     # Check if this is a resumed download (for user-facing print only)
     if series_url:
         ep_key = f"{series_url}:{filename}"
         paused_info = DownloadReceipt.get_paused_download(ep_key)
-        if paused_info and os.path.exists(paused_info['filepath']):
-            current_size = os.path.getsize(paused_info['filepath'])
+        paused_path = paused_info.get('filepath') if paused_info else None
+        if paused_path and os.path.exists(paused_path):
+            current_size = os.path.getsize(paused_path)
             expected_size = paused_info.get('expected_size', 0)
             if expected_size > 0 and current_size < expected_size:
                 safe_print(f"  [*] Resuming from {current_size/(1024*1024):.1f}MB of {expected_size/(1024*1024):.1f}MB")
+
+    # aria2c needs its .aria2 control file for reliable multi-connection resume.
+    # If only the partial media file exists, use HTTP Range resume instead of
+    # risking aria2c truncating/restarting from zero.
+    if partial_size > 100 * 1024 and not os.path.exists(aria2_sidecar):
+        safe_print("  [*] Resume metadata missing — using HTTP range resume to preserve partial file")
+        return download_with_requests(
+            url, folder, filename, summary,
+            stop_flag=stop_flag,
+            parallel_mode=parallel_mode,
+            series_url=series_url,
+            series_name=series_name,
+            expected_size=expected_size,
+            pause_flag=pause_flag
+        )
 
     def _cleanup_session_file(sf):
         try:
@@ -1334,6 +1383,7 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--lowest-speed-limit=0',
                 '--save-session', session_file,
                 '--save-session-interval=30',
+                '--force-save=true',
                 '--file-allocation=none',
                 '-x', str(config.get('aria2c_connections', 16)),
                 '-s', str(config.get('aria2c_splits', 16)),
@@ -1345,7 +1395,7 @@ def download_with_aria2c(url, folder, filename, summary,
                 '--header', 'Accept: video/mp4,video/x-matroska,video/*,*/*',
                 '--header', 'Accept-Language: en-US,en;q=0.9',
                 '--header', f'Origin: {base_domain(referer)}',
-                '--allow-overwrite=true',
+                '--allow-overwrite=false',
                 '--auto-file-renaming=false',
                 '--console-log-level=warn',
                 '--summary-interval=0',
@@ -1383,6 +1433,11 @@ def download_with_aria2c(url, folder, filename, summary,
                 # aria2c's -c flag ensures it resumes from the partial
                 # file when we re-launch it after unpause.
                 if _is_paused(pause_flag):
+                    current_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+                    if series_url:
+                        ep_key = f"{series_url}:{filename}"
+                        DownloadReceipt.mark_paused(ep_key, filepath, current_size, expected_size)
+                        mark_episode_current(series_url, series_name or folder, filename)
                     safe_print("  [‖] Pausing download...")
                     proc.terminate()
                     finish_process(proc)
@@ -1424,6 +1479,15 @@ def download_with_aria2c(url, folder, filename, summary,
                 _cleanup_session_file(session_file)
                 return False
             if stalled:
+                current_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+                if not check_connection():
+                    safe_print("[net] Network appears offline — pausing current episode")
+                    if series_url:
+                        ep_key = f"{series_url}:{filename}"
+                        DownloadReceipt.mark_paused(ep_key, filepath, current_size, expected_size)
+                        mark_episode_current(series_url, series_name or folder, filename)
+                    _cleanup_session_file(session_file)
+                    return False
                 progress.fail()
                 safe_print(f"[✗] aria2c stalled for {idle_timeout}s — moving to next episode")
                 _cleanup_session_file(session_file)
@@ -1481,7 +1545,7 @@ def download_with_aria2c(url, folder, filename, summary,
                     progress.done(size_mb)
                     _cleanup_session_file(session_file)
                     # Clear any transient stop flag so the series loop continues
-                    if stop_flag is not None and hasattr(stop_flag, 'clear') and not _is_stopped(stop_flag):
+                    if stop_flag is not None and hasattr(stop_flag, 'clear'):
                         stop_flag.clear()
                     summary.add_success()
                     log_download(filename, url, filepath)
@@ -1529,7 +1593,7 @@ def download_with_aria2c(url, folder, filename, summary,
 
 def download_with_requests(url, folder, filename, summary, stop_flag=None,
                            parallel_mode=False, series_url=None,
-                           series_name=None, expected_size=0):
+                           series_name=None, expected_size=0, pause_flag=None):
 
     filepath = os.path.join(folder, filename)
     os.makedirs(folder, exist_ok=True)
@@ -1544,11 +1608,29 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
     _notify_current_state(series_url, series_name or folder, filename, filepath, expected_size)
     
     start_time = time.time()
+
+    def _save_pause_state():
+        actual = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+        if series_url:
+            ep_key = f"{series_url}:{filename}"
+            DownloadReceipt.mark_paused(ep_key, filepath, actual, total or expected_size)
+            mark_episode_current(series_url, series_name or folder, filename)
+        return actual
     
     while retries_left > 0:
         if _is_stopped(stop_flag):
             progress.fail()
             return False
+        if _is_paused(pause_flag):
+            actual = _save_pause_state()
+            safe_print(f"  [||] Paused at {actual/(1024*1024):.1f}MB - press Ctrl+C to resume")
+            while _is_paused(pause_flag) and not _is_stopped(stop_flag):
+                time.sleep(0.3)
+            if _is_stopped(stop_flag):
+                progress.fail()
+                return False
+            safe_print("  [>] Resuming download...")
+            continue
             
         try:
             existing_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
@@ -1561,6 +1643,17 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
             if r.status_code == 416:
                 # Range not satisfiable, file might be complete
                 break
+
+            if existing_size > 0 and r.status_code == 200:
+                # Server ignored Range. Do not overwrite a partial file and
+                # restart from zero; keep it paused so the user can retry.
+                progress.fail()
+                safe_print("[!] server did not accept resume range — keeping partial file")
+                if series_url:
+                    ep_key = f"{series_url}:{filename}"
+                    DownloadReceipt.mark_paused(ep_key, filepath, existing_size, total or expected_size)
+                    mark_episode_current(series_url, series_name or folder, filename)
+                return False
                 
             if r.status_code not in (200, 206):
                 # If we get a 403 or similar link expiry error, we can't resume
@@ -1584,6 +1677,7 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
                 total = existing_size + content_length if r.status_code == 206 else content_length
                 
             downloaded = existing_size
+            should_restart = False
             
             with open(filepath, mode) as f:
                 for chunk in r.iter_content(chunk_size=512 * 1024):
@@ -1594,16 +1688,30 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
                             ep_key = f"{series_url}:{filename}"
                             DownloadReceipt.mark_paused(ep_key, filepath, os.path.getsize(filepath), total)
                         return False
+                    if _is_paused(pause_flag):
+                        actual = _save_pause_state()
+                        safe_print(f"  [||] Paused at {actual/(1024*1024):.1f}MB - press Ctrl+C to resume")
+                        while _is_paused(pause_flag) and not _is_stopped(stop_flag):
+                            time.sleep(0.3)
+                        if _is_stopped(stop_flag):
+                            progress.fail()
+                            return False
+                        safe_print("  [>] Resuming download...")
+                        should_restart = True
+                        break
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
                         if total > 0:
                             pct = downloaded * 100 / total
-                            ela = time.time() - start_time
-                            spd = (downloaded / ela / 1024 / 1024) if ela > 0 else 0
-                            eta_s = int((total - downloaded) / (downloaded / ela)) if downloaded > 0 else 0
+                            ela = max(time.time() - start_time, 0.001)
+                            bytes_per_second = downloaded / ela
+                            spd = bytes_per_second / 1024 / 1024
+                            eta_s = int((total - downloaded) / bytes_per_second) if bytes_per_second > 0 else 0
                             eta = f'{eta_s // 60}:{eta_s % 60:02d}'
                             progress.update(pct, spd, eta)
+            if should_restart:
+                continue
             # Completed chunk loop successfully
             break
             
@@ -1623,6 +1731,17 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
                 return False
                 
     # Final size checks
+    if os.path.exists(filepath) and os.path.getsize(filepath) < 100 * 1024:
+        actual_size = os.path.getsize(filepath)
+        progress.fail()
+        safe_print("[!] file is still very small - keeping it for resume")
+        if series_url:
+            ep_key = f"{series_url}:{filename}"
+            DownloadReceipt.mark_paused(ep_key, filepath, actual_size, expected_size)
+            mark_episode_current(series_url, series_name or folder, filename)
+        summary.add_failed(filename)
+        return False
+
     if not os.path.exists(filepath) or os.path.getsize(filepath) < 100 * 1024:
         progress.fail()
         try:
@@ -1633,8 +1752,21 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
         safe_print("[!] file too small — likely failed")
         summary.add_failed(filename)
         return False
-        
-    size_mb = os.path.getsize(filepath) / (1024 * 1024)
+
+    actual_size = os.path.getsize(filepath)
+    if expected_size and actual_size < expected_size * 0.99:
+        progress.fail()
+        safe_print(
+            f"[!] incomplete file: {actual_size/(1024*1024):.1f}MB "
+            f"of {expected_size/(1024*1024):.1f}MB"
+        )
+        if series_url:
+            ep_key = f"{series_url}:{filename}"
+            DownloadReceipt.mark_paused(ep_key, filepath, actual_size, expected_size)
+            mark_episode_current(series_url, series_name or folder, filename)
+        return False
+
+    size_mb = actual_size / (1024 * 1024)
     progress.done(size_mb)
     summary.add_success()
     log_download(filename, url, filepath)
@@ -1777,6 +1909,68 @@ def download_with_ytdlp(url, folder, filename, summary,
         return False
 
 
+def run_ytdlp_command(cmd, summary, label,
+                      current_process=None, stop_flag=None,
+                      pause_flag=None, timeout_sec=6 * 60 * 60):
+    """Shared safe yt-dlp subprocess runner with stop/pause/timeout/process tracking."""
+    proc = None
+    started = time.time()
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        register_process(proc)
+        if current_process is not None:
+            current_process.proc = proc
+        while proc.poll() is None:
+            if _is_stopped(stop_flag):
+                proc.terminate()
+                finish_process(proc)
+                unregister_process(proc)
+                return False
+            if _is_paused(pause_flag):
+                proc.terminate()
+                finish_process(proc)
+                while _is_paused(pause_flag) and not _is_stopped(stop_flag):
+                    time.sleep(0.3)
+                if _is_stopped(stop_flag):
+                    unregister_process(proc)
+                    return False
+                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+                register_process(proc)
+                if current_process is not None:
+                    current_process.proc = proc
+                started = time.time()
+            if time.time() - started > timeout_sec:
+                proc.terminate()
+                finish_process(proc)
+                unregister_process(proc)
+                safe_print(f"[✗] {label} timed out")
+                return False
+            time.sleep(0.5)
+        finish_process(proc)
+        return proc.returncode == 0 and not _is_stopped(stop_flag)
+    except Exception as e:
+        safe_print(f"[✗] {label} error: {e}")
+        return False
+    finally:
+        unregister_process(proc)
+        if current_process is not None:
+            current_process.proc = None
+
+def _social_quality_format(preferred_quality='720p'):
+    """Build yt-dlp format string directly — no network request needed."""
+    q = str(preferred_quality or '720p').lower()
+    if q == 'best':
+        return 'bestvideo+bestaudio/best', 'best available'
+    if q in ('4k', '2160', '2160p'):
+        height = 2160
+    else:
+        m = re.search(r'(\d+)', q)
+        height = int(m.group(1)) if m else 720
+    return (
+        f'bestvideo[height<={height}]+bestaudio/best[height<={height}]/best',
+        f'up to {height}p'
+    )
+
 def _select_social_format(url, preferred_quality='720p'):
     """Inspect yt-dlp formats for social videos. Prefer 720p, else best available."""
     if str(preferred_quality).lower() == 'best':
@@ -1839,7 +2033,7 @@ def _find_recent_media(folder, since_time):
 
 def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                            quality_override=None, out_template=None, stop_flag=None,
-                           preferred_quality='720p', smart_select=True):
+                           pause_flag=None, preferred_quality='720p', smart_select=True):
     if not _check_ytdlp_availability():
         safe_print("[!] yt-dlp unavailable")
         summary.add_failed(filename)
@@ -1866,7 +2060,10 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
         format_chain = [quality_override, 'bestvideo+bestaudio/best', 'best']
         selected_label = 'custom'
     elif smart_select:
-        selected_fmt, selected_label = _select_social_format(url, preferred_quality)
+        if config.get('log_level') == 'debug':
+            selected_fmt, selected_label = _select_social_format(url, preferred_quality)
+        else:
+            selected_fmt, selected_label = _social_quality_format(preferred_quality)
         format_chain = [selected_fmt, 'bestvideo+bestaudio/best', 'best']
     else:
         format_chain = [
@@ -1908,6 +2105,22 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                 if _is_stopped(stop_flag):
                     proc.terminate()
                     break
+                if _is_paused(pause_flag):
+                    proc.terminate()
+                    finish_process(proc)
+                    unregister_process(proc)
+                    if current_process is not None:
+                        current_process.proc = None
+                    safe_print("  [‖] Paused — press Ctrl+C to resume")
+                    while _is_paused(pause_flag) and not _is_stopped(stop_flag):
+                        time.sleep(0.3)
+                    if _is_stopped(stop_flag):
+                        return -1
+                    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+                    register_process(proc)
+                    if current_process is not None:
+                        current_process.proc = proc
+                    continue
                 time.sleep(0.5)
             finish_process(proc)
             return proc.returncode if proc.returncode is not None else -1

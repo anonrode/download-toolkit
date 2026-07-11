@@ -30,6 +30,20 @@ SITE_MAP = {
     PLUTO_DOMAIN:      extract_plutomovies,
 }
 
+def _social_alias(domain):
+    """Map social domains to canonical alias for disabled-site checking."""
+    if domain in ('youtube.com', 'youtu.be'):
+        return 'youtube'
+    if domain in ('instagram.com',):
+        return 'instagram'
+    if domain in ('tiktok.com',):
+        return 'tiktok'
+    if domain in ('facebook.com', 'fb.watch'):
+        return 'facebook'
+    if domain in ('pinterest.com', 'pin.it'):
+        return 'pinterest'
+    return domain.split('.')[0]
+
 def detect_site(url, disabled=None):
     try:
         from urllib.parse import urlparse
@@ -46,6 +60,9 @@ def detect_site(url, disabled=None):
             return extractor
     for domain in SOCIAL_DOMAINS:
         if netloc == domain or netloc.endswith('.' + domain):
+            alias = _social_alias(domain)
+            if 'socials' in disabled or domain in disabled or alias in disabled:
+                return 'disabled'
             return extract_social
     return None
 
@@ -70,6 +87,12 @@ def process_link_queue(links, session, ctx=None):
             safe_print("[*] Supported: NKiri, DramaKey, DramaRain, NaijaVault, 9jaRocks, NaijaPrey, MyAsianTV, Anitaku, PlutoMovies, YouTube, Instagram, TikTok, Facebook, Pinterest")
             continue
         try:
+            # Save the source URL before resolving episode links. The extractor
+            # clears it on a complete series; a network/resolver failure leaves
+            # it visible to the `resume` command.
+            if extractor is not extract_social:
+                from src.downloader import mark_series_waiting_for_network
+                mark_series_waiting_for_network(url)
             update_status(screen='Download', status='Preparing', source=extractor.__name__.replace('extract_', ''), current=url[:80])
             extractor(url, session, ctx)
             update_status(status='Idle', current='')
