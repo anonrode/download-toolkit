@@ -9,8 +9,11 @@ from urllib.parse import urljoin, urlparse
 # Suppress certificate warnings (useful for expired SSL certs on hosts like wetafiles)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Ensure console stdout is configured to handle UTF-8 symbols
-sys.stdout.reconfigure(encoding='utf-8')
+# Ensure console stdout is configured to handle UTF-8 symbols when supported.
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except (AttributeError, OSError):
+    pass
 
 # Try importing thread-safe utilities from local modules
 try:

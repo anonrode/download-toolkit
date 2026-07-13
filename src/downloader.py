@@ -1623,7 +1623,7 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
             return False
         if _is_paused(pause_flag):
             actual = _save_pause_state()
-            safe_print(f"  [||] Paused at {actual/(1024*1024):.1f}MB - press Ctrl+C to resume")
+            safe_print(f"  [||] Paused at {actual/(1024*1024):.1f}MB - press Ctrl+P to resume")
             while _is_paused(pause_flag) and not _is_stopped(stop_flag):
                 time.sleep(0.3)
             if _is_stopped(stop_flag):
@@ -1690,7 +1690,7 @@ def download_with_requests(url, folder, filename, summary, stop_flag=None,
                         return False
                     if _is_paused(pause_flag):
                         actual = _save_pause_state()
-                        safe_print(f"  [||] Paused at {actual/(1024*1024):.1f}MB - press Ctrl+C to resume")
+                        safe_print(f"  [||] Paused at {actual/(1024*1024):.1f}MB - press Ctrl+P to resume")
                         while _is_paused(pause_flag) and not _is_stopped(stop_flag):
                             time.sleep(0.3)
                         if _is_stopped(stop_flag):
@@ -1843,7 +1843,7 @@ def download_with_ytdlp(url, folder, filename, summary,
                     proc.kill()
                 if current_process is not None:
                     current_process.proc = None
-                safe_print("  [‖] Paused — press Ctrl+C to resume")
+                safe_print("  [‖] Paused — press Ctrl+P to resume")
                 # Block here until unpaused or stopped
                 while _is_paused(pause_flag):
                     if _is_stopped(stop_flag):
@@ -2111,7 +2111,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                     unregister_process(proc)
                     if current_process is not None:
                         current_process.proc = None
-                    safe_print("  [‖] Paused — press Ctrl+C to resume")
+                    safe_print("  [‖] Paused — press Ctrl+P to resume")
                     while _is_paused(pause_flag) and not _is_stopped(stop_flag):
                         time.sleep(0.3)
                     if _is_stopped(stop_flag):

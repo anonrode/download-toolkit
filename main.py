@@ -10,6 +10,7 @@ import json
 import time
 import shutil
 import signal
+import shlex
 import threading
 import subprocess
 
@@ -26,6 +27,7 @@ BASE_DIR    = '/storage/emulated/0/Anon' if IS_ANDROID else os.path.join(os.path
 from src.downloader import CONFIG_DIR
 CONFIG_FILE = os.path.join(CONFIG_DIR, '.config.json')
 QUEUE_FILE  = os.path.join(CONFIG_DIR, '.queue.json')
+CONTROL_FILE = os.path.join(CONFIG_DIR, '.download_control')
 
 # ─── GLOBAL STATE ─────────────────────────────────────────────
 from src.downloader import ProcessContainer
@@ -40,9 +42,10 @@ class DownloadState:
 CURRENT_PROCESS = ProcessContainer()
 STOP_FLAG       = threading.Event()   # stops current batch — extractor loops check this
 EXIT_FLAG       = threading.Event()   # exits entire script — REPL loop checks this
-PAUSE_FLAG      = threading.Event()   # toggles aria2c SIGSTOP/SIGCONT — Ctrl+P
-_ctrl_c_count   = [0]                 # tracks Ctrl+C presses — reset on return to prompt
-_last_ctrl_c_at = [0.0]               # helps distinguish quick stop from pause/resume
+PAUSE_FLAG      = threading.Event()   # requests safe backend pause/resume
+CONTROL_STOP    = threading.Event()
+CONTROL_THREAD  = [None]
+TMUX_CONTROLS   = [False]
 
 # Lock for thread-safe access to CURRENT_* globals
 CURRENT_STATE_LOCK = threading.Lock()
@@ -65,7 +68,119 @@ def _reset_current_state():
     DownloadState.filepath = None
     DownloadState.episode_name = None
     DownloadState.expected_size = 0
-    _ctrl_c_count[0] = 0
+
+def _has_active_download():
+    return bool(DownloadState.series_url or CURRENT_PROCESS.proc)
+
+def _record_pause_state():
+    if not (DownloadState.series_url and DownloadState.episode_name and DownloadState.filepath):
+        return
+    try:
+        from src.downloader import DownloadReceipt, mark_episode_current
+        progress_bytes = os.path.getsize(DownloadState.filepath) if os.path.exists(DownloadState.filepath) else 0
+        episode_key = f"{DownloadState.series_url}:{DownloadState.episode_name}"
+        DownloadReceipt.mark_paused(
+            episode_key,
+            DownloadState.filepath,
+            progress_bytes,
+            DownloadState.expected_size,
+        )
+        mark_episode_current(
+            DownloadState.series_url,
+            DownloadState.series_name or 'Download',
+            DownloadState.episode_name,
+        )
+    except Exception:
+        pass
+
+def _request_pause(source='control'):
+    if PAUSE_FLAG.is_set() or not _has_active_download():
+        return
+    PAUSE_FLAG.set()
+    _record_pause_state()
+    safe_source = 'tmux' if source == 'tmux' else source
+    print(f"\n  [pause] Download paused ({safe_source}). Press Ctrl+P to resume.\n")
+
+def _request_resume(source='control'):
+    if not PAUSE_FLAG.is_set():
+        return
+    PAUSE_FLAG.clear()
+    safe_source = 'tmux' if source == 'tmux' else source
+    print(f"\n  [resume] Resuming download ({safe_source})...\n")
+
+def _consume_control_request():
+    """Read one tmux-issued pause/resume request without touching terminal input."""
+    try:
+        if not os.path.exists(CONTROL_FILE):
+            return
+        with open(CONTROL_FILE, 'r', encoding='utf-8') as f:
+            request = f.read().strip().lower()
+        os.remove(CONTROL_FILE)
+    except OSError:
+        return
+    if request == 'pause':
+        _request_pause('tmux')
+    elif request == 'resume':
+        _request_resume('tmux')
+    elif request == 'toggle':
+        if PAUSE_FLAG.is_set():
+            _request_resume('tmux')
+        else:
+            _request_pause('tmux')
+
+def start_termux_pause_controls():
+    """Install session-only tmux controls without using raw terminal mode."""
+    if not (IS_ANDROID and os.environ.get('TMUX') and shutil.which('tmux')):
+        return False
+    try:
+        if os.path.exists(CONTROL_FILE):
+            os.remove(CONTROL_FILE)
+        target = shlex.quote(CONTROL_FILE)
+        command = f"printf '%s\\n' toggle > {target}"
+        result = subprocess.run(
+            ['tmux', 'bind-key', '-n', 'C-p', 'run-shell', command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        if result.returncode != 0:
+            return False
+        CONTROL_STOP.clear()
+        CONTROL_THREAD[0] = threading.Thread(
+            target=_watch_termux_controls,
+            name='termux-pause-control',
+            daemon=True,
+        )
+        CONTROL_THREAD[0].start()
+        TMUX_CONTROLS[0] = True
+        return True
+    except Exception:
+        return False
+
+def _watch_termux_controls():
+    while not CONTROL_STOP.wait(0.2):
+        _consume_control_request()
+
+def stop_termux_pause_controls():
+    CONTROL_STOP.set()
+    try:
+        if os.path.exists(CONTROL_FILE):
+            os.remove(CONTROL_FILE)
+    except OSError:
+        pass
+    if TMUX_CONTROLS[0]:
+        try:
+            subprocess.run(
+                ['tmux', 'unbind-key', '-n', 'C-p'],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+        except Exception:
+            pass
+    TMUX_CONTROLS[0] = False
 
 # ─── CONFIG ───────────────────────────────────────────────────
 DEFAULT_CONFIG = {
@@ -146,98 +261,19 @@ def setup_signal_handler():
     global CURRENT_SERIES_URL, CURRENT_FILEPATH, CURRENT_EXPECTED_SIZE
 
     def handler(sig, frame):
-        if PAUSE_FLAG.is_set():
-            now = time.time()
-            if _ctrl_c_count[0] >= 1 and now - _last_ctrl_c_at[0] <= 1.5:
-                STOP_FLAG.set()
-                PAUSE_FLAG.clear()
-                try:
-                    from src.downloader import terminate_active_processes
-                    terminate_active_processes()
-                except Exception:
-                    pass
-                try:
-                    sys.stdout.write('\n\n  [cancel] Download cancelled — returning to prompt.\n\n')
-                    sys.stdout.flush()
-                except Exception:
-                    pass
-            else:
-                PAUSE_FLAG.clear()
-                try:
-                    sys.stdout.write('\n\n  [resume] Resuming download...\n\n')
-                    sys.stdout.flush()
-                except Exception:
-                    pass
-            _ctrl_c_count[0] = 0
-            _last_ctrl_c_at[0] = 0.0
+        # Ctrl+C is cancellation only. Pause/resume belongs to tmux Ctrl+P.
+        if not _has_active_download():
             return
-
-        _ctrl_c_count[0] += 1
-        _last_ctrl_c_at[0] = time.time()
-        count = _ctrl_c_count[0]
-
-        if count >= 3:
-            try:
-                sys.stdout.write('\n\n  [exit] Force exiting...\n\n')
-                sys.stdout.flush()
-            except Exception:
-                pass
-            sys.exit(0)
-
-        # If no download is running (at the prompt), don't escalate
-        if not STOP_FLAG.is_set() and not DownloadState.series_url and not CURRENT_PROCESS.proc:
-            # No active download — the KeyboardInterrupt will be caught by input()
-            _ctrl_c_count[0] = 0
-            _last_ctrl_c_at[0] = 0.0
-            return
-
-        if count == 2:
-            # Second press — full stop/cancel
-            STOP_FLAG.set()
-            PAUSE_FLAG.clear()
-            try:
-                from src.downloader import terminate_active_processes
-                terminate_active_processes()
-            except Exception:
-                pass
-            try:
-                sys.stdout.write('\n\n  [cancel] Download cancelled — returning to prompt. Press Ctrl+C again to force exit.\n\n')
-                sys.stdout.flush()
-            except Exception:
-                pass
-            _ctrl_c_count[0] = 0
-            return
-
-        # First press — pause gracefully
-        PAUSE_FLAG.set()
-
-        # Mark download as paused in both receipt and resume state
-        if DownloadState.series_url and DownloadState.episode_name and DownloadState.filepath:
-            try:
-                from src.downloader import DownloadReceipt, mark_episode_current
-                progress_bytes = os.path.getsize(DownloadState.filepath) if os.path.exists(DownloadState.filepath) else 0
-                episode_key = f"{DownloadState.series_url}:{DownloadState.episode_name}"
-                
-                # Update receipt (per-episode)
-                DownloadReceipt.mark_paused(
-                    episode_key,
-                    DownloadState.filepath,
-                    progress_bytes,
-                    DownloadState.expected_size
-                )
-                
-                # Update resume state (series-level) so it shows in resume list
-                if DownloadState.series_name and DownloadState.episode_name:
-                    mark_episode_current(
-                        DownloadState.series_url,
-                        DownloadState.series_name,
-                        DownloadState.episode_name
-                    )
-            except Exception:
-                pass
-        
+        _record_pause_state()
+        STOP_FLAG.set()
+        PAUSE_FLAG.clear()
         try:
-            sys.stdout.write('\n\n  [pause] Download paused — wait a moment then press Ctrl+C to resume, or press Ctrl+C again quickly to stop.\n\n')
+            from src.downloader import terminate_active_processes
+            terminate_active_processes()
+        except Exception:
+            pass
+        try:
+            sys.stdout.write('\n\n  [stop] Download stopped and saved for resume.\n\n')
             sys.stdout.flush()
         except Exception:
             pass
@@ -276,7 +312,7 @@ def setup_signal_handler():
         pass
 
 # Raw mode listener removed — it caused terminal glitches on Termux.
-# Ctrl+C is handled natively via signal handler. Use 'resume' command to resume.
+# Ctrl+P pause control is handled by tmux; Ctrl+C cancels the active batch.
 
 def _quality_str(q):
     q = str(q).lower()
@@ -930,7 +966,7 @@ def _show_settings(cfg):
     print(f"  Storage:   {space_s}")
     print(f"==================================================")
     print(f"  Active Features:")
-    print(f"  [✓] Parallel Search           [✓] Pause/Resume (Ctrl+C)")
+    print(f"  [✓] Parallel Search           [✓] Pause/Resume (Ctrl+P on Termux)")
     print(f"  [✓] Expired Link Refresh      [✓] Smart Queue")
     print(f"==================================================")
     print(f"  Supported Sites (6):")
@@ -1029,7 +1065,12 @@ def auto_update(cfg=None):
                 return  # Skip silently — don't destroy local changes
 
             before = _get_commit()
-            subprocess.run(['git', 'fetch', 'origin', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
+            fetch = subprocess.run(
+                ['git', 'fetch', 'origin', '-q'], cwd=script_dir,
+                capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
+            )
+            if fetch.returncode != 0:
+                return
             pull = subprocess.run(
                 ['git', 'merge', '--ff-only', 'origin/main', '-q'],
                 cwd=script_dir, capture_output=True,
@@ -1057,7 +1098,12 @@ def auto_update(cfg=None):
             dirty = [l for l in status.stdout.splitlines() if l and not l.startswith('??')]
             if dirty:
                 return
-            subprocess.run(['git', 'fetch', 'origin', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
+            fetch = subprocess.run(
+                ['git', 'fetch', 'origin', '-q'], cwd=script_dir,
+                capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
+            )
+            if fetch.returncode != 0:
+                return
             result = subprocess.run(
                 ['git', 'merge', '--ff-only', 'origin/main', '-q'],
                 cwd=script_dir, capture_output=True,
@@ -1112,7 +1158,7 @@ def print_banner(cfg):
         print("├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤")
         print("│ ⚡ KEY FEATURES                                       │ 🎬 Movies & Series:                                   │")
         print("│  • 🔍 Parallel Search  - Search all sites at once     │  • NKiri        [⚡ Very Fast]  Korean & Nollywood    │")
-        print("│  • ⏸ Pause & Resume   - Press Ctrl+C anytime          │  • 9JaRocks     [⚡ Very Fast]  Nollywood & Hollywood │")
+        print("│  • ⏸ Pause & Resume   - Press Ctrl+P anytime          │  • 9JaRocks     [⚡ Very Fast]  Nollywood & Hollywood │")
         print("│  • 🔄 Link Auto-Update - Refreshes expired downloads  │  • PlutoMovies  [🚀 Fast]       Blockbusters & Shows  │")
         print("│  • 📋 Smart Queue      - Queue up multiple series     │ 🎎 Asian Dramas:                                      │")
         print("│  • 💾 Storage Guard    - Auto-pauses if space is full │  • DramaKey     [⏱ Normal]      Chinese & Korean      │")
@@ -1128,7 +1174,7 @@ def print_banner(cfg):
         print("├────────────────────────────────────────────────────────┤")
         print("│  ⚡ KEY FEATURES                                       │")
         print("│   • 🔍 Parallel Search  - Search all sites at once     │")
-        print("│   • ⏸ Pause & Resume   - Press Ctrl+C anytime          │")
+        print("│   • ⏸ Pause & Resume   - Press Ctrl+P anytime          │")
         print("│   • 🔄 Link Auto-Update - Refreshes expired downloads  │")
         print("│   • 📋 Smart Queue      - Queue up multiple series     │")
         print("│   • 💾 Storage Guard    - Auto-pauses if space is full │")
@@ -1459,6 +1505,7 @@ def main():
     auto_update(cfg)
 
     def _release_wake_lock():
+        stop_termux_pause_controls()
         if wake_proc:
             try:
                 wake_proc.terminate()
@@ -1481,9 +1528,12 @@ def main():
     set_output_mode(cfg.get('log_level', 'normal'))
     session = make_session()
     setup_signal_handler()
+    termux_controls = start_termux_pause_controls()
     # _start_pause_listener() — removed (caused terminal glitches)
     
     print_banner(cfg)
+    if termux_controls:
+        print("[*] Termux control: Ctrl+P = pause/resume")
 
     while True:
         if EXIT_FLAG.is_set():
@@ -1494,7 +1544,6 @@ def main():
         _reset_current_state()
         STOP_FLAG.clear()
         PAUSE_FLAG.clear()
-        _ctrl_c_count[0] = 0
 
         try:
             raw = input("\n> ").strip()
@@ -1504,7 +1553,6 @@ def main():
             break
         except KeyboardInterrupt:
             # Ctrl+C at the prompt — just print a newline and stay in the REPL
-            _ctrl_c_count[0] = 0
             print()
             continue
 
@@ -1540,7 +1588,7 @@ def main():
             print(f"  history                - Show past download history")
             print(f"  exit                   - Quit app")
             print(f"{'='*50}")
-            print(f"  Ctrl+C once = pause   Ctrl+C twice = stop batch   Ctrl+C 3x = exit")
+            print(f"  Ctrl+P = pause/resume (Termux)   Ctrl+C = stop and save for resume")
             print(f"{'='*50}")
 
         elif lower == 'history':
@@ -1559,11 +1607,7 @@ def main():
             handle_retry_failed(session, cfg)
 
         elif lower == 'resume':
-            if PAUSE_FLAG.is_set() and DownloadState.series_url:
-                PAUSE_FLAG.clear()
-                print("[ok] Resuming current download...")
-            else:
-                handle_resume_command(session, cfg)
+            handle_resume_command(session, cfg)
 
         elif lower == 'clip':
             try:
@@ -1655,7 +1699,16 @@ def main():
                         print(f"      {line}")
                     continue
 
-                subprocess.run(['git', 'fetch', 'origin', '-q'], cwd=script_dir, timeout=30, stdin=subprocess.DEVNULL)
+                fetch = subprocess.run(
+                    ['git', 'fetch', 'origin', '-q'], cwd=script_dir,
+                    capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
+                )
+                if fetch.returncode != 0:
+                    print("[!] Could not reach GitHub - update was not checked")
+                    err = (fetch.stderr or fetch.stdout or '').strip()
+                    if err:
+                        print(f"      {err[:400]}")
+                    continue
                 pull = subprocess.run(
                     ['git', 'merge', '--ff-only', 'origin/main'],
                     cwd=script_dir, capture_output=True,
