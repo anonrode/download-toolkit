@@ -204,8 +204,7 @@ DEFAULT_CONFIG = {
     'min_file_size_mb':     5,          # Minimum file size to consider complete
     'resumable_downloads':  True,       # Resume from byte offset on reconnect
     'ytdlp_channel':        'master',   # 'master' (--pre, newest fixes) or 'stable'
-                                         # — only affects the explicit `update` command;
-                                         # silent background auto-update always uses stable
+                                         # Used only by the explicit `updateyt` command.
     
     # Parallel download settings
     'parallel_mode':        'queue',    # 'queue' (recommended) or 'thread' (legacy)
@@ -1013,7 +1012,6 @@ def handle_resume_command(session, cfg):
 
 # ─── AUTO UPDATE ──────────────────────────────────────────────
 def auto_update(cfg=None):
-    from src.downloader import _update_ytdlp
     script_dir  = os.path.dirname(os.path.abspath(__file__))
     stamp_file  = os.path.join(script_dir, '.last_pull')
     days = int((cfg or {}).get('auto_update_days', 7))
@@ -1049,9 +1047,6 @@ def auto_update(cfg=None):
     if not _should_pull():
         return  # pulled recently — skip entirely, start instantly
 
-    ytdlp_thread = threading.Thread(target=_update_ytdlp, daemon=True)
-    ytdlp_thread.start()
-
     if IS_ANDROID:
         try:
             # Never wipe local work — check for tracked dirty state first
@@ -1083,7 +1078,6 @@ def auto_update(cfg=None):
             if before and after and before != after:
                 print("[ok] Updated — restarting...")
                 sys.stdout.flush()
-                ytdlp_thread.join(timeout=2)
                 time.sleep(0.5)
                 os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception:
@@ -1582,7 +1576,8 @@ def main():
             print(f"  queue add <url>        - Add a link to download queue")
             print(f"  queue list/clear/run   - Manage download queue")
             print(f"  settings               - Open interactive settings menu")
-            print(f"  update                 - Update toolkit & yt-dlp resolvers")
+            print(f"  update                 - Update toolkit from GitHub")
+            print(f"  updateyt               - Update yt-dlp only")
             print(f"  doctor                 - Check Termux dependencies")
             print(f"  cleanup                - Delete temporary/stale files")
             print(f"  history                - Show past download history")
@@ -1668,9 +1663,8 @@ def main():
         elif lower == 'update':
             script_dir = os.path.dirname(os.path.abspath(__file__))
             stamp_file = os.path.join(script_dir, '.last_pull')
-            print("[*] Checking for updates...")
+            print("[*] Checking toolkit updates...")
             try:
-                from src.downloader import _update_ytdlp
                 before = subprocess.run(
                     ['git', 'rev-parse', 'HEAD'],
                     cwd=script_dir, capture_output=True,
@@ -1732,9 +1726,6 @@ def main():
                         if out:
                             for line in out.splitlines()[:5]:
                                 print(f"      {line}")
-                    channel = cfg.get('ytdlp_channel', 'master')
-                    print(f"[*] Updating yt-dlp ({channel})...")
-                    _update_ytdlp(channel=channel)
                     after = subprocess.run(
                         ['git', 'rev-parse', 'HEAD'],
                         cwd=script_dir, capture_output=True,
@@ -1749,6 +1740,15 @@ def main():
                         print("[*] Already up to date")
             except Exception as e:
                 print(f"[!] Update failed: {e}")
+
+        elif lower in ('updateyt', 'update-yt', 'update ytdlp'):
+            try:
+                from src.downloader import _update_ytdlp
+                channel = cfg.get('ytdlp_channel', 'master')
+                print(f"[*] Updating yt-dlp ({channel})...")
+                _update_ytdlp(channel=channel)
+            except Exception as e:
+                print(f"[!] yt-dlp update failed: {e}")
 
         elif lower.startswith('anime '):
             query = raw.split(' ', 1)[1].strip()
