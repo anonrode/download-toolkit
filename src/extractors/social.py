@@ -30,6 +30,7 @@ def extract_social(url, session, ctx=None):
                 fmt = 'bestvideo+bestaudio/best'
             elif _sq_lower in ('4k', '2160', '2160p'):
                 _h = 2160
+                fmt = f'bestvideo[height<={_h}]+bestaudio/best[height<={_h}]/best'
             else:
                 _m = re.search(r'(\d+)', _sq_lower)
                 _h = int(_m.group(1)) if _m else 720
@@ -54,7 +55,7 @@ def extract_social(url, session, ctx=None):
             else:
                 summary.add_failed('pinterest')
             summary.report()
-            return
+            return bool(ok) and not _user_stopped()
         # Single pin
         pin_id   = re.search(r'/pin/(\d+)', url)
         slug     = pin_id.group(1) if pin_id else 'pin'
@@ -63,15 +64,15 @@ def extract_social(url, session, ctx=None):
         safe_print(f"[*] Saving to: {folder}")
         os.makedirs(folder, exist_ok=True)
         out_template = os.path.join(folder, safe_filename(slug) + '.%(ext)s')
-        download_social_ytdlp(url, folder, filename, summary,
-                              current_process=cur_proc,
-                              out_template=out_template,
-                              stop_flag=stop,
-                              pause_flag=pause,
-                              preferred_quality=ctx.get('social_quality', '720p'),
-                              smart_select=True)
+        ok = download_social_ytdlp(url, folder, filename, summary,
+                                   current_process=cur_proc,
+                                   out_template=out_template,
+                                   stop_flag=stop,
+                                   pause_flag=pause,
+                                   preferred_quality=ctx.get('social_quality', '720p'),
+                                   smart_select=True)
         summary.report()
-        return
+        return bool(ok) and not _user_stopped()
 
     # ── YouTube ────────────────────────────────────────────────
     if is_yt:
@@ -89,7 +90,7 @@ def extract_social(url, session, ctx=None):
             except EOFError:
                 choice = '1'
             if choice == '0':
-                return
+                return False
             if choice == '2':
                 # strip to just the list URL
                 list_id = re.search(r'list=([^&]+)', url)
@@ -104,7 +105,7 @@ def extract_social(url, session, ctx=None):
             count, pl_title = _yt_get_playlist_count(url)
             items_sel   = _yt_playlist_items_prompt(count)
             if items_sel is None:
-                return
+                return False
             fmt         = _yt_quality_prompt(quality)
             list_id     = re.search(r'[?&]list=([^&]+)', url)
             # Use playlist title as folder name if available, else list ID
@@ -139,7 +140,7 @@ def extract_social(url, session, ctx=None):
             else:
                 summary.add_failed('playlist')
             summary.report()
-            return
+            return bool(ok) and not _user_stopped()
 
         # Single YouTube video
         fmt      = _yt_quality_prompt(quality)
@@ -148,15 +149,15 @@ def extract_social(url, session, ctx=None):
         out_template = os.path.join(folder, '%(title)s.%(ext)s')
         safe_print(f'[*] Saving to: {folder}')
         summary = DownloadSummary()
-        download_social_ytdlp(url, folder, 'video.mp4', summary,
-                              current_process=cur_proc,
-                              quality_override=fmt,
-                              out_template=out_template,
-                              stop_flag=stop,
-                              pause_flag=pause,
-                              smart_select=False)
+        ok = download_social_ytdlp(url, folder, 'video.mp4', summary,
+                                   current_process=cur_proc,
+                                   quality_override=fmt,
+                                   out_template=out_template,
+                                   stop_flag=stop,
+                                   pause_flag=pause,
+                                   smart_select=False)
         summary.report()
-        return
+        return bool(ok) and not _user_stopped()
 
     # ── Everything else (Instagram, TikTok, Facebook, etc.) ───
     safe_print(f"[*] Social/Generic mode: {bd}")
@@ -169,14 +170,15 @@ def extract_social(url, session, ctx=None):
     safe_print(f"[*] Saving to: {folder}")
     summary  = DownloadSummary()
     out_template = os.path.join(folder, '%(uploader)s - %(title).80s [%(id)s].%(ext)s')
-    download_social_ytdlp(url, folder, filename, summary,
-                          current_process=cur_proc,
-                          out_template=out_template,
-                          stop_flag=stop,
-                          pause_flag=pause,
-                          preferred_quality=ctx.get('social_quality', '720p'),
-                          smart_select=True)
+    ok = download_social_ytdlp(url, folder, filename, summary,
+                               current_process=cur_proc,
+                               out_template=out_template,
+                               stop_flag=stop,
+                               pause_flag=pause,
+                               preferred_quality=ctx.get('social_quality', '720p'),
+                               smart_select=True)
     summary.report()
+    return bool(ok) and not _user_stopped()
 def _yt_quality_prompt(default_quality):
     """Ask user to pick a quality. Returns a yt-dlp format string."""
     QUALITY_MAP = {

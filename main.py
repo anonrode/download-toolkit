@@ -423,16 +423,20 @@ def queue_run(session, cfg):
     print(f"\n[*] Starting queue — {len(q)} item(s)")
     from src.extractors import process_link_queue
     ctx = _make_ctx(cfg)
-    completed = set()
-    for url in q:
+    remaining = []
+    for index, url in enumerate(q):
         if STOP_FLAG.is_set():
+            remaining.extend(q[index:])
             break
-        process_link_queue([url], session, ctx)
-        completed.add(url)
-    remaining = [u for u in q if u not in completed]
+        outcomes = process_link_queue([url], session, ctx)
+        outcome = outcomes[0] if outcomes else {'status': 'failed'}
+        if outcome.get('status') != 'success':
+            remaining.append(url)
     save_queue(remaining)
     if not remaining:
         print("[✓] Queue complete — cleared")
+    else:
+        print(f"[*] Queue kept {len(remaining)} unfinished item(s) for resume")
 
 # ─── SETTINGS ─────────────────────────────────────────────────
 def handle_settings(parts, cfg):
@@ -1011,7 +1015,7 @@ def handle_resume_command(session, cfg):
     process_link_queue([url], session, ctx)
 
 # ─── AUTO UPDATE ──────────────────────────────────────────────
-def auto_update(cfg=None):
+def auto_update(cfg=None, announce=True):
     script_dir  = os.path.dirname(os.path.abspath(__file__))
     stamp_file  = os.path.join(script_dir, '.last_pull')
     days = int((cfg or {}).get('auto_update_days', 7))
@@ -1075,11 +1079,8 @@ def auto_update(cfg=None):
                 return  # Can't fast-forward — skip silently
             _stamp_pull()
             after = _get_commit()
-            if before and after and before != after:
-                print("[ok] Updated — restarting...")
-                sys.stdout.flush()
-                time.sleep(0.5)
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+            if before and after and before != after and announce:
+                print("[ok] Toolkit updated — restart to use latest version")
         except Exception:
             pass
     else:
@@ -1105,9 +1106,26 @@ def auto_update(cfg=None):
             )
             if result.returncode == 0:
                 _stamp_pull()
-                print("[ok] Toolkit updated — restart to use latest version")
+                if announce:
+                    print("[ok] Toolkit updated — restart to use latest version")
         except Exception:
             pass
+
+def schedule_auto_update(cfg):
+    """Check the weekly repository update without delaying the first prompt."""
+    def _run_quietly():
+        try:
+            auto_update(cfg, announce=False)
+        except TypeError:
+            # Keeps integrations that provide the original one-argument hook working.
+            auto_update(cfg)
+
+    worker = threading.Thread(
+        target=_run_quietly,
+        name='anonrode-auto-update',
+        daemon=True,
+    )
+    worker.start()
 
 # ─── ANDROID SETUP ────────────────────────────────────────────
 def setup_android():
@@ -1496,7 +1514,6 @@ def main():
 
     wake_proc = setup_android()
     cfg = load_config()
-    auto_update(cfg)
 
     def _release_wake_lock():
         stop_termux_pause_controls()
@@ -1526,6 +1543,7 @@ def main():
     # _start_pause_listener() — removed (caused terminal glitches)
     
     print_banner(cfg)
+    schedule_auto_update(cfg)
     if termux_controls:
         print("[*] Termux control: Ctrl+P = pause/resume")
 
