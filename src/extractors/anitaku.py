@@ -24,21 +24,26 @@ def extract_anitaku(url, session, ctx=None):
             embed_url = tamil_match.group(1)
             safe_print(f"  [*] Found tamilembed stream")
             download_with_ytdlp(embed_url, folder, safe_filename(f"{ep_name}.mp4"), summary,
-                                quality=quality, current_process=cur_proc)
+                                quality=quality, current_process=cur_proc,
+                                stop_flag=stop, pause_flag=pause)
             return
         soup2  = BeautifulSoup(r.text, 'html.parser')
         iframe = soup2.find('iframe', src=re.compile(r'tamilembed|embed'))
         if iframe:
             src = iframe.get('src', '')
             if not src.startswith('http'):
-                src = 'https:' + src
+                # urljoin handles both //host/path (protocol-relative) and
+                # /embed/x (root-relative); 'https:' + src breaks the latter.
+                src = urljoin(ANITAKU_BASE, src)
             safe_print(f"  [*] Found embed via iframe")
             download_with_ytdlp(src, folder, safe_filename(f"{ep_name}.mp4"), summary,
-                                quality=quality, current_process=cur_proc)
+                                quality=quality, current_process=cur_proc,
+                                stop_flag=stop, pause_flag=pause)
             return
         safe_print(f"  [*] Trying yt-dlp on episode page directly")
         result = download_with_ytdlp(ep_url, folder, safe_filename(f"{ep_name}.mp4"), summary,
-                                     quality=quality, current_process=cur_proc)
+                                     quality=quality, current_process=cur_proc,
+                                     stop_flag=stop, pause_flag=pause)
         if not result:
             safe_print(f"  [✗] All methods failed: {ep_name}")
             diagnose_page(soup2, ep_url, "tamilembed.lol embed URL")
@@ -72,6 +77,7 @@ def extract_anitaku(url, session, ctx=None):
                     ep_links.append((href, a.get_text(strip=True) or href.split('/')[-1]))
         if not ep_links:
             safe_print("[!] No episode links found")
+            diagnose_page(soup, url, "episode-* links")
             return
 
         def ep_num(item):
@@ -79,7 +85,11 @@ def extract_anitaku(url, session, ctx=None):
             return int(m.group(1)) if m else 0
         ep_links.sort(key=ep_num)
         ep_links = _filter_by_episode_range(ep_links, ctx)
+        if not ep_links:
+            safe_print("[*] No episodes matched your selection")
+            return
         safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
+        _notify_start(name, len(ep_links))
 
         for i, (ep_url, ep_text) in enumerate(ep_links, 1):
             if _stopped(ctx):

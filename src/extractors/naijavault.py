@@ -12,8 +12,7 @@ def extract_naijavault(url, session, ctx=None):
     safe_print(f"[*] Title: {name}")
     folder = os.path.join(BASE_DIR, safe_filename(name))
 
-    session.headers['Referer'] = f'https://www.{NAIJAVAULT_DOMAIN}/'
-    r = safe_get(session, url, timeout=30)
+    r = safe_get(session, url, timeout=30, referer=f'https://www.{NAIJAVAULT_DOMAIN}/')
     if r is None:
         return
     soup    = BeautifulSoup(r.text, 'html.parser')
@@ -40,7 +39,7 @@ def extract_naijavault(url, session, ctx=None):
     # Single dl- page pasted directly
     if not format_a and not format_b:
         is_dl = (
-            re.search('var downloadURL', r.text) or
+            'var downloadURL' in r.text or
             re.search(r'vikingfile\.com', r.text) or
             re.search(r'lulacloud\.com/d/', r.text) or
             re.search(r'nj_download=', r.text)
@@ -67,6 +66,7 @@ def extract_naijavault(url, session, ctx=None):
         total = len(format_a) + len(format_b)
     safe_print(f"[*] Found {total} episode(s) — Format A: {len(format_a)}, Format B: {len(format_b)}")
     safe_print(f"[*] Saving to: {folder}")
+    _notify_start(name, total)
 
     zip_hit = False
 
@@ -81,7 +81,7 @@ def extract_naijavault(url, session, ctx=None):
         _wait(ctx)
         download_file(direct, folder, safe_filename(fname), summary,
                       series_url=url, series_name=name,
-                      bandwidth_limit=bw, current_process=cur_proc,
+                      bandwidth_limit=bw, quality=quality, current_process=cur_proc,
                       stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
 
     # ── Process Format A (/dl- pages) — resolve & download immediately ──
@@ -100,8 +100,7 @@ def extract_naijavault(url, session, ctx=None):
             summary.add_skipped()
             continue
 
-        session.headers['Referer'] = url
-        r2 = safe_get(session, dl_url, timeout=20)
+        r2 = safe_get(session, dl_url, timeout=20, referer=url)
         if not r2:
             safe_print(f"  [\u2717] Could not fetch dl page")
             summary.add_failed(ep_label)

@@ -13,7 +13,7 @@ from ..downloader import (
     find_direct_video, base_domain, ProcessContainer,
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
     _notify_start, register_process, unregister_process, finish_process,
-    update_status,
+    update_status, _drain_futures_interruptible,
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
@@ -55,21 +55,26 @@ SOCIAL_DOMAINS = [
 ]
 
 # ─── HELPERS ──────────────────────────────────────────────────
-def safe_get(session, url, timeout=20, referer=None, retries=3):
+def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
+    if _seen is None:
+        _seen = set()
+    if url in _seen:
+        safe_print(f"  [!] JS redirect loop detected: {url[:60]}")
+        return None
+    _seen.add(url)
     for attempt in range(retries):
         try:
             headers = {'Referer': referer} if referer else {}
             r = session.get(url, timeout=timeout, headers=headers)
-            
+
             m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text)
             if m:
                 redirect_url = m.group(1)
                 if not redirect_url.startswith('http'):
                     redirect_url = urljoin(url, redirect_url)
                 safe_print(f"  [*] Following JS redirect: {redirect_url[:60]}...")
-                if retries > 1:
-                    return safe_get(session, redirect_url, referer=referer, retries=retries - 1)
-            
+                return safe_get(session, redirect_url, referer=referer, retries=max(1, retries - 1), _seen=_seen)
+
             if not r.ok:
                 safe_print(f"  [!] HTTP {r.status_code}: {url[:60]}")
                 return None
@@ -95,17 +100,9 @@ def clean_ep_name(raw):
 
 def _ctx(ctx):
     import threading
-    try:
-        from ..downloader import ProcessContainer
-        proc_container = ctx.get('current_process')
-        if proc_container is None:
-            proc_container = ProcessContainer()
-    except ImportError:
-        proc_container = ctx.get('current_process')
-        if proc_container is None:
-            class _FallbackProc:
-                proc = None
-            proc_container = _FallbackProc()
+    proc_container = ctx.get('current_process')
+    if proc_container is None:
+        proc_container = ProcessContainer()
 
     stop_event = ctx.get('stop')
     if stop_event is None:
@@ -128,9 +125,7 @@ def _ctx(ctx):
 def _stopped(ctx):
     stop_event = ctx.get('stop')
     if stop_event is not None:
-        if hasattr(stop_event, 'is_set'):
-            return stop_event.is_set()
-        return stop_event[0]
+        return stop_event.is_set()
     return False
 
 def _wait(ctx):
@@ -252,10 +247,7 @@ def resolve_downloadwella(url, session):
         data = {inp.get('name'): inp.get('value', '')
                 for inp in form.find_all('input') if inp.get('name')}
         data['method_free'] = 'Free Download'
-        try:
-            r2 = session.post(url, data=data, timeout=20)
-        except Exception:
-            r2 = session.post(url, data=data, timeout=20)
+        r2 = session.post(url, data=data, timeout=20)
         return find_direct_video(r2.text)
     except Exception as e:
         safe_print(f"  [!] Downloadwella: {e}")
@@ -266,12 +258,11 @@ def _ensure_package(package_name):
         return __import__(package_name)
     except ImportError:
         safe_print(f"[*] Installing {package_name}...")
-        import subprocess as _sp
         try:
-            _sp.run(
+            subprocess.run(
                 ['pip', 'install', package_name, '--break-system-packages', '-q'],
-                check=True, stdin=_sp.DEVNULL,
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                check=True, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             return __import__(package_name)
         except Exception as e:
@@ -346,7 +337,8 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                               series_url=url, series_name=name,
                               bandwidth_limit=bw, quality=quality,
                               current_process=cur_proc,
-                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
+                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                              source_url=ep_url)
             else:
                 safe_print(f"  [✗] Could not extract link")
                 summary.add_failed(ep_name)
@@ -355,7 +347,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
 
             safe_print(f"\n  [*] Resolving {len(to_process)} link(s)...")
             resolved = {}
-            with ThreadPoolExecutor(max_workers=len(to_process)) as ex:
+            with ThreadPoolExecutor(max_workers=min(len(to_process), 8)) as ex:
                 futures = {
                     ex.submit(ResolverRegistry.resolve, ep_url, session): (ep_url, ep_name)
                     for ep_url, ep_name in to_process
@@ -372,34 +364,34 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
             for (ep_url, ep_name), direct in resolved.items():
                 if direct:
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
-                    items.append((direct, safe_filename(f"{ep_name}.{ext}"), ep_name))
+                    items.append((direct, safe_filename(f"{ep_name}.{ext}"), ep_name, ep_url))
                 else:
                     safe_print(f"  [✗] Could not extract link: {ep_name}")
                     summary.add_failed(ep_name)
 
             if items:
                 per_thread_bw = (bw // len(items)) if bw else 0
-                with ThreadPoolExecutor(max_workers=len(items)) as ex:
-                    thread_futures = {}
-                    for direct, fname, ep_name in items:
-                        thread_proc = ProcessContainer()
-                        f = ex.submit(
-                            download_file,
-                            direct, folder, fname, summary,
-                            series_url=url, series_name=name,
-                            bandwidth_limit=per_thread_bw, quality=quality,
-                            current_process=thread_proc,
-                            stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
-                            parallel_mode=True,
-                        )
-                        thread_futures[f] = ep_name
-                    for f in as_completed(thread_futures):
-                        ep_name = thread_futures[f]
-                        try:
-                            f.result()
-                        except Exception as e:
-                            safe_print(f"  [✗] Thread error for {ep_name}: {e}")
-                            summary.add_failed(ep_name)
+                ex = ThreadPoolExecutor(max_workers=min(len(items), 8))
+                thread_futures = {}
+                for direct, fname, ep_name, src_url in items:
+                    thread_proc = ProcessContainer()
+                    f = ex.submit(
+                        download_file,
+                        direct, folder, fname, summary,
+                        series_url=url, series_name=name,
+                        bandwidth_limit=per_thread_bw, quality=quality,
+                        current_process=thread_proc,
+                        stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                        parallel_mode=True, source_url=src_url,
+                    )
+                    thread_futures[f] = ep_name
+                for f, ep_name in _drain_futures_interruptible(thread_futures, stop, executor=ex):
+                    try:
+                        f.result()
+                    except Exception as e:
+                        safe_print(f"  [✗] Thread error for {ep_name}: {e}")
+                        summary.add_failed(ep_name)
+                ex.shutdown(wait=False, cancel_futures=True)
 
     if summary.failed == 0 and not _stopped(ctx):
         mark_series_complete(url)
@@ -412,7 +404,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                 break
             safe_print(f"\n[*] Retrying: {failed_fname}")
             stem = re.sub(r'\.(mkv|mp4)$', '', failed_fname, flags=re.IGNORECASE).lower()
-            ep_url = next((l for l in links if stem in l.lower().replace('.html', '')), None)
+            ep_url = next((l for l in links if l.lower().replace('.html', '').rstrip('/').endswith(stem)), None)
             if not ep_url:
                 safe_print(f"  [!] Could not find episode URL for retry")
                 retry_summary.add_failed(failed_fname)
@@ -425,7 +417,8 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                               bandwidth_limit=bw, quality=quality,
                               current_process=cur_proc, stop_flag=stop,
                               pause_flag=pause,
-                              wait_fn=ctx.get('wait'))
+                              wait_fn=ctx.get('wait'),
+                              source_url=ep_url)
             else:
                 safe_print(f"  [✗] Could not extract link on retry")
                 retry_summary.add_failed(failed_fname)

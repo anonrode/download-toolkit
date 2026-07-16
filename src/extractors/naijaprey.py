@@ -18,8 +18,16 @@ def extract_naijaprey(url, session, ctx=None):
         a['href'] for a in soup.find_all('a', href=True)
         if 'vdl.np-downloader.com' in a['href']
     ))
-    safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
+    if not ep_links:
+        safe_print("[!] No vdl.np-downloader.com links found on page")
+        diagnose_page(soup, url, "vdl.np-downloader.com links")
+        return
     ep_links = _filter_by_episode_range(ep_links, ctx)
+    if not ep_links:
+        safe_print("[!] No episodes matched that range")
+        return
+    safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
+    _notify_start(name, len(ep_links))
     summary = DownloadSummary()
 
     for i, ep_url in enumerate(ep_links, 1):
@@ -52,8 +60,9 @@ def extract_naijaprey(url, session, ctx=None):
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
                     download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
                                   series_url=url, series_name=name,
-                                  bandwidth_limit=bw, current_process=cur_proc,
-                                  stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
+                                  bandwidth_limit=bw, quality=quality, current_process=cur_proc,
+                                  stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                                  source_url=ws_url)
                 else:
                     safe_print(f"  [✗] Wildshare failed")
                     summary.add_failed(ep_name)

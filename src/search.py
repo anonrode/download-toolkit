@@ -179,6 +179,11 @@ def _head_check(args):
         return url, r.status_code, r.url
     except Exception:
         return url, 0, url
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
 
 def _verify_403(url, base):
     """GET + title check to confirm a 403 URL is real."""
@@ -187,11 +192,22 @@ def _verify_403(url, base):
     try:
         r = s.get(url, timeout=15, allow_redirects=True)
         if r.status_code == 200:
-            title = r.text[r.text.find('<title>')+7:r.text.find('</title>')].lower()
-            if base.replace('-', ' ') in title or base in title:
-                return url
+            # Guard both indices: if <title> is absent, find() returns -1 and
+            # the slice becomes r.text[6:-1] — nearly the whole page — which
+            # makes almost any page "match" and verifies bogus 403 hits.
+            start = r.text.find('<title>')
+            end = r.text.find('</title>')
+            if start != -1 and end != -1 and end > start:
+                title = r.text[start + 7:end].lower()
+                if base.replace('-', ' ') in title or base in title:
+                    return url
     except Exception:
         pass
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
     return None
 
 def _probe_patterns(base_url, patterns, base, season_slug, year, cancel_event=None):
@@ -260,6 +276,11 @@ def _plutomovies_fetch_page(query_clean, page, timeout=15):
         return r.text
     except Exception:
         return None
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
 
 def _search_plutomovies(query, results, lock, timeout=15):
     """
@@ -347,7 +368,7 @@ def _search_site(domain, wave1, wave2, base, season_slug, year,
         url = _probe_patterns(domain, w2, base, season_slug, year, cancel_event)
     else:
         # Normal search — all patterns at once
-        url = _probe_patterns(domain, wave1 + wave2, base, season_slug, year)
+        url = _probe_patterns(domain, wave1 + wave2, base, season_slug, year, cancel_event)
 
     if url:
         with lock:
@@ -361,7 +382,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
     if not base:
         safe_print("[!] Empty query")
         return []
-    cache_key = f"{site_filter or 'all'}:{base}"
+    cache_key = f"{site_filter or 'all'}:{base}:{season_slug}:{year}:{'fast' if fast else 'full'}:{hint or ''}"
 
     use_cache = True
     try:
@@ -381,7 +402,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
 
     results = []
     lock    = threading.Lock()
-    cancel_event = threading.Event() if fast else None
+    cancel_event = threading.Event()
 
     threads = []
     if site_filter not in ('dramakey', 'plutomovies'):
@@ -413,8 +434,16 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
 
     for t in threads:
         t.start()
+    # Join against a single shared deadline. A per-thread join(timeout=timeout)
+    # would wait the FULL timeout for EACH thread in turn, so a hung search
+    # could block for timeout * len(threads) (~135s at the 45s default) instead
+    # of timeout. A timed join (not a bare join) also keeps the main thread
+    # responsive to Ctrl+C on Windows.
+    deadline = time.time() + timeout
     for t in threads:
-        t.join(timeout=timeout)
+        t.join(timeout=max(0, deadline - time.time()))
+    if any(t.is_alive() for t in threads):
+        cancel_event.set()
 
     if results and use_cache:
         _cache_set(cache_key, results)
@@ -526,7 +555,7 @@ def fsearch(raw_query, session=None):
     # Load dynamic search timeout
     timeout = 45
     try:
-        config_path = os.path.join(BASE_DIR, '.config.json')
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
         if os.path.exists(config_path):
             with open(config_path) as f:
                 timeout = int(json.load(f).get('search_timeout', 45))

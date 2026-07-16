@@ -19,8 +19,16 @@ def extract_9jarocks(url, session, ctx=None):
         for a in soup.find_all('a', href=True)
         if 'loadedfiles.org' in a['href']
     ))
-    safe_print(f"[*] Found {len(lf_links)} file(s) — saving to: {folder}")
+    if not lf_links:
+        safe_print("[!] No loadedfiles.org links found on page")
+        diagnose_page(soup, url, "loadedfiles.org links")
+        return
     lf_links = _filter_by_episode_range(lf_links, ctx)
+    if not lf_links:
+        safe_print("[!] No episodes matched that range")
+        return
+    safe_print(f"[*] Found {len(lf_links)} file(s) — saving to: {folder}")
+    _notify_start(name, len(lf_links))
     summary = DownloadSummary()
 
     for i, (label, lf_url) in enumerate(lf_links, 1):
@@ -44,8 +52,9 @@ def extract_9jarocks(url, session, ctx=None):
             ext = 'mkv' if '.mkv' in direct else 'mp4'
             download_file(direct, folder, safe_filename(f"{base_fname}.{ext}"), summary,
                           series_url=url, series_name=name,
-                          bandwidth_limit=bw, current_process=cur_proc,
-                          stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
+                          bandwidth_limit=bw, quality=quality, current_process=cur_proc,
+                          stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                          source_url=lf_url)
         else:
             safe_print(f"  [✗] Could not extract: {base_fname}")
             summary.add_failed(base_fname)

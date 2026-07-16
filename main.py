@@ -28,83 +28,50 @@ from src.downloader import CONFIG_DIR
 CONFIG_FILE = os.path.join(CONFIG_DIR, '.config.json')
 QUEUE_FILE  = os.path.join(CONFIG_DIR, '.queue.json')
 CONTROL_FILE = os.path.join(CONFIG_DIR, '.download_control')
+AUTO_UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, '.auto_update_state.json')
 
 # ─── GLOBAL STATE ─────────────────────────────────────────────
-from src.downloader import ProcessContainer
+from src.state import AppState
 
-class DownloadState:
-    series_url = None
-    series_name = None
-    filepath = None
-    episode_name = None
-    expected_size = 0
-
-CURRENT_PROCESS = ProcessContainer()
-STOP_FLAG       = threading.Event()   # stops current batch — extractor loops check this
-EXIT_FLAG       = threading.Event()   # exits entire script — REPL loop checks this
-PAUSE_FLAG      = threading.Event()   # requests safe backend pause/resume
-CONTROL_STOP    = threading.Event()
-CONTROL_THREAD  = [None]
-TMUX_CONTROLS   = [False]
-
-# Lock for thread-safe access to CURRENT_* globals
-CURRENT_STATE_LOCK = threading.Lock()
-
-def _set_current_state(series_url, series_name, episode_name, filepath, expected_size):
-    """Safely set CURRENT_* globals with locking for parallel downloads."""
-    global CURRENT_SERIES_URL, CURRENT_SERIES_NAME, CURRENT_FILEPATH, CURRENT_EPISODE_NAME, CURRENT_EXPECTED_SIZE
-    with CURRENT_STATE_LOCK:
-        DownloadState.series_url = series_url
-        DownloadState.series_name = series_name
-        DownloadState.episode_name = episode_name
-        DownloadState.filepath = filepath
-        DownloadState.expected_size = expected_size or 0
-
-def _reset_current_state():
-    """Reset all CURRENT_* tracking variables between downloads."""
-    global CURRENT_SERIES_URL, CURRENT_SERIES_NAME, CURRENT_FILEPATH, CURRENT_EPISODE_NAME, CURRENT_EXPECTED_SIZE
-    DownloadState.series_url = None
-    DownloadState.series_name = None
-    DownloadState.filepath = None
-    DownloadState.episode_name = None
-    DownloadState.expected_size = 0
-
-def _has_active_download():
-    return bool(DownloadState.series_url or CURRENT_PROCESS.proc)
+app = AppState()
 
 def _record_pause_state():
-    if not (DownloadState.series_url and DownloadState.episode_name and DownloadState.filepath):
+    state = app.get_download_state()
+    if not (state['series_url'] and state['episode_name'] and state['filepath']):
         return
     try:
         from src.downloader import DownloadReceipt, mark_episode_current
-        progress_bytes = os.path.getsize(DownloadState.filepath) if os.path.exists(DownloadState.filepath) else 0
-        episode_key = f"{DownloadState.series_url}:{DownloadState.episode_name}"
+        progress_bytes = os.path.getsize(state['filepath']) if os.path.exists(state['filepath']) else 0
+        episode_key = f"{state['series_url']}:{state['episode_name']}"
         DownloadReceipt.mark_paused(
             episode_key,
-            DownloadState.filepath,
+            state['filepath'],
             progress_bytes,
-            DownloadState.expected_size,
+            state['expected_size'],
         )
         mark_episode_current(
-            DownloadState.series_url,
-            DownloadState.series_name or 'Download',
-            DownloadState.episode_name,
+            state['series_url'],
+            state['series_name'] or 'Download',
+            state['episode_name'],
         )
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            print(f"  [!] Could not save pause state: {e}")
+        except Exception:
+            pass
 
 def _request_pause(source='control'):
-    if PAUSE_FLAG.is_set() or not _has_active_download():
+    if app.pause.is_set() or not app.has_active_download():
         return
-    PAUSE_FLAG.set()
+    app.pause.set()
     _record_pause_state()
     safe_source = 'tmux' if source == 'tmux' else source
     print(f"\n  [pause] Download paused ({safe_source}). Press Ctrl+P to resume.\n")
 
 def _request_resume(source='control'):
-    if not PAUSE_FLAG.is_set():
+    if not app.pause.is_set():
         return
-    PAUSE_FLAG.clear()
+    app.pause.clear()
     safe_source = 'tmux' if source == 'tmux' else source
     print(f"\n  [resume] Resuming download ({safe_source})...\n")
 
@@ -123,7 +90,7 @@ def _consume_control_request():
     elif request == 'resume':
         _request_resume('tmux')
     elif request == 'toggle':
-        if PAUSE_FLAG.is_set():
+        if app.pause.is_set():
             _request_resume('tmux')
         else:
             _request_pause('tmux')
@@ -146,30 +113,30 @@ def start_termux_pause_controls():
         )
         if result.returncode != 0:
             return False
-        CONTROL_STOP.clear()
-        CONTROL_THREAD[0] = threading.Thread(
+        app.control_stop.clear()
+        t = threading.Thread(
             target=_watch_termux_controls,
             name='termux-pause-control',
             daemon=True,
         )
-        CONTROL_THREAD[0].start()
-        TMUX_CONTROLS[0] = True
+        t.start()
+        app.tmux_active = True
         return True
     except Exception:
         return False
 
 def _watch_termux_controls():
-    while not CONTROL_STOP.wait(0.2):
+    while not app.control_stop.wait(0.2):
         _consume_control_request()
 
 def stop_termux_pause_controls():
-    CONTROL_STOP.set()
+    app.control_stop.set()
     try:
         if os.path.exists(CONTROL_FILE):
             os.remove(CONTROL_FILE)
     except OSError:
         pass
-    if TMUX_CONTROLS[0]:
+    if app.tmux_active:
         try:
             subprocess.run(
                 ['tmux', 'unbind-key', '-n', 'C-p'],
@@ -180,7 +147,7 @@ def stop_termux_pause_controls():
             )
         except Exception:
             pass
-    TMUX_CONTROLS[0] = False
+    app.tmux_active = False
 
 # ─── CONFIG ───────────────────────────────────────────────────
 DEFAULT_CONFIG = {
@@ -248,7 +215,7 @@ def load_config():
 
 def save_config(cfg):
     try:
-        os.makedirs(BASE_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, 'w') as f:
             json.dump(cfg, f, indent=2)
     except Exception:
@@ -256,16 +223,13 @@ def save_config(cfg):
 
 # ─── SIGNAL HANDLING (Ctrl+C) ─────────────────────────────────
 def setup_signal_handler():
-    global CURRENT_PROCESS, STOP_FLAG, EXIT_FLAG
-    global CURRENT_SERIES_URL, CURRENT_FILEPATH, CURRENT_EXPECTED_SIZE
-
     def handler(sig, frame):
-        # Ctrl+C is cancellation only. Pause/resume belongs to tmux Ctrl+P.
-        if not _has_active_download():
+        # Always set stop flag so any download that starts will see it immediately
+        app.stop.set()
+        app.pause.clear()
+        if not app.has_active_download():
             return
         _record_pause_state()
-        STOP_FLAG.set()
-        PAUSE_FLAG.clear()
         try:
             from src.downloader import terminate_active_processes
             terminate_active_processes()
@@ -279,7 +243,8 @@ def setup_signal_handler():
 
     def sigterm_handler(sig, frame):
         """Called when Android kills Termux from notification or app switcher."""
-        proc = CURRENT_PROCESS.proc
+        _record_pause_state()
+        proc = app.current_process.proc
         if proc:
             try: proc.terminate()
             except Exception: pass
@@ -313,29 +278,8 @@ def setup_signal_handler():
 # Raw mode listener removed — it caused terminal glitches on Termux.
 # Ctrl+P pause control is handled by tmux; Ctrl+C cancels the active batch.
 
-def _quality_str(q):
-    q = str(q).lower()
-    if '2160' in q or '4k' in q: return 'bestvideo[height<=2160]+bestaudio/best[height<=2160]'
-    if '1080' in q: return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
-    if '720'  in q: return 'bestvideo[height<=720]+bestaudio/best[height<=720]'
-    if '480'  in q: return 'bestvideo[height<=480]+bestaudio/best[height<=480]'
-    if '360'  in q: return 'bestvideo[height<=360]+bestaudio/best[height<=360]'
-    if 'best' in q: return 'bestvideo+bestaudio/best'
-    return 'bestvideo[height<=480]+bestaudio/best[height<=480]'
-
 def _make_ctx(cfg):
-    return {
-        'stop':            STOP_FLAG,
-        'exit':            EXIT_FLAG,
-        'pause':           PAUSE_FLAG,
-        'bandwidth':       cfg.get('bandwidth', 0),
-        'quality':         _quality_str(cfg.get('quality', '480p')),
-        'social_quality':  cfg.get('social_quality', '720p'),
-        'log_level':       cfg.get('log_level', 'normal'),
-        'parallel':        cfg.get('parallel', 1),
-        'current_process': CURRENT_PROCESS,
-        'disabled_sites':  cfg.get('disabled_sites', []),
-    }
+    return app.make_ctx(cfg)
 
 def _parse_episode_selection(spec):
     selected = set()
@@ -374,7 +318,7 @@ def load_queue():
 
 def save_queue(q):
     try:
-        os.makedirs(BASE_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(QUEUE_FILE), exist_ok=True)
         with open(QUEUE_FILE, 'w') as f:
             json.dump(q, f, indent=2)
     except Exception:
@@ -425,7 +369,7 @@ def queue_run(session, cfg):
     ctx = _make_ctx(cfg)
     remaining = []
     for index, url in enumerate(q):
-        if STOP_FLAG.is_set():
+        if app.stop.is_set():
             remaining.extend(q[index:])
             break
         outcomes = process_link_queue([url], session, ctx)
@@ -681,7 +625,11 @@ def handle_settings(parts, cfg):
                 bw = input("Enter limit in KB/s (0 for unlimited): ").strip()
                 cfg['bandwidth'] = int(bw)
                 save_config(cfg)
-                print(f"[ok] Bandwidth: {'unlimited' if not cfg['bandwidth'] else f'{cfg['bandwidth']}KB/s'}")
+                # Compute the label separately: a nested same-quote f-string
+                # here is a SyntaxError on Python < 3.12 (Termux ships 3.11),
+                # which would fail to parse the whole module at import.
+                bw_label = 'unlimited' if not cfg['bandwidth'] else f"{cfg['bandwidth']}KB/s"
+                print(f"[ok] Bandwidth: {bw_label}")
             except ValueError:
                 print("[!] Invalid number")
             except (KeyboardInterrupt, EOFError):
@@ -1007,7 +955,7 @@ def handle_resume_command(session, cfg):
         choice = int(input("\n  Pick number to resume (0 to cancel): ").strip())
     except (ValueError, EOFError):
         return
-    if choice == 0 or choice > len(items):
+    if choice < 1 or choice > len(items):
         return
     url = items[choice - 1][0]
     print(f"\n[*] Resuming: {url[:60]}")
@@ -1017,7 +965,7 @@ def handle_resume_command(session, cfg):
 # ─── AUTO UPDATE ──────────────────────────────────────────────
 def auto_update(cfg=None, announce=True):
     script_dir  = os.path.dirname(os.path.abspath(__file__))
-    stamp_file  = os.path.join(script_dir, '.last_pull')
+    stamp_file  = AUTO_UPDATE_STATE_FILE
     days = int((cfg or {}).get('auto_update_days', 7))
     pull_interval = max(1, days) * 24 * 60 * 60
 
@@ -1027,12 +975,16 @@ def auto_update(cfg=None, announce=True):
                 last = float(open(stamp_file).read().strip())
                 if time.time() - last < pull_interval:
                     return False
-        except Exception:
-            pass
+        except (ValueError, OSError):
+            try:
+                os.remove(stamp_file)
+            except OSError:
+                pass
         return True
 
     def _stamp_pull():
         try:
+            os.makedirs(os.path.dirname(stamp_file), exist_ok=True)
             open(stamp_file, 'w').write(str(time.time()))
         except Exception:
             pass
@@ -1268,7 +1220,7 @@ def handle_retry_failed(session, cfg):
     ])
     ctx = _make_ctx(cfg)
     for url, _ in failed_urls:
-        if STOP_FLAG.is_set():
+        if app.stop.is_set():
             break
         process_link_queue([url], session, ctx)
 
@@ -1431,15 +1383,23 @@ def watch_clipboard(session, cfg):
     print("[📋] Clipboard watcher active! Copy any movie/series link to automatically download...")
     print("[📋] Press Ctrl+C once to exit watch mode and return to main menu.")
     last_text = ""
-    interval = cfg.get('clipboard_check_interval_sec', 2)
-    STOP_FLAG.clear()
-    
+    # Clamp at read time: a hand-edited .config.json can hold 0 (or negative),
+    # which would make the poll loop below spin at 100% CPU spawning the
+    # clipboard probe with no sleep. The settings menu clamps 1-10; enforce
+    # the floor here too since watch reads the raw value.
+    interval = max(1, int(cfg.get('clipboard_check_interval_sec', 2) or 1))
+    watch_stop = threading.Event()
+
     # Pre-load/install pyperclip on Windows if termux-clipboard-get is not present
     has_termux_clip = False
     try:
-        subprocess.run(['termux-clipboard-get', '--help'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # timeout guards against a same-named binary that blocks on a
+        # clipboard service — otherwise watch hangs here at startup.
+        subprocess.run(['termux-clipboard-get', '--help'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=2)
         has_termux_clip = True
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
         
     if not has_termux_clip:
@@ -1478,7 +1438,7 @@ def watch_clipboard(session, cfg):
     except Exception:
         pass
 
-    while not STOP_FLAG.is_set():
+    while not watch_stop.is_set():
         try:
             text = get_clip()
             if text and text != last_text:
@@ -1488,7 +1448,7 @@ def watch_clipboard(session, cfg):
                     extractor = detect_site(text)
                     if extractor:
                         print(f"\n[📋] Detected download URL in clipboard: {text[:70]}")
-                        _reset_current_state()
+                        app.reset_download_state()
                         ctx = _make_ctx(cfg)
                         from src.extractors import process_link_queue
                         process_link_queue([text], session, ctx)
@@ -1496,22 +1456,21 @@ def watch_clipboard(session, cfg):
                             last_text = get_clip()
                         except Exception:
                             pass
+        except KeyboardInterrupt:
+            break
         except Exception as e:
             print(f"[!] Clipboard watch error: {e}")
-            
+
         for _ in range(int(interval * 10)):
-            if STOP_FLAG.is_set():
+            if watch_stop.is_set():
                 break
             time.sleep(0.1)
 
-    STOP_FLAG.clear()
     print("\n[📋] Clipboard watcher stopped.")
 
 
 # ─── MAIN REPL ────────────────────────────────────────────────
 def main():
-    global STOP_FLAG, EXIT_FLAG
-
     wake_proc = setup_android()
     cfg = load_config()
 
@@ -1529,12 +1488,12 @@ def main():
         except Exception:
             pass
 
-    from src.downloader import show_history, register_state_callback, set_output_mode, make_session
+    from src.downloader import show_history, register_state_callback, register_app_state, set_output_mode, make_session
     from src.extractors import process_link_queue
     from src.search import search, fsearch, clear_search_cache
 
-    # Register callback for download state tracking
-    register_state_callback(_set_current_state)
+    register_state_callback(app.set_download_state)
+    register_app_state(app)
 
     set_output_mode(cfg.get('log_level', 'normal'))
     session = make_session()
@@ -1548,14 +1507,7 @@ def main():
         print("[*] Termux control: Ctrl+P = pause/resume")
 
     while True:
-        if EXIT_FLAG.is_set():
-            print("\n[*] Exiting...")
-            _release_wake_lock()
-            break
-        # Reset batch state between commands
-        _reset_current_state()
-        STOP_FLAG.clear()
-        PAUSE_FLAG.clear()
+        app.reset_for_next_command()
 
         try:
             raw = input("\n> ").strip()
@@ -1623,23 +1575,34 @@ def main():
             handle_resume_command(session, cfg)
 
         elif lower == 'clip':
+            clipped = ''
             try:
                 result  = subprocess.run(['termux-clipboard-get'],
                                          capture_output=True, text=True, timeout=5)
                 clipped = result.stdout.strip()
-                if clipped.startswith('http'):
-                    print(f"[*] From clipboard: {clipped[:70]}")
-                    _reset_current_state()
-                    ctx = _make_ctx(cfg)
-                    process_link_queue([clipped], session, ctx)
-                elif clipped:
-                    print(f"[!] Not a URL: {clipped[:60]}")
-                else:
-                    print("[!] Clipboard is empty")
             except FileNotFoundError:
-                print("[!] termux-clipboard-get not found — pkg install termux-api")
+                # Fallback to pyperclip on non-Termux platforms
+                try:
+                    import pyperclip
+                    clipped = pyperclip.paste().strip()
+                except ImportError:
+                    print("[!] Install pyperclip (pip install pyperclip) or use Termux with termux-api")
+                    continue
+                except Exception as e:
+                    print(f"[!] Clipboard error: {e}")
+                    continue
             except Exception as e:
                 print(f"[!] Clipboard error: {e}")
+                continue
+            if clipped and clipped.startswith('http'):
+                print(f"[*] From clipboard: {clipped[:70]}")
+                app.reset_download_state()
+                ctx = _make_ctx(cfg)
+                process_link_queue([clipped], session, ctx)
+            elif clipped:
+                print(f"[!] Not a URL: {clipped[:60]}")
+            else:
+                print("[!] Clipboard is empty")
 
         elif lower in ('watch', '/watch', 'watcher'):
             watch_clipboard(session, cfg)
@@ -1680,7 +1643,6 @@ def main():
 
         elif lower == 'update':
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            stamp_file = os.path.join(script_dir, '.last_pull')
             print("[*] Checking toolkit updates...")
             try:
                 before = subprocess.run(
@@ -1689,10 +1651,6 @@ def main():
                     text=True, timeout=5, stdin=subprocess.DEVNULL
                 ).stdout.strip()
 
-                # Check for local changes BEFORE pulling — modified tracked
-                # files silently block `git pull` even with exit code 0.
-                # Untracked files (??) like .last_pull and __pycache__ are
-                # intentionally ignored — they never block git pull.
                 status_out = subprocess.run(
                     ['git', 'status', '--porcelain'],
                     cwd=script_dir, capture_output=True,
@@ -1726,16 +1684,17 @@ def main():
                     cwd=script_dir, capture_output=True,
                     text=True, timeout=30, stdin=subprocess.DEVNULL
                 )
-                try:
-                    open(stamp_file, 'w').write(str(time.time()))
-                except Exception:
-                    pass
 
                 if pull.returncode != 0:
                     print("[!] git pull failed:")
                     err = (pull.stderr or pull.stdout or '').strip()
                     print(f"      {err[:400]}")
                 else:
+                    try:
+                        os.makedirs(os.path.dirname(AUTO_UPDATE_STATE_FILE), exist_ok=True)
+                        open(AUTO_UPDATE_STATE_FILE, 'w').write(str(time.time()))
+                    except Exception:
+                        pass
                     out = (pull.stdout or '').strip()
                     if 'Already up to date' in out:
                         print("[*] Already up to date")
@@ -1754,7 +1713,7 @@ def main():
                         sys.stdout.flush()
                         time.sleep(0.5)
                         os.execv(sys.executable, [sys.executable] + sys.argv)
-                    else:
+                    elif 'Already up to date' not in out:
                         print("[*] Already up to date")
             except Exception as e:
                 print(f"[!] Update failed: {e}")
@@ -1781,7 +1740,7 @@ def main():
                 url = search(query, session)
                 if url:
                     print(f"\n[*] Downloading: {url[:60]}")
-                    _reset_current_state()
+                    app.reset_download_state()
                     ctx = _make_ctx(cfg)
                     process_link_queue([url], session, ctx)
             else:
@@ -1793,7 +1752,7 @@ def main():
                 url = fsearch(query, session)
                 if url:
                     print(f"\n[*] Downloading: {url[:60]}")
-                    _reset_current_state()
+                    app.reset_download_state()
                     ctx = _make_ctx(cfg)
                     process_link_queue([url], session, ctx)
             else:
@@ -1807,7 +1766,7 @@ def main():
             if not urls:
                 print("[!] No valid URLs found")
                 continue
-            _reset_current_state()
+            app.reset_download_state()
             ctx = _make_ctx(cfg)
             if len(urls) > 3:
                 print(f"[*] {len(urls)} URLs detected")

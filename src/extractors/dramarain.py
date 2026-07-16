@@ -13,7 +13,6 @@ def extract_dramarain(url, session, ctx=None):
     folder = os.path.join(BASE_DIR, safe_filename(name))
 
     site_referer = f'https://{DRAMAKEY_CC}/' if DRAMAKEY_CC in url else f'https://{DRAMARAIN_DOMAIN}/'
-    session.headers['Referer'] = site_referer
     r = safe_get(session, url, referer=site_referer)
     if r is None:
         return
@@ -21,8 +20,11 @@ def extract_dramarain(url, session, ctx=None):
     summary = DownloadSummary()
 
     # Method 1: direct waffi.cloud links (CDN subdomain rotates — drip, japa, etc.)
-    waffi_links = [(a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
-                   if WAFFI_CLOUD_RE.search(a['href'])]
+    # Dedup by href: a page can expose the same episode under two anchors
+    # (e.g. quality variants), which would double-count and skew episode indexing.
+    waffi_links = list(dict.fromkeys(
+        (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
+        if WAFFI_CLOUD_RE.search(a['href'])))
     if waffi_links:
         waffi_links = _filter_by_episode_range(waffi_links, ctx)
         if not waffi_links:
@@ -43,16 +45,18 @@ def extract_dramarain(url, session, ctx=None):
             direct = _strip_preview_param(link)
             download_file(direct, folder, fname, summary,
                           series_url=url, series_name=name,
-                          bandwidth_limit=bw, current_process=cur_proc,
-                          stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
+                          bandwidth_limit=bw, quality=quality, current_process=cur_proc,
+                          stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                          source_url=link)
         if summary.failed == 0 and not _stopped(ctx):
             mark_series_complete(url)
         summary.report()
         return
 
     # Method 2: downloadwella.com / wetafiles.com intermediate links
-    dw_links = [(a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
-                if 'downloadwella.com' in a['href'] or 'wetafiles.com' in a['href']]
+    dw_links = list(dict.fromkeys(
+        (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
+        if 'downloadwella.com' in a['href'] or 'wetafiles.com' in a['href']))
     if dw_links:
         dw_links = _filter_by_episode_range(dw_links, ctx)
         if not dw_links:
@@ -74,8 +78,9 @@ def extract_dramarain(url, session, ctx=None):
             if direct:
                 download_file(direct, folder, fname, summary,
                               series_url=url, series_name=name,
-                              bandwidth_limit=bw, current_process=cur_proc,
-                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
+                              bandwidth_limit=bw, quality=quality, current_process=cur_proc,
+                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                              source_url=ep_url)
             else:
                 safe_print(f"  [✗] Could not resolve link")
                 summary.add_failed(fname)
@@ -86,9 +91,10 @@ def extract_dramarain(url, session, ctx=None):
         return
 
     # Method 3: /download intermediate pages (legacy layout fallback)
-    dl_links = [(a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
-                if any(x in a['href'] for x in
-                       [f'{DRAMARAIN_DOMAIN}/download', f'{DRAMAKEY_CC}/download'])]
+    dl_links = list(dict.fromkeys(
+        (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
+        if any(x in a['href'] for x in
+               [f'{DRAMARAIN_DOMAIN}/download', f'{DRAMAKEY_CC}/download'])))
     if dl_links:
         dl_links = _filter_by_episode_range(dl_links, ctx)
         if not dl_links:
@@ -106,13 +112,13 @@ def extract_dramarain(url, session, ctx=None):
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
                 continue
-            session.headers['Referer'] = site_referer
             direct = ResolverRegistry.resolve(dl_url, session)
             if direct:
                 download_file(direct, folder, fname, summary,
                               series_url=url, series_name=name,
-                              bandwidth_limit=bw, current_process=cur_proc,
-                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
+                              bandwidth_limit=bw, quality=quality, current_process=cur_proc,
+                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                              source_url=dl_url)
             else:
                 safe_print(f"  [✗] Could not resolve link")
                 summary.add_failed(fname)

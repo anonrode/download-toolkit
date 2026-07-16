@@ -12,8 +12,7 @@ def extract_nkiri(url, session, ctx=None):
     folder  = os.path.join(BASE_DIR, safe_filename(name))
     summary = DownloadSummary()
 
-    session.headers['Referer'] = 'https://thenkiri.com/'
-    r = safe_get(session, url, timeout=20)
+    r = safe_get(session, url, timeout=20, referer='https://thenkiri.com/')
     if r is None:
         safe_print("[!] Could not fetch page")
         return
@@ -65,8 +64,10 @@ def extract_nkiri(url, session, ctx=None):
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
                     download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
                                   series_url=url, series_name=name,
-                                  bandwidth_limit=bw, current_process=cur_proc,
-                                  stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
+                                  bandwidth_limit=bw, quality=quality,
+                                  current_process=cur_proc,
+                                  stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                                  source_url=ep_url)
                 else:
                     safe_print(f"  [✗] Could not extract link")
                     summary.add_failed(ep_name)
@@ -74,9 +75,9 @@ def extract_nkiri(url, session, ctx=None):
                 from concurrent.futures import ThreadPoolExecutor, as_completed
                 safe_print(f"\n  [*] Resolving {len(to_process)} link(s)...")
                 resolved = {}
-                with ThreadPoolExecutor(max_workers=len(to_process)) as ex:
+                with ThreadPoolExecutor(max_workers=min(len(to_process), 8)) as ex:
                     futures = {
-                        ex.submit(resolve_downloadwella, ep_url, session): (ep_url, ep_name)
+                        ex.submit(ResolverRegistry.resolve, ep_url, session): (ep_url, ep_name)
                         for ep_url, ep_name in to_process
                     }
                     for f in as_completed(futures):
@@ -90,32 +91,33 @@ def extract_nkiri(url, session, ctx=None):
                 for (ep_url, ep_name), direct in resolved.items():
                     if direct:
                         ext = 'mkv' if '.mkv' in direct else 'mp4'
-                        items.append((direct, safe_filename(f"{ep_name}.{ext}")))
+                        items.append((direct, safe_filename(f"{ep_name}.{ext}"), ep_url))
                     else:
                         safe_print(f"  [✗] Could not extract link: {ep_name}")
                         summary.add_failed(ep_name)
 
                 if items:
                     per_thread_bw = (bw // len(items)) if bw else 0
-                    with ThreadPoolExecutor(max_workers=len(items)) as ex:
-                        tfutures = {}
-                        for direct, fname in items:
-                            thread_proc = ProcessContainer()
-                            tfutures[ex.submit(
-                                download_file,
-                                direct, folder, fname, summary,
-                                series_url=url, series_name=name,
-                                bandwidth_limit=per_thread_bw, quality=quality,
-                                current_process=thread_proc,
-                                stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
-                                parallel_mode=True,
-                            )] = fname
-                        for f in as_completed(tfutures):
-                            try:
-                                f.result()
-                            except Exception as e:
-                                safe_print(f"  [!] Thread error: {e}")
-                                summary.add_failed(tfutures[f])
+                    ex = ThreadPoolExecutor(max_workers=min(len(items), 8))
+                    tfutures = {}
+                    for direct, fname, src_url in items:
+                        thread_proc = ProcessContainer()
+                        tfutures[ex.submit(
+                            download_file,
+                            direct, folder, fname, summary,
+                            series_url=url, series_name=name,
+                            bandwidth_limit=per_thread_bw, quality=quality,
+                            current_process=thread_proc,
+                            stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                            parallel_mode=True, source_url=src_url,
+                        )] = fname
+                    for f, fname in _drain_futures_interruptible(tfutures, stop, executor=ex):
+                        try:
+                            f.result()
+                        except Exception as e:
+                            safe_print(f"  [!] Thread error: {e}")
+                            summary.add_failed(fname)
+                    ex.shutdown(wait=False)
 
         if summary.failed == 0 and not _stopped(ctx):
             mark_series_complete(url)
@@ -127,7 +129,7 @@ def extract_nkiri(url, session, ctx=None):
                 safe_print(f"\n[*] Retrying: {failed_fname}")
                 stem = re.sub(r'\.(mkv|mp4)$', '', failed_fname, flags=re.IGNORECASE).lower()
                 ep_url = next((l for l in dw_links
-                               if stem in l.lower().replace('.html', '')), None)
+                               if l.lower().replace('.html', '').rstrip('/').endswith(stem)), None)
                 if not ep_url:
                     retry_summary.add_failed(failed_fname)
                     continue
@@ -137,6 +139,7 @@ def extract_nkiri(url, session, ctx=None):
                     download_file(direct, folder, safe_filename(f"{stem}.{ext}"),
                                   retry_summary, series_url=url, series_name=name,
                                   bandwidth_limit=bw, current_process=cur_proc,
+                                  source_url=ep_url,
                                   stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
                 else:
                     retry_summary.add_failed(failed_fname)

@@ -189,6 +189,7 @@ def _yt_quality_prompt(default_quality):
         '5': ('2160p', 'bestvideo[height<=2160]+bestaudio/best[height<=2160]'),
     }
     label_to_num = {'360p': '1', '480p': '2', '720p': '3', '1080p': '4', '2160': '5', '2160p': '5', '4k': '5'}
+    default_quality = default_quality or '480p'
     default_label = '480p'
     for label in label_to_num:
         if label in default_quality:

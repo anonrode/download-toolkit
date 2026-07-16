@@ -1,4 +1,5 @@
 from .base import *
+from ..downloader import mark_series_waiting_for_network
 import hashlib
 import base64
 
@@ -202,7 +203,7 @@ def _get_episode_list(show_id, mode='sub'):
     if not data:
         return []
     detail = ((data.get('data') or {}).get('show') or {}).get('availableEpisodesDetail', {})
-    eps    = detail.get('sub', detail.get('dub', []))
+    eps    = detail.get(mode, detail.get('sub', detail.get('dub', [])))
     # Sort numerically where possible, keep specials at end
     def ep_sort_key(e):
         try:
@@ -232,8 +233,14 @@ def extract_allanime(show_id, show_name, episodes, mode='sub', ctx=None):
     safe_print(f'[*] Saving to: {folder}')
 
     total   = len(episodes)
+    if total == 0:
+        safe_print('[*] No episodes to download')
+        return
     pad     = 3 if total >= 100 else 2
     summary = DownloadSummary()
+
+    _notify_start(show_name, total)
+    mark_series_waiting_for_network(f'allanime:{show_id}')
 
     for i, ep_str in enumerate(episodes, 1):
         if _stopped(ctx):
@@ -268,6 +275,7 @@ def extract_allanime(show_id, show_name, episodes, mode='sub', ctx=None):
             download_with_ytdlp(
                 direct, folder, safe_filename(fname), summary,
                 quality=quality, current_process=cur_proc,
+                stop_flag=stop, pause_flag=pause,
             )
         else:
             download_file(

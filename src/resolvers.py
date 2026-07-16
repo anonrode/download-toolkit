@@ -30,21 +30,26 @@ def find_direct_video(text):
             return found[0].rstrip('.,;)')
     return None
 
-def safe_get(session, url, timeout=20, referer=None, retries=3):
+def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
+    if _seen is None:
+        _seen = set()
+    if url in _seen:
+        safe_print(f"      [!] JS redirect loop detected: {url[:60]}")
+        return None
+    _seen.add(url)
     for attempt in range(retries):
         try:
             headers = {'Referer': referer} if referer else {}
             r = session.get(url, timeout=timeout, headers=headers)
-            
+
             m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text)
             if m:
                 redirect_url = m.group(1)
                 if not redirect_url.startswith('http'):
                     redirect_url = urljoin(url, redirect_url)
                 safe_print(f"      [*] Following JS redirect: {redirect_url[:60]}...")
-                if retries > 1:
-                    return safe_get(session, redirect_url, referer=referer, retries=retries - 1)
-            
+                return safe_get(session, redirect_url, referer=referer, retries=max(1, retries - 1), _seen=_seen)
+
             if not r.ok:
                 safe_print(f"      [!] HTTP {r.status_code}: {url[:60]}")
                 return None
@@ -261,17 +266,22 @@ class VidbasicResolver(BaseResolver):
             return None
 
 class EmbedResolver(BaseResolver):
+    KNOWN_EMBED_DOMAINS = [
+        'megaplay.buzz', 'megaplay.cc',
+        'tamilembed.lol',
+        'embedsito.com',
+    ]
+
     @staticmethod
     def can_resolve(url: str) -> bool:
         netloc = urlparse(url).netloc.lower()
-        return any(x in netloc for x in ['embed', 'player', 'iframe', 'megaplay'])
+        return any(netloc == d or netloc.endswith('.' + d) for d in EmbedResolver.KNOWN_EMBED_DOMAINS)
 
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            import requests as std_requests
             headers = {'Referer': session.headers.get('Referer', '')}
-            r = std_requests.get(url, timeout=20, headers=headers)
+            r = requests.get(url, timeout=20, headers=headers)
             if not r or r.status_code != 200:
                 r = session.get(url, timeout=20)
             if not r or r.status_code != 200:
@@ -292,26 +302,25 @@ class VikingFileResolver(BaseResolver):
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            s = requests.Session()
-            s.headers.update({'User-Agent': UA_DESKTOP, 'Referer': 'https://www.naijavault.com/'})
-            
+            headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://www.naijavault.com/'}
+
             r1 = None
             for attempt in range(3):
                 try:
-                    r1 = s.get(url, timeout=15, allow_redirects=False)
+                    r1 = session.get(url, timeout=15, allow_redirects=False, headers=headers)
                     break
                 except Exception:
                     if attempt < 2:
                         time.sleep(2)
                     else:
                         raise
-                        
+
             loc1 = r1.headers.get('location')
             if loc1:
                 r2 = None
                 for attempt in range(3):
                     try:
-                        r2 = s.get(loc1, timeout=15, allow_redirects=False)
+                        r2 = session.get(loc1, timeout=15, allow_redirects=False, headers=headers)
                         break
                     except Exception:
                         if attempt < 2:
@@ -327,9 +336,9 @@ class VikingFileResolver(BaseResolver):
                     return loc1
                 cdn = find_direct_video(r2.text)
                 return cdn if cdn else loc1
-            
+
             if r1.status_code == 200:
-                r1b = s.get(url, timeout=15, allow_redirects=True)
+                r1b = session.get(url, timeout=15, allow_redirects=True, headers=headers)
                 final_url = r1b.url
                 if final_url != url and any(x in final_url for x in ['.mp4', '.mkv', 'cdn', 'download']):
                     return final_url
@@ -358,13 +367,12 @@ class LulaCloudResolver(BaseResolver):
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            s = requests.Session()
-            s.headers.update({'User-Agent': UA_DESKTOP, 'Referer': 'https://www.naijavault.com/'})
-            
+            headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://www.naijavault.com/'}
+
             r1 = None
             for attempt in range(3):
                 try:
-                    r1 = s.get(url, timeout=15, allow_redirects=False)
+                    r1 = session.get(url, timeout=15, allow_redirects=False, headers=headers)
                     break
                 except Exception:
                     if attempt < 2:
@@ -375,7 +383,7 @@ class LulaCloudResolver(BaseResolver):
             loc = r1.headers.get('location')
             if loc:
                 if 'lulacloud' in loc:
-                    r2 = s.get(loc, timeout=15, allow_redirects=False)
+                    r2 = session.get(loc, timeout=15, allow_redirects=False, headers=headers)
                     loc2 = r2.headers.get('location')
                     return loc2 if loc2 else loc
                 return loc
@@ -435,29 +443,37 @@ class DramaGatewayResolver(BaseResolver):
 class NaijaVaultGatewayResolver(BaseResolver):
     @staticmethod
     def can_resolve(url: str) -> bool:
-        netloc = urlparse(url).netloc.lower()
-        path = urlparse(url).path.lower()
+        parsed = urlparse(url)
+        netloc = parsed.netloc.lower()
+        path = parsed.path.lower()
         return 'naijavault.com' in netloc and ('/dl-' in path or '/temp/' in path)
 
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            s = session
-            s.headers['Referer'] = 'https://www.naijavault.com/'
-            
-            # Catch redirects manually
+            # Catch redirects manually. We only need the Location header, so
+            # no stream=True (that left the body unread and the pooled
+            # connection leaked). Close r1 explicitly once the header is read.
             try:
-                r1 = s.get(url, timeout=15, allow_redirects=False, verify=False, stream=True)
+                r1 = session.get(url, timeout=15, allow_redirects=False, verify=False,
+                                 headers={'Referer': 'https://www.naijavault.com/'})
             except TypeError:
-                r1 = s.get(url, timeout=15, allow_redirects=False, stream=True)
-                
+                r1 = session.get(url, timeout=15, allow_redirects=False,
+                                 headers={'Referer': 'https://www.naijavault.com/'})
+
             loc = r1.headers.get('location')
             temp_url = loc if loc else url
-            
             try:
-                r2 = s.get(temp_url, timeout=15, verify=False)
+                r1.close()
+            except Exception:
+                pass
+
+            try:
+                r2 = session.get(temp_url, timeout=15, verify=False,
+                                 headers={'Referer': 'https://www.naijavault.com/'})
             except TypeError:
-                r2 = s.get(temp_url, timeout=15)
+                r2 = session.get(temp_url, timeout=15,
+                                 headers={'Referer': 'https://www.naijavault.com/'})
                 
             if not r2 or r2.status_code != 200:
                 return None
@@ -540,9 +556,15 @@ class ResolverRegistry:
     ]
 
     @classmethod
-    def resolve(cls, url: str, session) -> str:
+    def resolve(cls, url: str, session, _depth=0) -> str:
+        if _depth > 5:
+            safe_print(f"      [!] Resolver depth limit reached — returning: {url[:60]}")
+            return url
+
         # Check if already a direct download link (excluding resolver domains that append filenames)
-        if any(url.endswith(ext) for ext in ['.mp4', '.mkv', '.m3u8', '.webm']):
+        # Match on the path only, so links with query strings (…/file.mp4?token=…) still hit the fast path.
+        _path = urlparse(url).path.lower()
+        if any(_path.endswith(ext) for ext in ['.mp4', '.mkv', '.m3u8', '.webm']):
             parsed = urlparse(url).netloc.lower()
             resolver_domains = ['waffi.cloud', 'loadedfiles.org', 'wildshare.net', 'vikingfile.com', 'lulacloud.com', 'streamtape.com', 'watchadsontape.com', 'vidmoly.me', 'vidbasic.to']
             if not any(dom in parsed for dom in resolver_domains):
@@ -552,8 +574,7 @@ class ResolverRegistry:
             if resolver.can_resolve(url):
                 res = resolver.resolve(url, session)
                 if res and res != url:
-                    # Recursive resolution for nested redirect chains
-                    return cls.resolve(res, session)
+                    return cls.resolve(res, session, _depth=_depth + 1)
                 return res
                 
         # Direct passthrough fallback

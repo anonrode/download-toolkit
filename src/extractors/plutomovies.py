@@ -12,8 +12,7 @@ def extract_plutomovies(url, session, ctx=None):
     folder   = os.path.join(BASE_DIR, safe_filename(name))
     summary  = DownloadSummary()
 
-    session.headers.update({'Referer': PLUTO_BASE + '/'})
-    r = safe_get(session, url, timeout=30)
+    r = safe_get(session, url, timeout=30, referer=PLUTO_BASE + '/')
     if r is None:
         safe_print(f"[!] Could not fetch page: {url[:70]}")
         return
@@ -53,6 +52,10 @@ def extract_plutomovies(url, session, ctx=None):
         season_links = [url]
 
     safe_print(f"[*] Found {len(season_links)} season(s)")
+    # Track whether any season yielded episodes. If every season scrapes/filters
+    # to zero, we must NOT mark the series complete (that wipes resume state and
+    # reports false success on a markup change or non-matching filter).
+    episodes_seen = False
 
     def _resolve_ep(ep_url):
         """Fetch ep page and resolve CDN url. Returns (dl_link, direct) or (None, None)."""
@@ -142,7 +145,12 @@ def extract_plutomovies(url, session, ctx=None):
             return 0
         all_eps.sort(key=ep_sort)
         all_eps = _filter_by_episode_range(all_eps, ctx)
+        if not all_eps:
+            safe_print(f"  [*] No episodes matched your selection this season")
+            continue
+        episodes_seen = True
         safe_print(f"  [*] Total: {len(all_eps)} episode(s)")
+        _notify_start(name, len(all_eps))
 
 
         # Resolve and download each episode immediately.
@@ -203,6 +211,14 @@ def extract_plutomovies(url, session, ctx=None):
                           stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
             time.sleep(0.5)
 
+    if not episodes_seen and not _stopped(ctx):
+        # Every season scraped/filtered to zero — do NOT report success or
+        # wipe resume state. Surface the breakage instead.
+        safe_print("[!] No episodes found across any season")
+        diagnose_page(soup, url, "episode links")
+        summary.report()
+        return
+
     if summary.failed == 0 and not _stopped(ctx):
         mark_series_complete(url)
     summary.report()
@@ -218,6 +234,7 @@ def _yt_quality_prompt(default_quality):
     }
     # Work out which number matches the current default
     label_to_num = {'360p': '1', '480p': '2', '720p': '3', '1080p': '4', '2160': '5', '2160p': '5', '4k': '5'}
+    default_quality = default_quality or '480p'
     default_label = '480p'
     for label in label_to_num:
         if label in default_quality:
