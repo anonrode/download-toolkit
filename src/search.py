@@ -29,6 +29,35 @@ from .downloader import safe_print, UA_DESKTOP, BASE_DIR, CONFIG_DIR
 CACHE_FILE    = os.path.join(os.path.dirname(__file__), '.search_cache.json')
 CACHE_TTL     = 86400  # 24 hours in seconds
 
+def _is_termux():
+    return os.path.exists('/storage/emulated/0')
+
+def _search_workers(default=12):
+    """Keep mobile search responsive by avoiding large request bursts."""
+    workers = 6 if _is_termux() else default
+    try:
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path, encoding='utf-8') as f:
+                workers = int(json.load(f).get('search_workers', workers))
+    except Exception:
+        pass
+    # Clamp to a sane range. Ceiling is an absolute burst cap (not `default`),
+    # so an explicit config value can raise workers above the default while
+    # still guarding against a runaway request burst.
+    return max(2, min(workers, 32))
+
+def _search_timeout(default=45):
+    timeout = default
+    try:
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path, encoding='utf-8') as f:
+                timeout = int(json.load(f).get('search_timeout', timeout))
+    except Exception:
+        pass
+    return timeout
+
 def _load_cache():
     try:
         if os.path.exists(CACHE_FILE):
@@ -222,19 +251,23 @@ def _probe_patterns(base_url, patterns, base, season_slug, year, cancel_event=No
     results_map    = {}
     candidates_403 = []
 
-    with ThreadPoolExecutor(max_workers=12) as ex:
+    ex = ThreadPoolExecutor(max_workers=_search_workers(12))
+    try:
         futures = {ex.submit(_head_check, (url, domain)): url for url in urls}
         for future in as_completed(futures):
             if cancel_event and cancel_event.is_set():
-                for f in futures:
-                    f.cancel()
                 break
             orig_url = futures[future]
             try:
                 _, status, final_url = future.result()
                 results_map[orig_url] = (status, final_url)
+                if status == 200:
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    return final_url
             except Exception:
                 results_map[orig_url] = (0, orig_url)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
     # Walk patterns in priority order — 200 hits first
     for u in urls:
@@ -249,12 +282,15 @@ def _probe_patterns(base_url, patterns, base, season_slug, year, cancel_event=No
             candidates_403.append(final_url)
 
     if candidates_403:
-        with ThreadPoolExecutor(max_workers=3) as ex:
+        verified = {}
+        ex = ThreadPoolExecutor(max_workers=3)
+        try:
             verify_futures = {ex.submit(_verify_403, url, base): url for url in candidates_403}
-            verified = {}
             for f in as_completed(verify_futures):
                 orig = verify_futures[f]
                 verified[orig] = f.result()
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
         for url in candidates_403:
             if verified.get(url):
                 return verified[url]
@@ -514,16 +550,7 @@ def search(raw_query, session=None):
         site_filter = 'plutomovies'
         query = query[:-12].strip()
 
-    # Load dynamic search timeout
-    timeout = 45
-    try:
-        config_path = os.path.join(CONFIG_DIR, '.config.json')
-        if os.path.exists(config_path):
-            with open(config_path) as f:
-                timeout = int(json.load(f).get('search_timeout', 45))
-    except Exception:
-        pass
-
+    timeout = _search_timeout(45)
     safe_print(f"\n[*] Searching: {query}")
     results = _run_search(query, site_filter=site_filter, fast=False, timeout=timeout)
     return _present_results(results, raw_query)
@@ -552,16 +579,7 @@ def fsearch(raw_query, session=None):
     else:
         safe_print(f"\n[*] Fast search: {query}")
 
-    # Load dynamic search timeout
-    timeout = 45
-    try:
-        config_path = os.path.join(CONFIG_DIR, '.config.json')
-        if os.path.exists(config_path):
-            with open(config_path) as f:
-                timeout = int(json.load(f).get('search_timeout', 45))
-    except Exception:
-        pass
-
+    timeout = _search_timeout(45)
     results = _run_search(query, site_filter=site_filter, fast=True, hint=hint, timeout=timeout)
     return _present_results(results, raw_query)
 

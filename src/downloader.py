@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import requests
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 try:
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -223,11 +223,32 @@ def ui_screen(title, rows=None, footer=None):
             print(footer)
 
 def register_process(proc):
-    """Track subprocesses so Ctrl+C can stop parallel downloads too."""
+    """Track subprocesses so Ctrl+C can stop parallel downloads too.
+
+    Stop-gated to close the parallel-download respawn race. A worker can
+    finish subprocess.Popen() in the narrow window *after* Ctrl+C's kill
+    sweep has already snapshotted ACTIVE_PROCESSES, leaving a freshly
+    spawned aria2c that nothing kills — with N parallel workers there are N
+    such windows, which is why one of two/three survived Ctrl+C.
+
+    We decide add-or-refuse under the SAME lock terminate_active_processes()
+    uses to snapshot, and the SIGINT handler sets app.stop BEFORE calling
+    the terminator. The lock therefore totally orders the two: if stop is
+    already set we refuse and kill the child ourselves; otherwise it is
+    tracked and the terminator's later snapshot includes it. The decision is
+    per-call, so this holds for any number of racing workers (N-proof)."""
     if not proc:
         return
+    born_after_stop = False
     with PROCESS_LOCK:
-        ACTIVE_PROCESSES.add(proc)
+        if _app_state is not None and _app_state.stop.is_set():
+            born_after_stop = True
+        else:
+            ACTIVE_PROCESSES.add(proc)
+    # Terminate outside the lock — _graceful_terminate can wait up to 3s and
+    # must never hold PROCESS_LOCK against other workers' register/unregister.
+    if born_after_stop:
+        _graceful_terminate(proc)
 
 def unregister_process(proc):
     if not proc:
@@ -276,6 +297,11 @@ def _drain_futures_interruptible(futures, stop_flag=None, poll=0.3, executor=Non
             done_now = [f for f in pending if f.done()]
             for f in done_now:
                 yield f, pending.pop(f)
+            for f, filename in list(pending.items()):
+                cancelled = Future()
+                cancelled.cancel()
+                pending.pop(f)
+                yield cancelled, filename
             break
         just_done = [f for f in pending if f.done()]
         if not just_done:
@@ -320,14 +346,19 @@ def _atomic_write_json(filepath, data):
         return False
 
 def _atomic_read_json(filepath, default=None):
-    """Read JSON safely, return default if corrupted."""
+    """Read JSON safely, preserving corrupt files for recovery."""
     try:
         if os.path.exists(filepath):
             with open(filepath, 'r') as f:
                 return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        safe_print(f"  [!] Corrupted JSON: {filepath}, resetting")
-    return default or {}
+    except (json.JSONDecodeError, IOError) as e:
+        backup = f"{filepath}.corrupt-{int(time.time())}"
+        try:
+            os.replace(filepath, backup)
+            safe_print(f"  [!] Corrupted JSON moved to {backup}: {e}")
+        except Exception:
+            safe_print(f"  [!] Corrupted JSON left untouched: {filepath}: {e}")
+    return default.copy() if isinstance(default, dict) else (default or {})
 
 # ─── DOWNLOAD RECEIPT SYSTEM (Single source of truth) ─────────────
 class DownloadReceipt:
@@ -465,13 +496,14 @@ class LiveProgress:
         eta_s = f' — ETA {eta}'            if eta          else ''
         line  = f'  [↓] {self._name}  {pct_s}{spd_s}{eta_s}'
         try:
-            if self._parallel:
-                if int(pct) % 10 == 0:
-                    sys.stdout.write(line + '\n')
+            with PRINT_LOCK:
+                if self._parallel:
+                    if int(pct) % 10 == 0:
+                        sys.stdout.write(line + '\n')
+                        sys.stdout.flush()
+                else:
+                    sys.stdout.write('\r' + line + '   ')
                     sys.stdout.flush()
-            else:
-                sys.stdout.write('\r' + line + '   ')
-                sys.stdout.flush()
         except Exception:
             pass
 
@@ -483,11 +515,12 @@ class LiveProgress:
         size_s = f' ({size_mb:.1f} MB)' if size_mb is not None else ''
         line   = f'  [✓] Done: {self._name}{size_s}'
         try:
-            if self._parallel or not self._started:
-                sys.stdout.write(line + '\n')
-            else:
-                sys.stdout.write('\r' + line + ' ' * 20 + '\n')
-            sys.stdout.flush()
+            with PRINT_LOCK:
+                if self._parallel or not self._started:
+                    sys.stdout.write(line + '\n')
+                else:
+                    sys.stdout.write('\r' + line + ' ' * 20 + '\n')
+                sys.stdout.flush()
         except Exception:
             pass
 
@@ -498,11 +531,12 @@ class LiveProgress:
         update_status(status='Failed', current=self._name)
         line = f'  [✗] Failed: {self._name}'
         try:
-            if self._parallel or not self._started:
-                sys.stdout.write(line + '\n')
-            else:
-                sys.stdout.write('\r' + line + ' ' * 20 + '\n')
-            sys.stdout.flush()
+            with PRINT_LOCK:
+                if self._parallel or not self._started:
+                    sys.stdout.write(line + '\n')
+                else:
+                    sys.stdout.write('\r' + line + ' ' * 20 + '\n')
+                sys.stdout.flush()
         except Exception:
             pass
 
@@ -545,12 +579,9 @@ def load_history():
     with HISTORY_LOCK:
         try:
             os.makedirs(BASE_DIR, exist_ok=True)
-            if os.path.exists(LOG_FILE):
-                with open(LOG_FILE, 'r') as f:
-                    return json.load(f)
         except Exception:
             pass
-        return {}
+        return _atomic_read_json(LOG_FILE, {})
 
 def save_history(history):
     with HISTORY_LOCK:
@@ -566,11 +597,16 @@ def _media_scan(filepath):
         return
     try:
         folder = os.path.dirname(filepath)
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ['termux-media-scan', '-r', folder],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL
         )
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
     except Exception:
         pass
 
@@ -1213,7 +1249,11 @@ def _try_reresolve(source_url, current_url, attempt):
     try:
         from src.resolvers import ResolverRegistry
         safe_print(f"  [*] Re-resolving fresh link...")
-        fresh = ResolverRegistry.resolve(source_url, make_session())
+        session = make_session()
+        try:
+            fresh = ResolverRegistry.resolve(source_url, session)
+        finally:
+            session.close()
         if fresh and fresh != current_url:
             safe_print(f"  [✓] Got fresh CDN link")
             return fresh
@@ -1426,6 +1466,20 @@ def download_with_aria2c(url, folder, filename, summary,
 
             if stopped:
                 progress.fail()
+                # Mirror the PAUSE branch: write a per-worker resume receipt so
+                # every interrupted parallel episode resumes from its partial
+                # bytes. Ctrl+C previously left the shared AppState slot to the
+                # signal handler, which only captured one episode (last writer
+                # wins) — the other N-1 were marked failed and restarted from 0.
+                # Writing from this worker's own locals, keyed per-episode,
+                # bypasses that clobber. _cleanup_session_file removes only the
+                # aria2c session .txt, keeping the partial file + .aria2 sidecar
+                # that aria2c -c needs to resume.
+                if series_url:
+                    current_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+                    ep_key = f"{series_url}:{filename}"
+                    DownloadReceipt.mark_paused(ep_key, filepath, current_size, expected_size)
+                    mark_episode_current(series_url, series_name or folder, filename)
                 _cleanup_session_file(session_file)
                 return False
             if stalled:
@@ -1607,82 +1661,81 @@ def _download_with_requests_impl(s, url, folder, filename, summary, stop_flag=No
             if existing_size > 0:
                 headers['Range'] = f'bytes={existing_size}-'
 
-            r = s.get(url, stream=True, timeout=30, headers=headers)
+            with s.get(url, stream=True, timeout=30, headers=headers) as r:
+                if r.status_code == 416:
+                    # Range not satisfiable, file might be complete
+                    break
 
-            if r.status_code == 416:
-                # Range not satisfiable, file might be complete
-                break
+                if existing_size > 0 and r.status_code == 200:
+                    # Server ignored Range. Do not overwrite a partial file and
+                    # restart from zero; keep it paused so the user can retry.
+                    progress.fail()
+                    safe_print("[!] server did not accept resume range — keeping partial file")
+                    if series_url:
+                        ep_key = f"{series_url}:{filename}"
+                        DownloadReceipt.mark_paused(ep_key, filepath, existing_size, total or expected_size)
+                        mark_episode_current(series_url, series_name or folder, filename)
+                    return False
 
-            if existing_size > 0 and r.status_code == 200:
-                # Server ignored Range. Do not overwrite a partial file and
-                # restart from zero; keep it paused so the user can retry.
-                progress.fail()
-                safe_print("[!] server did not accept resume range — keeping partial file")
-                if series_url:
-                    ep_key = f"{series_url}:{filename}"
-                    DownloadReceipt.mark_paused(ep_key, filepath, existing_size, total or expected_size)
-                    mark_episode_current(series_url, series_name or folder, filename)
-                return False
+                if r.status_code not in (200, 206):
+                    # If we get a 403 or similar link expiry error, we can't resume
+                    progress.fail()
+                    safe_print(f"[!] HTTP {r.status_code} — cannot resume")
+                    summary.add_failed(filename)
+                    return False
 
-            if r.status_code not in (200, 206):
-                # If we get a 403 or similar link expiry error, we can't resume
-                progress.fail()
-                safe_print(f"[!] HTTP {r.status_code} — cannot resume")
-                summary.add_failed(filename)
-                return False
+                mode = 'ab' if existing_size and r.status_code == 206 else 'wb'
+                if mode == 'wb':
+                    existing_size = 0
 
-            mode = 'ab' if existing_size and r.status_code == 206 else 'wb'
-            if mode == 'wb':
-                existing_size = 0
+                if 'text/html' in r.headers.get('content-type', ''):
+                    progress.fail()
+                    safe_print("[!] got HTML instead of video")
+                    summary.add_failed(filename)
+                    return False
 
-            if 'text/html' in r.headers.get('content-type', ''):
-                progress.fail()
-                safe_print("[!] got HTML instead of video")
-                summary.add_failed(filename)
-                return False
+                content_length = int(r.headers.get('content-length', 0))
+                if not total:
+                    total = existing_size + content_length if r.status_code == 206 else content_length
 
-            content_length = int(r.headers.get('content-length', 0))
-            if not total:
-                total = existing_size + content_length if r.status_code == 206 else content_length
+                downloaded = existing_size
+                should_restart = False
 
-            downloaded = existing_size
-            should_restart = False
-
-            with open(filepath, mode) as f:
-                for chunk in r.iter_content(chunk_size=512 * 1024):
-                    if _is_stopped(stop_flag):
-                        progress.fail()
-                        safe_print("[!] stopped")
-                        if series_url:
-                            ep_key = f"{series_url}:{filename}"
-                            DownloadReceipt.mark_paused(ep_key, filepath, os.path.getsize(filepath), total)
-                        return False
-                    if _is_paused(pause_flag):
-                        actual = _save_pause_state()
-                        safe_print(f"  [||] Paused at {actual/(1024*1024):.1f}MB - press Ctrl+P to resume")
-                        while _is_paused(pause_flag) and not _is_stopped(stop_flag):
-                            time.sleep(0.3)
+                with open(filepath, mode) as f:
+                    for chunk in r.iter_content(chunk_size=512 * 1024):
                         if _is_stopped(stop_flag):
                             progress.fail()
+                            safe_print("[!] stopped")
+                            if series_url:
+                                ep_key = f"{series_url}:{filename}"
+                                DownloadReceipt.mark_paused(ep_key, filepath, os.path.getsize(filepath), total)
                             return False
-                        safe_print("  [>] Resuming download...")
-                        should_restart = True
-                        break
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total > 0:
-                            pct = downloaded * 100 / total
-                            ela = max(time.time() - start_time, 0.001)
-                            bytes_per_second = downloaded / ela
-                            spd = bytes_per_second / 1024 / 1024
-                            eta_s = int((total - downloaded) / bytes_per_second) if bytes_per_second > 0 else 0
-                            eta = f'{eta_s // 60}:{eta_s % 60:02d}'
-                            progress.update(pct, spd, eta)
-            if should_restart:
-                continue
-            # Completed chunk loop successfully
-            break
+                        if _is_paused(pause_flag):
+                            actual = _save_pause_state()
+                            safe_print(f"  [||] Paused at {actual/(1024*1024):.1f}MB - press Ctrl+P to resume")
+                            while _is_paused(pause_flag) and not _is_stopped(stop_flag):
+                                time.sleep(0.3)
+                            if _is_stopped(stop_flag):
+                                progress.fail()
+                                return False
+                            safe_print("  [>] Resuming download...")
+                            should_restart = True
+                            break
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total > 0:
+                                pct = downloaded * 100 / total
+                                ela = max(time.time() - start_time, 0.001)
+                                bytes_per_second = downloaded / ela
+                                spd = bytes_per_second / 1024 / 1024
+                                eta_s = int((total - downloaded) / bytes_per_second) if bytes_per_second > 0 else 0
+                                eta = f'{eta_s // 60}:{eta_s % 60:02d}'
+                                progress.update(pct, spd, eta)
+                if should_restart:
+                    continue
+                # Completed chunk loop successfully
+                break
 
         except (requests.RequestException, ConnectionError, OSError) as e:
             retries_left -= 1
@@ -1734,6 +1787,40 @@ def _download_with_requests_impl(s, url, folder, filename, summary, stop_flag=No
     summary.add_success()
     log_download(filename, url, filepath)
     return True
+
+def _ytdlp_record_paused(series_url, series_name, folder, filename, expected_size=0):
+    """Write a per-episode resume receipt for an interrupted yt-dlp download.
+
+    yt-dlp has no single `filepath` local — the on-disk partial can be
+    `base.part`, `base.fNNN.mp4`, `base.ext.part`, etc. We scan the folder for
+    the largest artifact whose name starts with the sanitized base and record
+    that byte count. Mirrors the aria2c stop branch so parallel yt-dlp
+    interruptions resume per-episode instead of restarting from zero.
+    Best-effort: never raises into the caller's stop path."""
+    if not series_url:
+        return
+    try:
+        base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
+        best_path, best_size = None, 0
+        if os.path.isdir(folder):
+            for name in os.listdir(folder):
+                if name.startswith(base):
+                    p = os.path.join(folder, name)
+                    try:
+                        sz = os.path.getsize(p)
+                    except OSError:
+                        continue
+                    if sz > best_size:
+                        best_path, best_size = p, sz
+        # Fall back to the expected final path even if nothing is on disk yet,
+        # so get_paused_download resolves and the episode isn't marked failed.
+        if best_path is None:
+            best_path = os.path.join(folder, f"{base}.mp4")
+        ep_key = f"{series_url}:{filename}"
+        DownloadReceipt.mark_paused(ep_key, best_path, best_size, expected_size)
+        mark_episode_current(series_url, series_name or folder, filename)
+    except Exception:
+        pass
 
 def download_with_ytdlp(url, folder, filename, summary,
                         quality=None, current_process=None, stop_flag=None,
@@ -1805,6 +1892,8 @@ def download_with_ytdlp(url, folder, filename, summary,
                     proc.wait(timeout=5)
                 except Exception:
                     proc.kill()
+                finally:
+                    unregister_process(proc)
                 if current_process is not None:
                     current_process.proc = None
                 safe_print("  [‖] Paused — press Ctrl+P to resume")
@@ -1814,7 +1903,7 @@ def download_with_ytdlp(url, folder, filename, summary,
                         break
                     time.sleep(0.2)
                 if _is_stopped(stop_flag):
-                    summary.add_failed(filename)
+                    _ytdlp_record_paused(series_url, series_name, folder, filename)
                     return False
                 # Re-launch with -c (continue/resume) flag
                 safe_print("  [▶] Resuming download...")
@@ -1859,6 +1948,7 @@ def download_with_ytdlp(url, folder, filename, summary,
             progress.fail()
             if _is_stopped(stop_flag):
                 safe_print("[*] yt-dlp stopped")
+                _ytdlp_record_paused(series_url, series_name, folder, filename)
             else:
                 safe_print("[✗] yt-dlp failed")
                 summary.add_failed(filename)
@@ -1893,6 +1983,7 @@ def run_ytdlp_command(cmd, summary, label,
             if _is_paused(pause_flag):
                 _graceful_terminate(proc)
                 finish_process(proc)
+                unregister_process(proc)
                 while _is_paused(pause_flag) and not _is_stopped(stop_flag):
                     time.sleep(0.3)
                 if _is_stopped(stop_flag):
@@ -2208,11 +2299,14 @@ def download_file(url, folder, filename, summary,
     # Link expiry detection
     if check_expiry and not is_streaming_link(url):
         _s = make_session()
-        status = check_url_alive(url, _s)
-        if status == 'expired':
-            safe_print(f"  [!] Link expired (404) — re-paste the series URL for fresh links")
-            summary.add_failed(filename)
-            return False
+        try:
+            status = check_url_alive(url, _s)
+            if status == 'expired':
+                safe_print(f"  [!] Link expired (404) — re-paste the series URL for fresh links")
+                summary.add_failed(filename)
+                return False
+        finally:
+            _s.close()
 
     # Pause/stop check
     if wait_fn:
@@ -2387,6 +2481,7 @@ def download_batch(items, folder, summary, parallel=1,
             try:
                 future.result()
             except Exception as e:
-                safe_print(f"  [!] Thread error for {fname}: {e}")
-                summary.add_failed(fname)
+                if not _is_stopped(stop_flag):
+                    safe_print(f"  [!] Thread error for {fname}: {e}")
+                    summary.add_failed(fname)
         executor.shutdown(wait=False, cancel_futures=True)

@@ -45,9 +45,9 @@ def extract_myasiantv(url, session, ctx=None):
         _wait(ctx)
         ep_name = ep_url.rstrip('/').split('/')[-1]
         safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
-        done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
+        done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
+            done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -75,11 +75,13 @@ def extract_myasiantv(url, session, ctx=None):
         # Megaplay/iframe players require the episode URL as referer to avoid "Embed Only" block
         old_referer = session.headers.get('Referer')
         session.headers['Referer'] = ep_url
-        direct = ResolverRegistry.resolve(src, session)
-        if old_referer is not None:
-            session.headers['Referer'] = old_referer
-        else:
-            session.headers.pop('Referer', None)
+        try:
+            direct = ResolverRegistry.resolve(src, session)
+        finally:
+            if old_referer is not None:
+                session.headers['Referer'] = old_referer
+            else:
+                session.headers.pop('Referer', None)
         
         if direct:
             ext = 'mkv' if '.mkv' in direct.lower() else 'mp4'

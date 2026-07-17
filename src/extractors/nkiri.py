@@ -45,9 +45,9 @@ def extract_nkiri(url, session, ctx=None):
                 ep_name = ep_url.split('/')[-1].replace('.html', '')
                 ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
                 safe_print(f"\n[{ep_index}/{len(dw_links)}] {ep_name}")
-                done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
+                done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
                 if not done:
-                    done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
+                    done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
                 if done:
                     safe_print(f"  [✓] Already downloaded — skipping")
                     summary.add_skipped()

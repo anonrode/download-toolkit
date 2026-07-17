@@ -77,6 +77,9 @@ def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
 
             if not r.ok:
                 safe_print(f"  [!] HTTP {r.status_code}: {url[:60]}")
+                if attempt < retries - 1:
+                    time.sleep(2)
+                    continue
                 return None
             return r
         except Exception as e:
@@ -217,6 +220,8 @@ def safe_resolve(resolver_fn, url, session, resolver_name='', max_attempts=3):
                 if attempt < max_attempts - 1:
                     time.sleep(2)
                 continue
+            elif attempt < max_attempts - 1:
+                time.sleep(2)
         except requests.Timeout:
             safe_print(f"  [!] {resolver_name} timed out (attempt {attempt+1}/{max_attempts})")
             if attempt < max_attempts - 1:
@@ -315,9 +320,9 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
             ep_name = ep_url.split('/')[-1].replace('.html', '')
             ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
             safe_print(f"\n[{ep_index}/{len(links)}] {ep_name}")
-            done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
+            done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
+                done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
@@ -389,8 +394,9 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                     try:
                         f.result()
                     except Exception as e:
-                        safe_print(f"  [✗] Thread error for {ep_name}: {e}")
-                        summary.add_failed(ep_name)
+                        if not _stopped(ctx):
+                            safe_print(f"  [✗] Thread error for {ep_name}: {e}")
+                            summary.add_failed(ep_name)
                 ex.shutdown(wait=False, cancel_futures=True)
 
     if summary.failed == 0 and not _stopped(ctx):

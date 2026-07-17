@@ -38,9 +38,9 @@ def extract_naijaprey(url, session, ctx=None):
         safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
 
         # Early skip before hitting the intermediate page
-        done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
+        done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
+            done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()

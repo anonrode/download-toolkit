@@ -52,6 +52,9 @@ def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
 
             if not r.ok:
                 safe_print(f"      [!] HTTP {r.status_code}: {url[:60]}")
+                if attempt < retries - 1:
+                    time.sleep(2)
+                    continue
                 return None
             return r
         except Exception as e:
@@ -171,19 +174,22 @@ class WildshareResolver(BaseResolver):
                 s = cf_requests.Session(impersonate='chrome120')
             except ImportError:
                 s = requests.Session()
-            s.headers['User-Agent'] = UA_DESKTOP
-            
-            r = s.get(url, timeout=20)
-            if not r or r.status_code != 200:
-                return None
-            pt = re.search(r'pt=([A-Za-z0-9%+=/]+)', r.text)
-            if not pt:
-                return None
-            parts = url.rstrip('/').split('/')
-            file_id = next((p for p in reversed(parts) if not p.endswith(('.mkv', '.mp4', '.m3u8'))), parts[-1])
-            pt_url = f'https://wildshare.net/{file_id}?{pt.group(0)}'
-            r2 = s.get(pt_url, timeout=20, allow_redirects=False)
-            return r2.headers.get('location')
+            try:
+                s.headers['User-Agent'] = UA_DESKTOP
+
+                r = s.get(url, timeout=20)
+                if not r or r.status_code != 200:
+                    return None
+                pt = re.search(r'pt=([A-Za-z0-9%+=/]+)', r.text)
+                if not pt:
+                    return None
+                parts = url.rstrip('/').split('/')
+                file_id = next((p for p in reversed(parts) if not p.endswith(('.mkv', '.mp4', '.m3u8'))), parts[-1])
+                pt_url = f'https://wildshare.net/{file_id}?{pt.group(0)}'
+                r2 = s.get(pt_url, timeout=20, allow_redirects=False)
+                return r2.headers.get('location')
+            finally:
+                s.close()
         except Exception as e:
             safe_print(f"      [!] Wildshare: {e}")
             return None

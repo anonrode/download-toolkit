@@ -179,6 +179,7 @@ DEFAULT_CONFIG = {
     
     # Search settings
     'search_timeout':       45,         # Max seconds to wait for search results
+    'search_workers':       6 if IS_ANDROID else 12,  # Lower burst load on Termux
     'search_cache':         True,       # Cache search results for 24h
     
     # Storage
@@ -333,6 +334,26 @@ def queue_add(url):
         print(f"[*] Queue: {len(q)} item(s) — type 'queue start' to begin")
     else:
         print("[*] Already in queue")
+
+def queue_add_many(urls):
+    """Add multiple URLs to the queue in one pass.
+    Loads/saves the queue once and dedups both against the existing
+    queue and within the batch itself. Quiet (prints nothing) so the
+    caller can render a single aggregate summary.
+    Returns (added, already) counts.
+    """
+    q = load_queue()
+    added = 0
+    already = 0
+    for url in urls:
+        if url in q:
+            already += 1
+        else:
+            q.append(url)
+            added += 1
+    if added:
+        save_queue(q)
+    return added, already
 
 def queue_list():
     q = load_queue()
@@ -962,6 +983,142 @@ def handle_resume_command(session, cfg):
     ctx = _make_ctx(cfg)
     process_link_queue([url], session, ctx)
 
+# ─── GIT HELPERS ──────────────────────────────────────────────
+def _git_update(script_dir, announce=False, force=False):
+    """Single source of truth for the git fetch/merge/stamp dance shared by
+    auto_update() and the manual `update` command. Never raises.
+
+    Safety kept from the originals: refuses to touch a dirty tree (tracked,
+    non-`??` changes), fast-forward only, every git call is non-interactive
+    (stdin=DEVNULL) with a timeout, so it is Windows + Termux safe.
+
+    force=True refreshes the 7-day auto-update stamp on a successful remote
+    check (both real callers pass force=True). Returns a dict:
+      reached_remote bool  – `git fetch` succeeded
+      was_dirty      bool  – tracked changes present; merge refused
+      dirty_lines    list  – porcelain lines behind was_dirty (for display)
+      before_commit  str   – full HEAD before the merge ('' if unknown)
+      after_commit   str   – full HEAD after the merge ('' if unknown)
+      updated        bool  – HEAD actually advanced (a real fast-forward)
+      behind_count   int   – commits HEAD is behind origin/main (0 if unknown)
+      merge_ok       bool  – `git merge --ff-only` returned 0 (incl. no-op)
+      merge_output   str   – merge stdout (for display)
+      error          str   – first error text encountered ('' if none)
+    """
+    res = {
+        'reached_remote': False, 'was_dirty': False, 'dirty_lines': [],
+        'before_commit': '', 'after_commit': '', 'updated': False,
+        'behind_count': 0, 'merge_ok': False, 'merge_output': '', 'error': '',
+    }
+
+    def _run(args, timeout):
+        return subprocess.run(
+            args, cwd=script_dir, capture_output=True,
+            text=True, timeout=timeout, stdin=subprocess.DEVNULL
+        )
+
+    def _commit():
+        try:
+            r = _run(['git', 'rev-parse', 'HEAD'], 5)
+            return r.stdout.strip() if r.returncode == 0 else ''
+        except Exception:
+            return ''
+
+    try:
+        res['before_commit'] = _commit()
+
+        # 1) Never wipe local work — refuse on tracked (non-??) changes.
+        status = _run(['git', 'status', '--porcelain'], 5)
+        res['dirty_lines'] = [
+            l for l in status.stdout.splitlines() if l and not l.startswith('??')
+        ]
+        if res['dirty_lines']:
+            res['was_dirty'] = True
+            return res
+
+        # 2) Reach the remote.
+        fetch = _run(['git', 'fetch', 'origin', '-q'], 30)
+        if fetch.returncode != 0:
+            res['error'] = (fetch.stderr or fetch.stdout or '').strip()
+            return res
+        res['reached_remote'] = True
+
+        # 3) How far behind origin/main (informational).
+        try:
+            rc = _run(['git', 'rev-list', '--count', 'HEAD..origin/main'], 10)
+            if rc.returncode == 0 and rc.stdout.strip().isdigit():
+                res['behind_count'] = int(rc.stdout.strip())
+        except Exception:
+            pass
+
+        # 4) Fast-forward only — never a merge commit, never a rebase.
+        merge = _run(['git', 'merge', '--ff-only', 'origin/main', '-q'], 30)
+        res['merge_output'] = (merge.stdout or '').strip()
+        res['merge_ok'] = (merge.returncode == 0)
+        if not res['merge_ok']:
+            res['error'] = (merge.stderr or merge.stdout or '').strip()
+            return res
+
+        res['after_commit'] = _commit()
+        res['updated'] = bool(
+            res['before_commit'] and res['after_commit']
+            and res['before_commit'] != res['after_commit']
+        )
+
+        # 5) Refresh the auto-update stamp on a successful remote check.
+        if force:
+            try:
+                os.makedirs(os.path.dirname(AUTO_UPDATE_STATE_FILE), exist_ok=True)
+                open(AUTO_UPDATE_STATE_FILE, 'w').write(str(time.time()))
+            except Exception:
+                pass
+
+        if announce and res['updated']:
+            print("[ok] Toolkit updated — restart to use latest version")
+    except Exception as e:
+        res['error'] = res['error'] or str(e)
+
+    return res
+
+
+def _git_status_info(script_dir):
+    """Read-only live inspection of the checkout vs origin/main for the
+    `version` command. Fetches but never merges or stamps. Never raises.
+    Returns commit(short), date, branch, behind(int|None), reached_remote(bool).
+    """
+    info = {
+        'commit': '', 'date': '', 'branch': '',
+        'behind': None, 'reached_remote': False,
+    }
+
+    def _run(args, timeout):
+        try:
+            return subprocess.run(
+                args, cwd=script_dir, capture_output=True,
+                text=True, timeout=timeout, stdin=subprocess.DEVNULL
+            )
+        except Exception:
+            return None
+
+    r = _run(['git', 'rev-parse', '--short', 'HEAD'], 5)
+    if r and r.returncode == 0:
+        info['commit'] = r.stdout.strip()
+    r = _run(['git', 'log', '-1', '--format=%cd', '--date=format:%Y-%m-%d %H:%M'], 5)
+    if r and r.returncode == 0:
+        info['date'] = r.stdout.strip()
+    r = _run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], 5)
+    if r and r.returncode == 0:
+        info['branch'] = r.stdout.strip()
+
+    fetch = _run(['git', 'fetch', 'origin', '-q'], 30)
+    if fetch and fetch.returncode == 0:
+        info['reached_remote'] = True
+        r = _run(['git', 'rev-list', '--count', 'HEAD..origin/main'], 10)
+        if r and r.returncode == 0 and r.stdout.strip().isdigit():
+            info['behind'] = int(r.stdout.strip())
+    return info
+
+
 # ─── AUTO UPDATE ──────────────────────────────────────────────
 def auto_update(cfg=None, announce=True):
     script_dir  = os.path.dirname(os.path.abspath(__file__))
@@ -982,86 +1139,13 @@ def auto_update(cfg=None, announce=True):
                 pass
         return True
 
-    def _stamp_pull():
-        try:
-            os.makedirs(os.path.dirname(stamp_file), exist_ok=True)
-            open(stamp_file, 'w').write(str(time.time()))
-        except Exception:
-            pass
-
-    def _get_commit():
-        try:
-            r = subprocess.run(
-                ['git', 'rev-parse', 'HEAD'],
-                cwd=script_dir, capture_output=True,
-                text=True, timeout=5, stdin=subprocess.DEVNULL
-            )
-            return r.stdout.strip()
-        except Exception:
-            return ''
-
     if not _should_pull():
         return  # pulled recently — skip entirely, start instantly
 
-    if IS_ANDROID:
-        try:
-            # Never wipe local work — check for tracked dirty state first
-            status = subprocess.run(
-                ['git', 'status', '--porcelain'],
-                cwd=script_dir, capture_output=True,
-                text=True, timeout=5, stdin=subprocess.DEVNULL
-            )
-            dirty = [l for l in status.stdout.splitlines() if l and not l.startswith('??')]
-            if dirty:
-                return  # Skip silently — don't destroy local changes
-
-            before = _get_commit()
-            fetch = subprocess.run(
-                ['git', 'fetch', 'origin', '-q'], cwd=script_dir,
-                capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
-            )
-            if fetch.returncode != 0:
-                return
-            pull = subprocess.run(
-                ['git', 'merge', '--ff-only', 'origin/main', '-q'],
-                cwd=script_dir, capture_output=True,
-                text=True, timeout=30, stdin=subprocess.DEVNULL
-            )
-            if pull.returncode != 0:
-                return  # Can't fast-forward — skip silently
-            _stamp_pull()
-            after = _get_commit()
-            if before and after and before != after and announce:
-                print("[ok] Toolkit updated — restart to use latest version")
-        except Exception:
-            pass
-    else:
-        try:
-            status = subprocess.run(
-                ['git', 'status', '--porcelain'],
-                cwd=script_dir, capture_output=True,
-                text=True, timeout=5, stdin=subprocess.DEVNULL
-            )
-            dirty = [l for l in status.stdout.splitlines() if l and not l.startswith('??')]
-            if dirty:
-                return
-            fetch = subprocess.run(
-                ['git', 'fetch', 'origin', '-q'], cwd=script_dir,
-                capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
-            )
-            if fetch.returncode != 0:
-                return
-            result = subprocess.run(
-                ['git', 'merge', '--ff-only', 'origin/main', '-q'],
-                cwd=script_dir, capture_output=True,
-                text=True, timeout=30, stdin=subprocess.DEVNULL
-            )
-            if result.returncode == 0:
-                _stamp_pull()
-                if announce:
-                    print("[ok] Toolkit updated — restart to use latest version")
-        except Exception:
-            pass
+    # Single source of truth for the fetch/merge/stamp dance. force=True
+    # refreshes the 7-day stamp on a successful remote check; the helper
+    # refuses a dirty tree and announces only on a real update.
+    _git_update(script_dir, announce=announce, force=True)
 
 def schedule_auto_update(cfg):
     """Check the weekly repository update without delaying the first prompt."""
@@ -1083,11 +1167,13 @@ def schedule_auto_update(cfg):
 def setup_android():
     if not IS_ANDROID:
         return None
-    wake_proc = None
     try:
-        wake_proc = subprocess.Popen(
+        subprocess.run(
             ['termux-wake-lock'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
         )
     except Exception:
         pass
@@ -1105,7 +1191,7 @@ def setup_android():
                 print(f"[!] tmux error: {e}")
         else:
             print("[!] tmux not found — install with: pkg install tmux")
-    return wake_proc
+    return True
 
 # ─── BANNER ───────────────────────────────────────────────────
 def print_banner(cfg):
@@ -1471,16 +1557,11 @@ def watch_clipboard(session, cfg):
 
 # ─── MAIN REPL ────────────────────────────────────────────────
 def main():
-    wake_proc = setup_android()
+    setup_android()
     cfg = load_config()
 
     def _release_wake_lock():
         stop_termux_pause_controls()
-        if wake_proc:
-            try:
-                wake_proc.terminate()
-            except Exception:
-                pass
         try:
             subprocess.run(['termux-wake-unlock'],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1513,6 +1594,10 @@ def main():
             raw = input("\n> ").strip()
         except EOFError:
             print("\n[*] Exiting...")
+            try:
+                session.close()
+            except Exception:
+                pass
             _release_wake_lock()
             break
         except KeyboardInterrupt:
@@ -1528,6 +1613,10 @@ def main():
 
         if lower in ('exit', 'quit', 'q'):
             print("[*] Goodbye")
+            try:
+                session.close()
+            except Exception:
+                pass
             _release_wake_lock()
             break
 
@@ -1545,9 +1634,13 @@ def main():
             print(f"  status                 - Show current download speed & status")
             print(f"  queue add <url>        - Add a link to download queue")
             print(f"  queue list/clear/run   - Manage download queue")
+            print(f"  qad/quad <url> ...     - Quick-add one or more links to queue")
+            print(f"  qas                    - Start (run) the download queue")
             print(f"  settings               - Open interactive settings menu")
             print(f"  update                 - Update toolkit from GitHub")
+            print(f"  version                - Show current version & update status")
             print(f"  updateyt               - Update yt-dlp only")
+
             print(f"  doctor                 - Check Termux dependencies")
             print(f"  cleanup                - Delete temporary/stale files")
             print(f"  history                - Show past download history")
@@ -1641,82 +1734,50 @@ def main():
             else:
                 print("[*] queue add <url> | list | start | clear | remove <n>")
 
+        elif parts[0].lower() in ('qad', 'quad'):
+            tokens = parts[1:]
+            urls = [t for t in tokens if t.lower().startswith('http')]
+            if not urls:
+                print("[!] Usage: qad <url> [url2 ...]  (paste one or more links to quick-add)")
+            else:
+                added, already = queue_add_many(urls)
+                skipped = len(tokens) - len(urls)
+                summary = f"[+] {added} added, {already} already in queue"
+                if skipped:
+                    summary += f", {skipped} skipped (not a URL)"
+                total = len(load_queue())
+                print(f"{summary} — {total} item(s) total, type 'qas' to start")
+
+        elif lower == 'qas':
+            queue_run(session, cfg)
+
         elif lower == 'update':
             script_dir = os.path.dirname(os.path.abspath(__file__))
             print("[*] Checking toolkit updates...")
-            try:
-                before = subprocess.run(
-                    ['git', 'rev-parse', 'HEAD'],
-                    cwd=script_dir, capture_output=True,
-                    text=True, timeout=5, stdin=subprocess.DEVNULL
-                ).stdout.strip()
+            res = _git_update(script_dir, announce=False, force=True)
 
-                status_out = subprocess.run(
-                    ['git', 'status', '--porcelain'],
-                    cwd=script_dir, capture_output=True,
-                    text=True, timeout=5, stdin=subprocess.DEVNULL
-                ).stdout.strip()
-
-                dirty_lines = [
-                    l for l in status_out.splitlines()
-                    if l and not l.startswith('??')
-                ]
-                dirty = '\n'.join(dirty_lines)
-
-                if dirty:
-                    print("[!] Local changes detected — commit or stash before updating:")
-                    for line in dirty_lines[:8]:
-                        print(f"      {line}")
-                    continue
-
-                fetch = subprocess.run(
-                    ['git', 'fetch', 'origin', '-q'], cwd=script_dir,
-                    capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
-                )
-                if fetch.returncode != 0:
-                    print("[!] Could not reach GitHub - update was not checked")
-                    err = (fetch.stderr or fetch.stdout or '').strip()
-                    if err:
-                        print(f"      {err[:400]}")
-                    continue
-                pull = subprocess.run(
-                    ['git', 'merge', '--ff-only', 'origin/main'],
-                    cwd=script_dir, capture_output=True,
-                    text=True, timeout=30, stdin=subprocess.DEVNULL
-                )
-
-                if pull.returncode != 0:
-                    print("[!] git pull failed:")
-                    err = (pull.stderr or pull.stdout or '').strip()
-                    print(f"      {err[:400]}")
-                else:
-                    try:
-                        os.makedirs(os.path.dirname(AUTO_UPDATE_STATE_FILE), exist_ok=True)
-                        open(AUTO_UPDATE_STATE_FILE, 'w').write(str(time.time()))
-                    except Exception:
-                        pass
-                    out = (pull.stdout or '').strip()
-                    if 'Already up to date' in out:
-                        print("[*] Already up to date")
-                    else:
-                        print("[ok] New updates pulled")
-                        if out:
-                            for line in out.splitlines()[:5]:
-                                print(f"      {line}")
-                    after = subprocess.run(
-                        ['git', 'rev-parse', 'HEAD'],
-                        cwd=script_dir, capture_output=True,
-                        text=True, timeout=5, stdin=subprocess.DEVNULL
-                    ).stdout.strip()
-                    if before and after and before != after:
-                        print("[ok] Updated — restarting...")
-                        sys.stdout.flush()
-                        time.sleep(0.5)
-                        os.execv(sys.executable, [sys.executable] + sys.argv)
-                    elif 'Already up to date' not in out:
-                        print("[*] Already up to date")
-            except Exception as e:
-                print(f"[!] Update failed: {e}")
+            if res['was_dirty']:
+                print("[!] Local changes detected — commit or stash before updating:")
+                for line in res['dirty_lines'][:8]:
+                    print(f"      {line}")
+            elif not res['reached_remote']:
+                print("[!] Could not reach GitHub — update was not checked")
+                if res['error']:
+                    print(f"      {res['error'][:400]}")
+            elif not res['merge_ok']:
+                print("[!] git update failed:")
+                if res['error']:
+                    print(f"      {res['error'][:400]}")
+            elif res['updated']:
+                old = (res['before_commit'] or '')[:8]
+                new = (res['after_commit'] or '')[:8]
+                print(f"[ok] Updated {old} -> {new} — restarting...")
+                sys.stdout.flush()
+                time.sleep(0.5)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                head = (res['after_commit'] or res['before_commit'] or '')[:8]
+                print(f"[*] You're on the latest (origin/main @ {head})")
 
         elif lower in ('updateyt', 'update-yt', 'update ytdlp'):
             try:
@@ -1726,6 +1787,26 @@ def main():
                 _update_ytdlp(channel=channel)
             except Exception as e:
                 print(f"[!] yt-dlp update failed: {e}")
+
+        elif lower == 'version':
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            print("[*] Checking version...")
+            info = _git_status_info(script_dir)
+            commit = info['commit'] or 'unknown'
+            branch = info['branch'] or '?'
+            print(f"  Version : {commit} ({branch})")
+            if info['date']:
+                print(f"  Date    : {info['date']}")
+            if not info['reached_remote']:
+                print("  Remote  : offline — could not check origin/main")
+            elif info['behind'] is None:
+                print("  Remote  : reached, but behind-count unavailable")
+            elif info['behind'] == 0:
+                print("  Remote  : up to date with origin/main")
+            else:
+                n = info['behind']
+                s = 's' if n != 1 else ''
+                print(f"  Remote  : {n} commit{s} behind — type 'update' to upgrade")
 
         elif lower.startswith('anime '):
             query = raw.split(' ', 1)[1].strip()

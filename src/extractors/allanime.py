@@ -53,7 +53,7 @@ def _resolve_wixmp(path, quality):
         if not r.ok:
             return None
         data  = r.json()
-        links = data.get('links', [])
+        links = data.get('links') or []
         if not links:
             return None
         # Quality preference: exact match → next-best → first available
@@ -106,10 +106,12 @@ def _get_provider_url(show_id, ep_str, mode='sub', quality='480p'):
         return None, False
 
     ep_data    = (data.get('data') or {}).get('episode') or {}
-    source_urls = ep_data.get('sourceUrls', [])
+    source_urls = ep_data.get('sourceUrls') or []
 
     providers = {}
     for src in source_urls:
+        if not isinstance(src, dict):
+            continue
         name = src.get('sourceName', '')
         url  = src.get('sourceUrl', '')
         if not url:
@@ -181,10 +183,12 @@ def search_allanime(query, mode='sub'):
     data = _allanime_post(payload)
     if not data:
         return []
-    edges = (data.get('data') or {}).get('shows', {}).get('edges', [])
+    edges = (((data.get('data') or {}).get('shows') or {}).get('edges') or [])
     results = []
     for edge in edges:
-        eps = edge.get('availableEpisodes', {})
+        if not isinstance(edge, dict):
+            continue
+        eps = edge.get('availableEpisodes') or {}
         results.append({
             'id':      edge.get('_id', ''),
             'name':    edge.get('name', 'Unknown'),
@@ -202,8 +206,8 @@ def _get_episode_list(show_id, mode='sub'):
     data = _allanime_post(payload)
     if not data:
         return []
-    detail = ((data.get('data') or {}).get('show') or {}).get('availableEpisodesDetail', {})
-    eps    = detail.get(mode, detail.get('sub', detail.get('dub', [])))
+    detail = (((data.get('data') or {}).get('show') or {}).get('availableEpisodesDetail') or {})
+    eps    = detail.get(mode) or detail.get('sub') or detail.get('dub') or []
     # Sort numerically where possible, keep specials at end
     def ep_sort_key(e):
         try:

@@ -92,9 +92,9 @@ def extract_naijavault(url, session, ctx=None):
         safe_print(f"\n[A {i}/{len(format_a)}] {ep_label}")
 
         # ── Early skip: check before hitting the dl page ──
-        done, _ = already_downloaded(folder, f"{ep_label}.mkv", series_url=url)
+        done, _ = already_downloaded(folder, safe_filename(f"{ep_label}.mkv"), series_url=url)
         if not done:
-            done, _ = already_downloaded(folder, f"{ep_label}.mp4", series_url=url)
+            done, _ = already_downloaded(folder, safe_filename(f"{ep_label}.mp4"), series_url=url)
         if done:
             safe_print(f"  [✓] Already downloaded — skipping")
             summary.add_skipped()
@@ -188,9 +188,9 @@ def extract_naijavault(url, session, ctx=None):
             # ── Early skip ──
             done, _ = already_downloaded(folder, ep_name, series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_label}.mkv", series_url=url)
+                done, _ = already_downloaded(folder, safe_filename(f"{ep_label}.mkv"), series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_label}.mp4", series_url=url)
+                done, _ = already_downloaded(folder, safe_filename(f"{ep_label}.mp4"), series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()

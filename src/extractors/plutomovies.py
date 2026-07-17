@@ -177,9 +177,9 @@ def extract_plutomovies(url, session, ctx=None):
                 prefetcher.prefetch(all_eps[i][0])
 
             # Skip check AFTER get() so queue alignment is never broken
-            done, _ = already_downloaded(folder, f"{ep_name}.mp4", series_url=url)
+            done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
             if not done:
-                done, _ = already_downloaded(folder, f"{ep_name}.mkv", series_url=url)
+                done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
             if done:
                 safe_print(f"  [✓] Already downloaded — skipping")
                 summary.add_skipped()
