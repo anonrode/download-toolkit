@@ -151,7 +151,7 @@ def _get_provider_url(show_id, ep_str, mode='sub', quality='480p'):
     if 'Yt-mp4' in providers:
         return providers['Yt-mp4'], True
 
-    safe_print('  [!] No usable provider found for this episode')
+    safe_print(render_message('no_provider_found'))
     return None, False
 
 def search_allanime(query, mode='sub'):
@@ -238,7 +238,7 @@ def extract_allanime(show_id, show_name, episodes, mode='sub', ctx=None):
 
     total   = len(episodes)
     if total == 0:
-        safe_print('[*] No episodes to download')
+        safe_print(render_message('no_episodes_to_download'))
         return
     pad     = 3 if total >= 100 else 2
     summary = DownloadSummary()
@@ -262,20 +262,20 @@ def extract_allanime(show_id, show_name, episodes, mode='sub', ctx=None):
 
         done, _ = already_downloaded(folder, fname, series_url=f'allanime:{show_id}')
         if done:
-            safe_print('  [✓] Already downloaded — skipping')
+            safe_print(render_message('already_saved'))
             summary.add_skipped()
             continue
 
-        safe_print('  [*] Resolving provider...')
+        safe_print(render_message('resolving_provider'))
         direct, needs_ytdlp = _get_provider_url(show_id, ep_str, mode=mode, quality=q_label)
 
         if not direct:
-            safe_print(f'  [✗] Could not resolve provider for {ep_name}')
+            safe_print(f'  [X] Could not resolve provider for {ep_name}')
             summary.add_failed(ep_name)
             continue
 
         if needs_ytdlp:
-            safe_print(f'  [*] YouTube provider — using yt-dlp')
+            safe_print(f'  [*] YouTube provider - using yt-dlp')
             download_with_ytdlp(
                 direct, folder, safe_filename(fname), summary,
                 quality=quality, current_process=cur_proc,

@@ -4,7 +4,7 @@ def extract_myasiantv(url, session, ctx=None):
     ctx = ctx or {}
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
-    safe_print("[*] MyAsianTV mode")
+    safe_print(render_message('site_mode', site='MyAsianTV'))
     slug = url.rstrip('/').split('/')[-1]
     name = re.sub(r'-episode-\d+.*$', '', slug)
     name = re.sub(r'-\d{4}.*$', '', name)
@@ -18,7 +18,7 @@ def extract_myasiantv(url, session, ctx=None):
         ep_links = [url]
         safe_print(f"[*] Saving to: {folder}")
     else:
-        safe_print("[*] Fetching episode list...")
+        safe_print(render_message('fetching_episode_list'))
         r = safe_get(session, url, referer=bd + '/', timeout=30)
         if r is None:
             return
@@ -29,14 +29,14 @@ def extract_myasiantv(url, session, ctx=None):
             if ('episode-' in a['href'].lower() and show_slug.lower() in a['href'].lower() and (bd in a['href'] or a['href'].startswith('/')))
         ))
         if not ep_links:
-            safe_print("[!] No episode links found")
+            safe_print(render_message('no_episode_links'))
             return
         ep_links.sort(key=lambda u: int(m.group(1)) if (m := re.search(r'episode-(\d+)', u)) else 0)
         ep_links = _filter_by_episode_range(ep_links, ctx)
         if not ep_links:
-            safe_print("[!] No episodes matched that range")
+            safe_print(render_message('no_episodes_in_range'))
             return
-        safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
+        safe_print(f"[*] Found {len(ep_links)} episode(s) - saving to: {folder}")
     _notify_start(name, len(ep_links))
 
     for i, ep_url in enumerate(ep_links, 1):
@@ -49,12 +49,12 @@ def extract_myasiantv(url, session, ctx=None):
         if not done:
             done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
         if done:
-            safe_print(f"  [✓] Already downloaded — skipping")
+            safe_print(render_message('already_saved'))
             summary.add_skipped()
             continue
         r = safe_get(session, ep_url, referer=bd + '/', timeout=30)
         if r is None:
-            safe_print(f"  [✗] Could not fetch episode page")
+            safe_print(f"  [X] Could not fetch episode page")
             summary.add_failed(ep_name)
             continue
         soup   = BeautifulSoup(r.text, 'html.parser')
@@ -90,7 +90,7 @@ def extract_myasiantv(url, session, ctx=None):
                           bandwidth_limit=bw, quality=quality,
                           current_process=cur_proc, stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
         else:
-            safe_print(f"  [✗] Could not extract video")
+            safe_print(f"  [X] Could not extract video")
             summary.add_failed(ep_name)
         time.sleep(1)
     if summary.failed == 0 and not _stopped(ctx):

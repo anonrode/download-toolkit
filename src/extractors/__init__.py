@@ -72,7 +72,7 @@ def process_link_queue(links, session, ctx=None):
     outcomes = []
     for i, url in enumerate(links, 1):
         if _stopped(ctx):
-            safe_print("[*] Stopped by user")
+            safe_print(render_message('stopped_by_user'))
             outcomes.append({'url': url, 'status': 'stopped'})
             break
         _wait(ctx)
@@ -82,12 +82,12 @@ def process_link_queue(links, session, ctx=None):
             safe_print(f"{'─'*50}")
         extractor = detect_site(url, disabled)
         if extractor == 'disabled':
-            safe_print(f"[!] Site is disabled in settings — skipping: {url[:50]}")
+            safe_print(f"[!] Site is disabled in settings - skipping: {url[:50]}")
             outcomes.append({'url': url, 'status': 'failed'})
             continue
         if not extractor:
-            safe_print(f"[!] Unknown site: {url[:70]}")
-            safe_print("[*] Supported: NKiri, DramaKey, DramaRain, NaijaVault, 9jaRocks, NaijaPrey, MyAsianTV, Anitaku, PlutoMovies, YouTube, Instagram, TikTok, Facebook, Pinterest")
+            safe_print(render_message('unsupported_site'))
+            safe_print(render_message('supported_sites', sites='NKiri, DramaKey, DramaRain, NaijaVault, 9jaRocks, NaijaPrey, MyAsianTV, Anitaku, PlutoMovies, YouTube, Instagram, TikTok, Facebook, Pinterest'))
             outcomes.append({'url': url, 'status': 'failed'})
             continue
         try:
@@ -117,6 +117,6 @@ def process_link_queue(links, session, ctx=None):
             traceback.print_exc()
             update_status(status='Failed', current=url[:80])
             safe_print(f"\n[!] Unexpected error: {e}")
-            safe_print("[!] Please check the URL and try again")
+            safe_print(render_message('check_url_retry'))
             outcomes.append({'url': url, 'status': 'failed'})
     return outcomes

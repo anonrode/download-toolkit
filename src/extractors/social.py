@@ -258,7 +258,7 @@ def _yt_playlist_items_prompt(count):
                 raise ValueError("start must be less than end")
             return r
         except Exception:
-            safe_print("  [!] Invalid range - use format: 5-10")
+            safe_print(render_message('invalid_range'))
             return None
     if choice == '3':
         try:
@@ -266,6 +266,6 @@ def _yt_playlist_items_prompt(count):
             [int(x) for x in items.split(',')]
             return items
         except Exception:
-            safe_print("  [!] Invalid items - use format: 1,3,7")
+            safe_print(render_message('invalid_items'))
             return None
     return None

@@ -24,7 +24,44 @@ except Exception:
 IS_ANDROID  = os.path.exists('/storage/emulated/0')
 BASE_DIR    = '/storage/emulated/0/Anon' if IS_ANDROID else os.path.join(os.path.expanduser('~'), 'Downloads', 'Anon')
 
-from src.downloader import CONFIG_DIR
+
+def detect_total_ram_gb():
+    """Best-effort total physical RAM in GB, or None if it can't be read.
+
+    Reads Linux/Termux /proc/meminfo (MemTotal, in kB). Falls back to None on
+    any error so callers can pick a conservative default without crashing.
+    """
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    kb = int(line.split()[1])
+                    return kb / (1024 * 1024)
+    except Exception:
+        pass
+    return None
+
+
+def recommended_limits():
+    """Return device-appropriate (parallel, aria2c_connections) defaults.
+
+    Only tiers down on Android/Termux, where a weak phone gets OOM-killed by
+    Android's Low-Memory-Killer when too many aria2c connections run at once
+    (~16 connections per download, and parallel multiplies that). Desktop keeps
+    the fast defaults. Unknown RAM on Android falls back to the safest tier.
+    """
+    if not IS_ANDROID:
+        return 2, 16
+    ram = detect_total_ram_gb()
+    if ram is None:
+        return 1, 4          # unknown phone → play it safe
+    if ram < 3:
+        return 1, 4          # low-end: one download, few connections
+    if ram < 6:
+        return 2, 8          # mid-range: two downloads, moderate connections
+    return 2, 16             # high-end phone: closer to desktop
+
+from src.downloader import CONFIG_DIR, ui_emit, ui_text
 CONFIG_FILE = os.path.join(CONFIG_DIR, '.config.json')
 QUEUE_FILE  = os.path.join(CONFIG_DIR, '.queue.json')
 CONTROL_FILE = os.path.join(CONFIG_DIR, '.download_control')
@@ -150,10 +187,12 @@ def stop_termux_pause_controls():
     app.tmux_active = False
 
 # ─── CONFIG ───────────────────────────────────────────────────
+_REC_PARALLEL, _REC_CONNECTIONS = recommended_limits()
+
 DEFAULT_CONFIG = {
     # Download settings
     'quality':              '480p',
-    'parallel':             1,
+    'parallel':             _REC_PARALLEL,
     'bandwidth':            0,
     'disabled_sites':       [],
     
@@ -195,8 +234,8 @@ DEFAULT_CONFIG = {
     'social_quality':       '720p',     # Prefer 720p for non-YouTube social videos
     'enable_android_notifications': True,       # Toggle Termux system notifications
     'clipboard_check_interval_sec': 2,         # Clipboard watcher loop frequency in seconds
-    'aria2c_connections': 16,                  # -x flag
-    'aria2c_splits': 16,                       # -s flag
+    'aria2c_connections': _REC_CONNECTIONS,    # -x flag (device-tiered on Android)
+    'aria2c_splits': _REC_CONNECTIONS,         # -s flag (kept equal to connections)
     'aria2c_min_split_size': '1M',             # --min-split-size flag
 }
 
@@ -209,16 +248,69 @@ def load_config():
                 merged = {**DEFAULT_CONFIG, **cfg}
                 if merged.get('log_level') not in ('normal', 'debug'):
                     merged['log_level'] = 'normal'
+                merged['_over_recommended'] = _config_exceeds_device(merged)
                 return merged
     except Exception:
         pass
     return dict(DEFAULT_CONFIG)
 
+
+def _config_exceeds_device(cfg):
+    """True if saved parallel/connections are heavier than this device's
+    recommended safe values. Used to warn existing installs (e.g. a phone
+    that already saved 16 connections before the tiering existed)."""
+    if not IS_ANDROID:
+        return False
+    rec_p, rec_c = recommended_limits()
+    try:
+        return (int(cfg.get('parallel', rec_p)) > rec_p or
+                int(cfg.get('aria2c_connections', rec_c)) > rec_c)
+    except (ValueError, TypeError):
+        return False
+
+
+def warn_if_over_recommended(cfg):
+    """Print a one-time startup advisory if the saved config is heavier than
+    the device can comfortably handle. Non-blocking — the user keeps their
+    settings; this just explains the freeze/restart risk and how to fix it."""
+    if not cfg.get('_over_recommended'):
+        return
+    rec_p, rec_c = recommended_limits()
+    ram = detect_total_ram_gb()
+    ram_txt = f"{ram:.1f} GB" if ram else "unknown"
+    print("\n[!] Heads up: your download settings are heavy for this device.")
+    print(f"    Device RAM: {ram_txt}  |  "
+          f"parallel={cfg.get('parallel')} connections={cfg.get('aria2c_connections')}")
+    print(f"    Recommended here: parallel={rec_p}, connections={rec_c}.")
+    print("    High values can make the app freeze or get killed by Android")
+    print("    after a few downloads. Lower them in Settings if that happens.\n")
+
+
+def warn_override(kind, value):
+    """Print a warning when the user sets `kind` ('parallel' or 'connections')
+    above the device's recommended safe value. Advisory only — the value is
+    still applied. No-op on desktop or when within the safe range."""
+    if not IS_ANDROID:
+        return
+    rec_p, rec_c = recommended_limits()
+    rec = rec_p if kind == 'parallel' else rec_c
+    if value <= rec:
+        return
+    ram = detect_total_ram_gb()
+    ram_txt = f"{ram:.1f} GB" if ram else "unknown"
+    print(f"[!] Warning: {kind}={value} is above the recommended {rec} for "
+          f"this device (RAM: {ram_txt}).")
+    print("    Higher values may cause the app to freeze or be killed by")
+    print("    Android after a few downloads. Setting it anyway.")
+
+
 def save_config(cfg):
     try:
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        # Drop transient/computed keys so they never persist to disk.
+        to_write = {k: v for k, v in cfg.items() if not k.startswith('_')}
         with open(CONFIG_FILE, 'w') as f:
-            json.dump(cfg, f, indent=2)
+            json.dump(to_write, f, indent=2)
     except Exception:
         pass
 
@@ -330,10 +422,10 @@ def queue_add(url):
     if url not in q:
         q.append(url)
         save_queue(q)
-        print(f"[+] Added to queue: {url[:60]}")
-        print(f"[*] Queue: {len(q)} item(s) — type 'queue start' to begin")
+        ui_emit('queue_added')
+        print("    " + ui_text('queue_start_hint', count=len(q)))
     else:
-        print("[*] Already in queue")
+        ui_emit('already_in_queue')
 
 def queue_add_many(urls):
     """Add multiple URLs to the queue in one pass.
@@ -358,7 +450,7 @@ def queue_add_many(urls):
 def queue_list():
     q = load_queue()
     if not q:
-        print("[*] Queue is empty — add URLs with: queue add <url>")
+        ui_emit('queue_empty')
         return
     print(f"\n{'='*50}")
     print(f"  DOWNLOAD QUEUE  ({len(q)} item(s))")
@@ -369,23 +461,24 @@ def queue_list():
 
 def queue_clear():
     save_queue([])
-    print("[*] Queue cleared")
+    ui_emit('queue_cleared')
 
 def queue_remove(n):
     q = load_queue()
     if 1 <= n <= len(q):
         removed = q.pop(n - 1)
         save_queue(q)
-        print(f"[-] Removed: {removed[:60]}")
+        ui_emit('queue_removed', url=removed[:60])
     else:
-        print("[!] Invalid index")
+        ui_emit('queue_bad_index')
 
 def queue_run(session, cfg):
     q = load_queue()
     if not q:
-        print("[*] Queue is empty — add URLs with: queue add <url>")
+        ui_emit('queue_empty')
         return
-    print(f"\n[*] Starting queue — {len(q)} item(s)")
+    print()
+    ui_emit('queue_starting', count=len(q))
     from src.extractors import process_link_queue
     ctx = _make_ctx(cfg)
     remaining = []
@@ -399,9 +492,9 @@ def queue_run(session, cfg):
             remaining.append(url)
     save_queue(remaining)
     if not remaining:
-        print("[✓] Queue complete — cleared")
+        ui_emit('queue_complete')
     else:
-        print(f"[*] Queue kept {len(remaining)} unfinished item(s) for resume")
+        ui_emit('queue_kept_unfinished', count=len(remaining))
 
 # ─── SETTINGS ─────────────────────────────────────────────────
 def handle_settings(parts, cfg):
@@ -415,99 +508,100 @@ def handle_settings(parts, cfg):
             if q in ('360p', '480p', '720p', '1080p', '2160p', 'best'):
                 cfg['quality'] = q
                 save_config(cfg)
-                print(f"[ok] Quality set to: {q}")
+                ui_emit('setting_saved', label='Quality', value=q)
             else:
-                print("[!] Valid values: 360p, 480p, 720p, 1080p, 2160p/4k, best")
+                ui_emit('setting_invalid', hint='Valid values: 360p, 480p, 720p, 1080p, 2160p/4k, best')
         elif key == 'parallel' and len(parts) >= 3:
             try:
                 n = int(parts[2])
                 if 1 <= n <= 3:
+                    warn_override('parallel', n)
                     cfg['parallel'] = n
                     save_config(cfg)
-                    print(f"[ok] Parallel set to: {n}")
+                    ui_emit('setting_saved', label='Parallel downloads', value=n)
                 else:
-                    print("[!] Parallel must be between 1 and 3")
+                    ui_emit('setting_invalid', hint='Parallel must be between 1 and 3.')
             except ValueError:
-                print("[!] Invalid number")
+                ui_emit('setting_invalid', hint='Enter a whole number.')
         elif key == 'bandwidth' and len(parts) >= 3:
             try:
                 bw = int(parts[2])
                 cfg['bandwidth'] = bw
                 save_config(cfg)
-                print(f"[ok] Bandwidth: {'unlimited' if not bw else f'{bw}KB/s'}")
+                ui_emit('setting_saved', label='Bandwidth', value=('unlimited' if not bw else f'{bw}KB/s'))
             except ValueError:
-                print("[!] Enter bandwidth in KB/s (e.g. 500), or 0 for unlimited")
+                ui_emit('setting_invalid', hint='Enter bandwidth in KB/s (e.g. 500), or 0 for unlimited.')
         elif key == 'timeout' and len(parts) >= 3:
             try:
                 secs = int(parts[2])
                 if 30 <= secs <= 600:
                     cfg['download_timeout'] = secs
                     save_config(cfg)
-                    print(f"[ok] Timeout set to: {secs}s")
+                    ui_emit('setting_saved', label='Timeout', value=f'{secs}s')
                 else:
-                    print("[!] Timeout must be between 30 and 600 seconds")
+                    ui_emit('setting_invalid', hint='Timeout must be between 30 and 600 seconds.')
             except ValueError:
-                print("[!] Invalid number")
+                ui_emit('setting_invalid', hint='Enter a whole number.')
         elif key == 'retries' and len(parts) >= 3:
             try:
                 r = int(parts[2])
                 if 1 <= r <= 10:
                     cfg['download_retries'] = r
                     save_config(cfg)
-                    print(f"[ok] Retries set to: {r} attempts")
+                    ui_emit('setting_saved', label='Retries', value=f'{r} attempts')
                 else:
-                    print("[!] Retries must be between 1 and 10")
+                    ui_emit('setting_invalid', hint='Retries must be between 1 and 10.')
             except ValueError:
-                print("[!] Invalid number")
+                ui_emit('setting_invalid', hint='Enter a whole number.')
         elif key in ('search-timeout', 'search_timeout') and len(parts) >= 3:
             try:
                 s = int(parts[2])
                 if 10 <= s <= 300:
                     cfg['search_timeout'] = s
                     save_config(cfg)
-                    print(f"[ok] Search timeout set to: {s}s")
+                    ui_emit('setting_saved', label='Search timeout', value=f'{s}s')
                 else:
-                    print("[!] Search timeout must be between 10 and 300 seconds")
+                    ui_emit('setting_invalid', hint='Search timeout must be between 10 and 300 seconds.')
             except ValueError:
-                print("[!] Invalid number")
+                ui_emit('setting_invalid', hint='Enter a whole number.')
         elif key in ('search-cache', 'search_cache') and len(parts) >= 3:
             val = parts[2].lower()
             if val in ('on', 'off', 'true', 'false'):
                 cfg['search_cache'] = val in ('on', 'true')
                 save_config(cfg)
-                print(f"[ok] Search Cache: {'Enabled' if cfg['search_cache'] else 'Disabled'}")
+                ui_emit('setting_saved', label='Search cache', value=('Enabled' if cfg['search_cache'] else 'Disabled'))
             else:
-                print("[!] Use 'on' or 'off'")
+                ui_emit('setting_invalid', hint="Use 'on' or 'off'.")
         elif key in ('auto-update', 'autoupdate') and len(parts) >= 3:
             try:
                 days = int(parts[2])
                 if 1 <= days <= 30:
                     cfg['auto_update_days'] = days
                     save_config(cfg)
-                    print(f"[ok] Auto-update: every {days} day(s)")
+                    ui_emit('setting_saved', label='Auto-update', value=f'every {days} day(s)')
                 else:
-                    print("[!] Use 1-30 days")
+                    ui_emit('setting_invalid', hint='Use 1-30 days.')
             except ValueError:
-                print("[!] Use days, e.g. settings auto-update 7")
+                ui_emit('setting_invalid', hint='Use days, e.g. settings auto-update 7')
         elif key in ('storage-guard', 'storage_guard') and len(parts) >= 3:
             try:
                 gb = float(parts[2])
                 if 0.1 <= gb <= 50.0:
                     cfg['storage_guard_gb'] = gb
                     save_config(cfg)
-                    print(f"[ok] Storage Guard threshold set to: {gb} GB")
+                    ui_emit('setting_saved', label='Storage guard threshold', value=f'{gb} GB')
                 else:
-                    print("[!] Threshold must be between 0.1 and 50.0 GB")
+                    ui_emit('setting_invalid', hint='Threshold must be between 0.1 and 50.0 GB.')
             except ValueError:
-                print("[!] Invalid float number")
+                ui_emit('setting_invalid', hint='Enter a number, e.g. 2.0')
         elif key in ('auto-resume', 'autoresume') and len(parts) >= 3:
             val = parts[2].lower()
             if val in ('on', 'off', 'true', 'false'):
                 cfg['auto_resume'] = val in ('on', 'true')
                 save_config(cfg)
-                print(f"[ok] Auto Resume: {'Enabled' if cfg['auto_resume'] else 'Disabled'}")
+                ui_emit('setting_saved', label='Auto resume', value=('Enabled' if cfg['auto_resume'] else 'Disabled'))
             else:
-                print("[!] Use 'on' or 'off'")
+                ui_emit('setting_invalid', hint="Use 'on' or 'off'.")
         elif key in ('log', 'mode') and len(parts) >= 3:
             mode = parts[2].lower()
             if mode in ('normal', 'debug'):
@@ -518,9 +612,9 @@ def handle_settings(parts, cfg):
                     set_output_mode(mode)
                 except Exception:
                     pass
-                print(f"[ok] Output mode: {mode}")
+                ui_emit('setting_saved', label='Output mode', value=mode)
             else:
-                print("[!] Use normal or debug")
+                ui_emit('setting_invalid', hint='Use normal or debug.')
         elif key in ('social-quality', 'social_quality') and len(parts) >= 3:
             q = parts[2].lower()
             if q in ('4k', '2160'):
@@ -528,25 +622,25 @@ def handle_settings(parts, cfg):
             if q in ('360p', '480p', '720p', '1080p', '2160p', 'best'):
                 cfg['social_quality'] = q
                 save_config(cfg)
-                print(f"[ok] Social quality: {q}")
+                ui_emit('setting_saved', label='Social quality', value=q)
             else:
-                print("[!] Valid: 360p 480p 720p 1080p 2160p/4k best")
+                ui_emit('setting_invalid', hint='Valid: 360p 480p 720p 1080p 2160p/4k best')
         elif key in ('anime-mode', 'anime_mode') and len(parts) >= 3:
             val = parts[2].lower()
             if val in ('sub', 'dub'):
                 cfg['anime_mode'] = val
                 save_config(cfg)
-                print(f"[ok] Anime mode: {val}")
+                ui_emit('setting_saved', label='Anime mode', value=val)
             else:
-                print("[!] Use 'sub' or 'dub'")
+                ui_emit('setting_invalid', hint="Use 'sub' or 'dub'.")
         elif key == 'ytdlp-channel' and len(parts) >= 3:
             channel = parts[2].lower()
             if channel in ('master', 'stable'):
                 cfg['ytdlp_channel'] = channel
                 save_config(cfg)
-                print(f"[ok] yt-dlp channel: {channel}")
+                ui_emit('setting_saved', label='yt-dlp channel', value=channel)
             else:
-                print("[!] Use master or stable")
+                ui_emit('setting_invalid', hint='Use master or stable.')
         elif key == 'disable' and len(parts) >= 3:
             site = parts[2].lower()
             disabled = cfg.get('disabled_sites', [])
@@ -554,7 +648,7 @@ def handle_settings(parts, cfg):
                 disabled.append(site)
                 cfg['disabled_sites'] = disabled
                 save_config(cfg)
-                print(f"[ok] Disabled: {site}")
+                ui_emit('setting_saved', label='Disabled site', value=site)
             else:
                 print("[*] Already disabled")
         elif key == 'enable' and len(parts) >= 3:
@@ -564,7 +658,7 @@ def handle_settings(parts, cfg):
                 disabled.remove(site)
                 cfg['disabled_sites'] = disabled
                 save_config(cfg)
-                print(f"[ok] Enabled: {site}")
+                ui_emit('setting_saved', label='Enabled site', value=site)
             else:
                 print("[*] Not disabled")
         elif key in ('notifications', 'android_notifications', 'enable_android_notifications') and len(parts) >= 3:
@@ -572,22 +666,22 @@ def handle_settings(parts, cfg):
             if val in ('on', 'off', 'true', 'false'):
                 cfg['enable_android_notifications'] = val in ('on', 'true')
                 save_config(cfg)
-                print(f"[ok] Termux notifications: {'Enabled' if cfg['enable_android_notifications'] else 'Disabled'}")
+                ui_emit('setting_saved', label='Termux notifications', value=('Enabled' if cfg['enable_android_notifications'] else 'Disabled'))
             else:
-                print("[!] Use 'on' or 'off'")
+                ui_emit('setting_invalid', hint="Use 'on' or 'off'.")
         elif key in ('watch-interval', 'clipboard_interval', 'clipboard_check_interval_sec') and len(parts) >= 3:
             try:
                 sec = int(parts[2])
                 if 1 <= sec <= 10:
                     cfg['clipboard_check_interval_sec'] = sec
                     save_config(cfg)
-                    print(f"[ok] Clipboard check interval: {sec}s")
+                    ui_emit('setting_saved', label='Clipboard check interval', value=f'{sec}s')
                 else:
-                    print("[!] Interval must be between 1 and 10 seconds")
+                    ui_emit('setting_invalid', hint='Interval must be between 1 and 10 seconds.')
             except ValueError:
-                print("[!] Invalid number")
+                ui_emit('setting_invalid', hint='Enter a whole number.')
         else:
-            print("[!] Invalid settings command. Type settings to open menu.")
+            ui_emit('setting_invalid', hint='Unknown setting. Type settings to open the menu.')
         return cfg
 
     # Interactive Wizard Mode (if user just types "settings")
@@ -603,15 +697,14 @@ def handle_settings(parts, cfg):
             break
 
         if choice == '1':
-            print("\n┌── Change Download Quality ──────────────────────┐")
-            print("│  1) 360p                                        │")
-            print("│  2) 480p                                        │")
-            print("│  3) 720p                                        │")
-            print("│  4) 1080p                                       │")
-            print("│  5) Best                                        │")
-            print("│  6) 4K (2160p)                                  │")
-            print("│  0) Back                                        │")
-            print("└─────────────────────────────────────────────────┘")
+            print("\n=== Change Download Quality ===")
+            print("  1) 360p")
+            print("  2) 480p")
+            print("  3) 720p")
+            print("  4) 1080p")
+            print("  5) Best")
+            print("  6) 4K (2160p)")
+            print("  0) Back")
             try:
                 opt = input("Select option (0-6): ").strip()
                 if opt == '1': cfg['quality'] = '360p'
@@ -631,6 +724,7 @@ def handle_settings(parts, cfg):
                 p = input("Enter parallel downloads count (1-3): ").strip()
                 n = int(p)
                 if 1 <= n <= 3:
+                    warn_override('parallel', n)
                     cfg['parallel'] = n
                     save_config(cfg)
                     print(f"[ok] Parallel set to: {n}")
@@ -702,11 +796,10 @@ def handle_settings(parts, cfg):
                 pass
 
         elif choice == '7':
-            print("\n┌── Search Cache ─────────────────────────────────┐")
-            print("│  1) Enable (Save results for 24h)               │")
-            print("│  2) Disable (Always search fresh)               │")
-            print("│  0) Back                                        │")
-            print("└─────────────────────────────────────────────────┘")
+            print("\n=== Search Cache ===")
+            print("  1) Enable (Save results for 24h)")
+            print("  2) Disable (Always search fresh)")
+            print("  0) Back")
             try:
                 opt = input("Select option (0-2): ").strip()
                 if opt == '1':
@@ -751,11 +844,10 @@ def handle_settings(parts, cfg):
                 pass
 
         elif choice == '10':
-            print("\n┌── Auto Resume ──────────────────────────────────┐")
-            print("│  1) Enable (Auto-prompt to resume on startup)   │")
-            print("│  2) Disable                                     │")
-            print("│  0) Back                                        │")
-            print("└─────────────────────────────────────────────────┘")
+            print("\n=== Auto Resume ===")
+            print("  1) Enable (Auto-prompt to resume on startup)")
+            print("  2) Disable")
+            print("  0) Back")
             try:
                 opt = input("Select option (0-2): ").strip()
                 if opt == '1':
@@ -770,11 +862,10 @@ def handle_settings(parts, cfg):
                 pass
 
         elif choice == '11':
-            print("\n┌── Log Level ────────────────────────────────────┐")
-            print("│  1) Normal (Clean download progress bars)        │")
-            print("│  2) Debug (Full aria2c / yt-dlp details)        │")
-            print("│  0) Back                                        │")
-            print("└─────────────────────────────────────────────────┘")
+            print("\n=== Log Level ===")
+            print("  1) Normal (Clean download progress bars)")
+            print("  2) Debug (Full aria2c / yt-dlp details)")
+            print("  0) Back")
             try:
                 opt = input("Select option (0-2): ").strip()
                 if opt in ('1', '2'):
@@ -791,11 +882,10 @@ def handle_settings(parts, cfg):
                 pass
 
         elif choice == '12':
-            print("\n┌── yt-dlp Channel ───────────────────────────────┐")
-            print("│  1) Master (Pre-release, latest fixes)          │")
-            print("│  2) Stable (Standard releases)                  │")
-            print("│  0) Back                                        │")
-            print("└─────────────────────────────────────────────────┘")
+            print("\n=== yt-dlp Channel ===")
+            print("  1) Master (Pre-release, latest fixes)")
+            print("  2) Stable (Standard releases)")
+            print("  0) Back")
             try:
                 opt = input("Select option (0-2): ").strip()
                 if opt in ('1', '2'):
@@ -807,11 +897,10 @@ def handle_settings(parts, cfg):
                 pass
 
         elif choice == '14':
-            print("\n┌── Anime Mode ───────────────────────────────────┐")
-            print("│  1) Sub (Subtitled — default)                   │")
-            print("│  2) Dub (English dubbed)                        │")
-            print("│  0) Back                                        │")
-            print("└─────────────────────────────────────────────────┘")
+            print("\n=== Anime Mode ===")
+            print("  1) Sub (Subtitled - default)")
+            print("  2) Dub (English dubbed)")
+            print("  0) Back")
             try:
                 opt = input("Select option (0-2): ").strip()
                 if opt in ('1', '2'):
@@ -827,6 +916,7 @@ def handle_settings(parts, cfg):
                 val = input("Enter aria2c connections per server (1-16): ").strip()
                 n = int(val)
                 if 1 <= n <= 16:
+                    warn_override('connections', n)
                     cfg['aria2c_connections'] = n
                     save_config(cfg)
                     print(f"[ok] aria2c connections set to: {n}")
@@ -870,12 +960,11 @@ def handle_settings(parts, cfg):
             while True:
                 disabled = cfg.get('disabled_sites', [])
                 all_sites = ['nkiri', '9jarocks', 'plutomovies', 'dramakey', 'dramarain', 'socials']
-                print("\n┌── Disable/Enable Sites ─────────────────────────┐")
+                print("\n=== Disable/Enable Sites ===")
                 for idx, s in enumerate(all_sites, 1):
                     status = "[Disabled]" if s in disabled else "[Enabled]"
-                    print(f"│  {idx}) {s.capitalize():<12} {status:<24} │")
-                print("│  0) Back                                        │")
-                print("└─────────────────────────────────────────────────┘")
+                    print(f"  {idx}) {s.capitalize():<12} {status}")
+                print("  0) Back")
                 try:
                     s_choice = input("Enter site number to toggle (0-6): ").strip()
                 except (KeyboardInterrupt, EOFError):
@@ -938,30 +1027,30 @@ def _show_settings(cfg):
     print(f"  Storage:   {space_s}")
     print(f"==================================================")
     print(f"  Active Features:")
-    print(f"  [✓] Parallel Search           [✓] Pause/Resume (Ctrl+P on Termux)")
-    print(f"  [✓] Expired Link Refresh      [✓] Smart Queue")
+    print(f"  [OK] Parallel Search          [OK] Pause/Resume (Ctrl+P on Termux)")
+    print(f"  [OK] Expired Link Refresh     [OK] Smart Queue")
     print(f"==================================================")
     print(f"  Supported Sites (6):")
-    print(f"  🔍 Searchable:  NKiri | DramaKey | PlutoMovies | AllAnime")
-    print(f"  🔗 Link Only:   9JaRocks | DramaRain | Socials")
+    print(f"  Searchable:  NKiri | DramaKey | PlutoMovies | AllAnime")
+    print(f"  Link Only:   9JaRocks | DramaRain | Socials")
     print(f"==================================================")
-    print(f"  1) Download Quality   ➜  [{q}]")
-    print(f"  2) Parallel Downloads ➜  [{p}]")
-    print(f"  3) Bandwidth Limit    ➜  [{'unlimited' if not bw else f'{bw} KB/s'}]")
-    print(f"  4) Stall Timeout      ➜  [{timeout}s]")
-    print(f"  5) Max Retry Limit    ➜  [{retries} attempts]")
-    print(f"  6) Search Timeout     ➜  [{search_timeout}s]")
-    print(f"  7) Search Cache       ➜  [{'Enabled' if search_cache else 'Disabled'}]")
-    print(f"  8) Auto Update Days   ➜  [{auto_days} days]")
-    print(f"  9) Storage Guard      ➜  [{guard} GB]")
-    print(f" 10) Auto Resume        ➜  [{'Enabled' if auto_resume else 'Disabled'}]")
-    print(f" 11) Log level          ➜  [{mode}]")
-    print(f" 12) yt-dlp Channel     ➜  [{ytdlp_channel}]")
-    print(f" 13) Manage Sites       ➜  [{len(dis)} disabled]")
-    print(f" 14) Anime Mode         ➜  [{cfg.get('anime_mode', 'sub')}]")
-    print(f" 15) aria2c Connections ➜  [{cfg.get('aria2c_connections', 16)}]")
-    print(f" 16) aria2c Splits      ➜  [{cfg.get('aria2c_splits', 16)}]")
-    print(f" 17) Min Split Size     ➜  [{cfg.get('aria2c_min_split_size', '1M')}]")
+    print(f"  1) Download Quality   ->  [{q}]")
+    print(f"  2) Parallel Downloads ->  [{p}]")
+    print(f"  3) Bandwidth Limit    ->  [{'unlimited' if not bw else f'{bw} KB/s'}]")
+    print(f"  4) Stall Timeout      ->  [{timeout}s]")
+    print(f"  5) Max Retry Limit    ->  [{retries} attempts]")
+    print(f"  6) Search Timeout     ->  [{search_timeout}s]")
+    print(f"  7) Search Cache       ->  [{'Enabled' if search_cache else 'Disabled'}]")
+    print(f"  8) Auto Update Days   ->  [{auto_days} days]")
+    print(f"  9) Storage Guard      ->  [{guard} GB]")
+    print(f" 10) Auto Resume        ->  [{'Enabled' if auto_resume else 'Disabled'}]")
+    print(f" 11) Log level          ->  [{mode}]")
+    print(f" 12) yt-dlp Channel     ->  [{ytdlp_channel}]")
+    print(f" 13) Manage Sites       ->  [{len(dis)} disabled]")
+    print(f" 14) Anime Mode         ->  [{cfg.get('anime_mode', 'sub')}]")
+    print(f" 15) aria2c Connections ->  [{cfg.get('aria2c_connections', 16)}]")
+    print(f" 16) aria2c Splits      ->  [{cfg.get('aria2c_splits', 16)}]")
+    print(f" 17) Min Split Size     ->  [{cfg.get('aria2c_min_split_size', '1M')}]")
     print(f"  0) Back to command prompt")
     print(f"==================================================")
 
@@ -1074,7 +1163,7 @@ def _git_update(script_dir, announce=False, force=False):
                 pass
 
         if announce and res['updated']:
-            print("[ok] Toolkit updated — restart to use latest version")
+            ui_emit('toolkit_updated')
     except Exception as e:
         res['error'] = res['error'] or str(e)
 
@@ -1190,7 +1279,7 @@ def setup_android():
             except Exception as e:
                 print(f"[!] tmux error: {e}")
         else:
-            print("[!] tmux not found — install with: pkg install tmux")
+            ui_emit('tmux_missing')
     return True
 
 # ─── BANNER ───────────────────────────────────────────────────
@@ -1203,41 +1292,49 @@ def print_banner(cfg):
 
     if columns >= 115:
         # Layout A (Landscape)
-        print("┌───────────────────────────────────────────────────────┬───────────────────────────────────────────────────────┐")
-        print("│ 📥 ANONRODE v2.2                                      │ 🎬 SUPPORTED SITES                                    │")
-        print("├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤")
-        print("│ ⚡ KEY FEATURES                                       │ 🎬 Movies & Series:                                   │")
-        print("│  • 🔍 Parallel Search  - Search all sites at once     │  • NKiri        [⚡ Very Fast]  Korean & Nollywood    │")
-        print("│  • ⏸ Pause & Resume   - Press Ctrl+P anytime          │  • 9JaRocks     [⚡ Very Fast]  Nollywood & Hollywood │")
-        print("│  • 🔄 Link Auto-Update - Refreshes expired downloads  │  • PlutoMovies  [🚀 Fast]       Blockbusters & Shows  │")
-        print("│  • 📋 Smart Queue      - Queue up multiple series     │ 🎎 Asian Dramas:                                      │")
-        print("│  • 💾 Storage Guard    - Auto-pauses if space is full │  • DramaKey     [⏱ Normal]      Chinese & Korean      │")
-        print("│                                                       │  • DramaRain    [⏱ Normal]      Chinese & Japanese    │")
-        print("│                                                       │ 📱 Social Media:                                      │")
-        print("│                                                       │  • YouTube      [🚀 Fast]       Videos & Playlists    │")
-        print("│                                                       │  • Pinterest    [🚀 Fast]       Pins & Boards         │")
-        print("└───────────────────────────────────────────────────────┴───────────────────────────────────────────────────────┘")
+        print("=" * 60)
+        print("  ANONRODE v2.2")
+        print("=" * 60)
+        print("  KEY FEATURES")
+        print("   - Parallel Search   - Search all sites at once")
+        print("   - Pause & Resume    - Press Ctrl+P anytime")
+        print("   - Link Auto-Update  - Refreshes expired downloads")
+        print("   - Smart Queue       - Queue up multiple series")
+        print("   - Storage Guard     - Auto-pauses if space is full")
+        print("-" * 60)
+        print("  SUPPORTED SITES")
+        print("   Movies & Series:")
+        print("   - NKiri        [Very Fast]  Korean & Nollywood")
+        print("   - 9JaRocks     [Very Fast]  Nollywood & Hollywood")
+        print("   - PlutoMovies  [Fast]       Blockbusters & Shows")
+        print("   Asian Dramas:")
+        print("   - DramaKey     [Normal]     Chinese & Korean")
+        print("   - DramaRain    [Normal]     Chinese & Japanese")
+        print("   Social Media:")
+        print("   - YouTube      [Fast]       Videos & Playlists")
+        print("   - Pinterest    [Fast]       Pins & Boards")
+        print("=" * 60)
     else:
         # Layout B (Portrait / Mobile)
-        print("┌────────────────────────────────────────────────────────┐")
-        print("│  📥 ANONRODE v2.2                                      │")
-        print("├────────────────────────────────────────────────────────┤")
-        print("│  ⚡ KEY FEATURES                                       │")
-        print("│   • 🔍 Parallel Search  - Search all sites at once     │")
-        print("│   • ⏸ Pause & Resume   - Press Ctrl+P anytime          │")
-        print("│   • 🔄 Link Auto-Update - Refreshes expired downloads  │")
-        print("│   • 📋 Smart Queue      - Queue up multiple series     │")
-        print("│   • 💾 Storage Guard    - Auto-pauses if space is full │")
-        print("├────────────────────────────────────────────────────────┤")
-        print("│  🎬 SUPPORTED SITES                                    │")
-        print("│   • NKiri        [⚡ Very Fast]  Korean & Nollywood    │")
-        print("│   • 9JaRocks     [⚡ Very Fast]  Nollywood & Hollywood │")
-        print("│   • PlutoMovies  [🚀 Fast]       Blockbusters & Shows  │")
-        print("│   • DramaKey     [⏱ Normal]     Chinese & Korean       │")
-        print("│   • DramaRain    [⏱ Normal]     Chinese & Japanese     │")
-        print("│   • YouTube      [🚀 Fast]       Videos & Playlists    │")
-        print("│   • Pinterest    [🚀 Fast]       Pins & Boards         │")
-        print("└────────────────────────────────────────────────────────┘")
+        print("=" * 60)
+        print("  ANONRODE v2.2")
+        print("=" * 60)
+        print("  KEY FEATURES")
+        print("   - Parallel Search   - Search all sites at once")
+        print("   - Pause & Resume    - Press Ctrl+P anytime")
+        print("   - Link Auto-Update  - Refreshes expired downloads")
+        print("   - Smart Queue       - Queue up multiple series")
+        print("   - Storage Guard     - Auto-pauses if space is full")
+        print("-" * 60)
+        print("  SUPPORTED SITES")
+        print("   - NKiri        [Very Fast]  Korean & Nollywood")
+        print("   - 9JaRocks     [Very Fast]  Nollywood & Hollywood")
+        print("   - PlutoMovies  [Fast]       Blockbusters & Shows")
+        print("   - DramaKey     [Normal]     Chinese & Korean")
+        print("   - DramaRain    [Normal]     Chinese & Japanese")
+        print("   - YouTube      [Fast]       Videos & Playlists")
+        print("   - Pinterest    [Fast]       Pins & Boards")
+        print("=" * 60)
 
 # make_session has been centralized and is imported from downloader.py
 
@@ -1352,16 +1449,17 @@ def cmd_anime(query, session, cfg):
     from src.extractors import search_allanime, _get_episode_list, extract_allanime
 
 
-    print(f'\n[*] Searching AllAnime for "{query}"...')
+    print()
+    ui_emit('anime_search_running', query=query)
 
     shows = search_allanime(query)
     if not shows:
-        print('[!] No results found — try different spelling')
+        ui_emit('anime_no_results')
         return
 
     # ── Show list ──────────────────────────────────────────────
     print()
-    print(f"  {'─'*50}")
+    print(f"  {'-'*50}")
     for i, show in enumerate(shows, 1):
         sub = show['sub_eps']
         dub = show['dub_eps']
@@ -1370,7 +1468,7 @@ def cmd_anime(query, session, cfg):
         if dub: avail.append(f'dub:{dub}')
         avail_str = ', '.join(avail) if avail else 'unknown'
         print(f"  [{i}] {show['name']} ({avail_str} eps)")
-    print(f"  {'─'*50}")
+    print(f"  {'-'*50}")
 
     try:
         choice = input(f'  Pick a show (1-{len(shows)}) or 0 to cancel: ').strip()
@@ -1391,24 +1489,25 @@ def cmd_anime(query, session, cfg):
         fallback = 'sub' if mode == 'dub' else 'dub'
         fallback_count = selected['sub_eps'] if mode == 'dub' else selected['dub_eps']
         if fallback_count > 0:
-            print(f'  [!] No {mode} available — falling back to {fallback}')
+            ui_emit('anime_mode_fallback', mode=mode, fallback=fallback)
             mode      = fallback
             eps_count = fallback_count
         else:
-            print(f'  [!] No episodes available for this show')
+            ui_emit('anime_no_episodes')
             return
 
-    print(f'\n[ok] {show_name} — {eps_count} episode(s) available ({mode})')
+    print()
+    ui_emit('anime_show_selected', show=show_name, count=eps_count, mode=mode)
 
     # ── Fetch full episode list ────────────────────────────────
-    print('[*] Fetching episode list...')
+    ui_emit('fetching_episode_list')
     ep_list = _get_episode_list(show_id, mode=mode)
     if not ep_list:
-        print('[!] Could not fetch episode list')
+        ui_emit('anime_ep_list_failed')
         return
 
     total = len(ep_list)
-    print(f'[ok] {total} episode(s) found (Episodes: {ep_list[0]}–{ep_list[-1]})')
+    ui_emit('anime_ep_count', count=total, first=ep_list[0], last=ep_list[-1])
 
     # ── All or specific ────────────────────────────────────────
     print()
@@ -1426,15 +1525,15 @@ def cmd_anime(query, session, cfg):
             except (EOFError, KeyboardInterrupt):
                 return
             if confirm not in ('y', 'yes'):
-                print('[*] Cancelled')
+                ui_emit('cancelled')
                 return
         episodes = ep_list
 
     elif dl_choice == '2':
-        ep_display = f'1–{total}' if total > 1 else '1'
+        ep_display = f'1-{total}' if total > 1 else '1'
         print(f'  Episodes available: {ep_display}')
         try:
-            spec = input('  Enter episode(s) — e.g. 1, 1-5, 1-5,10: ').strip()
+            spec = input('  Enter episode(s) - e.g. 1, 1-5, 1-5,10: ').strip()
         except (EOFError, KeyboardInterrupt):
             return
         if not spec:
@@ -1442,7 +1541,7 @@ def cmd_anime(query, session, cfg):
         try:
             selected_nums = _parse_episode_selection(spec)
         except (ValueError, Exception):
-            print('[!] Invalid episode range — use format like 1-5 or 1,3,7')
+            ui_emit('invalid_range')
             return
         # Filter ep_list by selected numbers
         episodes = []
@@ -1454,9 +1553,9 @@ def cmd_anime(query, session, cfg):
             except ValueError:
                 pass
         if not episodes:
-            print('[!] No matching episodes found')
+            ui_emit('no_episodes_in_range')
             return
-        print(f'[*] Downloading {len(episodes)} episode(s)')
+        ui_emit('downloading_count', count=len(episodes))
     else:
         return
 
@@ -1466,8 +1565,8 @@ def cmd_anime(query, session, cfg):
 
 
 def watch_clipboard(session, cfg):
-    print("[📋] Clipboard watcher active! Copy any movie/series link to automatically download...")
-    print("[📋] Press Ctrl+C once to exit watch mode and return to main menu.")
+    ui_emit('clipboard_watch_start')
+    ui_emit('clipboard_watch_exit_hint')
     last_text = ""
     # Clamp at read time: a hand-edited .config.json can hold 0 (or negative),
     # which would make the poll loop below spin at 100% CPU spawning the
@@ -1492,7 +1591,7 @@ def watch_clipboard(session, cfg):
         try:
             import pyperclip
         except ImportError:
-            print("[*] pyperclip not found — installing...")
+            ui_emit('pyperclip_installing')
             try:
                 subprocess.run(
                     ['pip', 'install', 'pyperclip', '--break-system-packages', '-q'],
@@ -1533,7 +1632,8 @@ def watch_clipboard(session, cfg):
                     from src.extractors import detect_site
                     extractor = detect_site(text)
                     if extractor:
-                        print(f"\n[📋] Detected download URL in clipboard: {text[:70]}")
+                        print()
+                        ui_emit('clipboard_link_found', url=text[:70])
                         app.reset_download_state()
                         ctx = _make_ctx(cfg)
                         from src.extractors import process_link_queue
@@ -1552,13 +1652,15 @@ def watch_clipboard(session, cfg):
                 break
             time.sleep(0.1)
 
-    print("\n[📋] Clipboard watcher stopped.")
+    print()
+    ui_emit('clipboard_watch_stop')
 
 
 # ─── MAIN REPL ────────────────────────────────────────────────
 def main():
     setup_android()
     cfg = load_config()
+    warn_if_over_recommended(cfg)
 
     def _release_wake_lock():
         stop_termux_pause_controls()
@@ -1688,12 +1790,12 @@ def main():
                 print(f"[!] Clipboard error: {e}")
                 continue
             if clipped and clipped.startswith('http'):
-                print(f"[*] From clipboard: {clipped[:70]}")
+                ui_emit('clipboard_link_found', url=clipped[:70])
                 app.reset_download_state()
                 ctx = _make_ctx(cfg)
                 process_link_queue([clipped], session, ctx)
             elif clipped:
-                print(f"[!] Not a URL: {clipped[:60]}")
+                ui_emit('clipboard_not_url')
             else:
                 print("[!] Clipboard is empty")
 
@@ -1746,7 +1848,7 @@ def main():
                 if skipped:
                     summary += f", {skipped} skipped (not a URL)"
                 total = len(load_queue())
-                print(f"{summary} — {total} item(s) total, type 'qas' to start")
+                print(f"{summary} - {total} item(s) total, type 'qas' to start")
 
         elif lower == 'qas':
             queue_run(session, cfg)
@@ -1757,27 +1859,23 @@ def main():
             res = _git_update(script_dir, announce=False, force=True)
 
             if res['was_dirty']:
-                print("[!] Local changes detected — commit or stash before updating:")
+                ui_emit('update_dirty')
                 for line in res['dirty_lines'][:8]:
                     print(f"      {line}")
             elif not res['reached_remote']:
-                print("[!] Could not reach GitHub — update was not checked")
-                if res['error']:
-                    print(f"      {res['error'][:400]}")
+                ui_emit('update_no_remote', debug=res['error'][:400] if res['error'] else None)
             elif not res['merge_ok']:
-                print("[!] git update failed:")
-                if res['error']:
-                    print(f"      {res['error'][:400]}")
+                ui_emit('update_merge_failed', debug=res['error'][:400] if res['error'] else None)
             elif res['updated']:
                 old = (res['before_commit'] or '')[:8]
                 new = (res['after_commit'] or '')[:8]
-                print(f"[ok] Updated {old} -> {new} — restarting...")
+                ui_emit('update_applied', old=old, new=new)
                 sys.stdout.flush()
                 time.sleep(0.5)
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             else:
                 head = (res['after_commit'] or res['before_commit'] or '')[:8]
-                print(f"[*] You're on the latest (origin/main @ {head})")
+                ui_emit('update_on_latest', head=head)
 
         elif lower in ('updateyt', 'update-yt', 'update ytdlp'):
             try:
@@ -1798,7 +1896,7 @@ def main():
             if info['date']:
                 print(f"  Date    : {info['date']}")
             if not info['reached_remote']:
-                print("  Remote  : offline — could not check origin/main")
+                print("  Remote  : offline - could not check origin/main")
             elif info['behind'] is None:
                 print("  Remote  : reached, but behind-count unavailable")
             elif info['behind'] == 0:
@@ -1806,7 +1904,7 @@ def main():
             else:
                 n = info['behind']
                 s = 's' if n != 1 else ''
-                print(f"  Remote  : {n} commit{s} behind — type 'update' to upgrade")
+                print(f"  Remote  : {n} commit{s} behind - type 'update' to upgrade")
 
         elif lower.startswith('anime '):
             query = raw.split(' ', 1)[1].strip()

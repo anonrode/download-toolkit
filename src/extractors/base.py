@@ -7,13 +7,14 @@ from bs4 import BeautifulSoup
 import requests
 
 from ..resolvers import ResolverRegistry
+from ..messages import render as render_message
 from ..downloader import (
     DownloadSummary, download_file, download_batch, download_with_ytdlp,
     download_social_ytdlp, Prefetcher, safe_print, safe_filename,
     find_direct_video, base_domain, ProcessContainer,
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
     _notify_start, register_process, unregister_process, finish_process,
-    update_status, _drain_futures_interruptible,
+    update_status, _drain_futures_interruptible, make_session,
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
@@ -168,7 +169,7 @@ def diagnose_page(soup, url, expected_pattern=None):
             lines.append(f"    • {lnk[:80]}")
 
     output = '\n'.join(lines)
-    safe_print(f"\n[!] No matching content found — details written to {DIAG_LOG}")
+    safe_print(f"\n[!] No matching content found - details written to {DIAG_LOG}")
     safe_print(f"[!] Expected: {expected_pattern or 'unknown'}")
     try:
         os.makedirs(os.path.dirname(DIAG_LOG), exist_ok=True)
@@ -213,7 +214,7 @@ def safe_resolve(resolver_fn, url, session, resolver_name='', max_attempts=3):
         try:
             result = resolver_fn(url, session)
             if result and _is_valid_cdn_url(result):
-                safe_print(f"  [✓] {resolver_name} resolved: {result[:60]}...")
+                safe_print(f"  [OK] {resolver_name} resolved: {result[:60]}...")
                 return result
             elif result:
                 safe_print(f"  [!] {resolver_name} returned invalid URL: {result[:60]}...")
@@ -230,7 +231,7 @@ def safe_resolve(resolver_fn, url, session, resolver_name='', max_attempts=3):
             safe_print(f"  [!] {resolver_name} failed: {e} (attempt {attempt+1}/{max_attempts})")
             if attempt < max_attempts - 1:
                 time.sleep(2)
-    safe_print(f"  [✗] {resolver_name} failed after {max_attempts} attempts")
+    safe_print(f"  [X] {resolver_name} failed after {max_attempts} attempts")
     return None
 
 def try_resolver_chain(resolvers, url, session):
@@ -285,7 +286,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
 
     r = safe_get(session, url)
     if r is None:
-        safe_print(f"[!] Could not fetch page: {url[:70]}")
+        safe_print(render_message('page_fetch_failed'))
         return
     soup = BeautifulSoup(r.text, 'html.parser')
     links = list(dict.fromkeys(
@@ -298,10 +299,10 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
         return
     links = _filter_by_episode_range(links, ctx)
     if not links:
-        safe_print("[!] No episodes matched that range")
+        safe_print(render_message('no_episodes_found'))
         return
 
-    safe_print(f"[*] Found {len(links)} episode(s) — saving to: {folder}")
+    safe_print(f"[*] Found {len(links)} episode(s) - saving to: {folder}")
     _notify_start(name, len(links))
     summary = DownloadSummary()
 
@@ -324,7 +325,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
             if not done:
                 done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
             if done:
-                safe_print(f"  [✓] Already downloaded — skipping")
+                safe_print(render_message('already_saved'))
                 summary.add_skipped()
             else:
                 to_process.append((ep_url, ep_name))
@@ -345,16 +346,34 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                               stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
                               source_url=ep_url)
             else:
-                safe_print(f"  [✗] Could not extract link")
+                safe_print(render_message('no_download_link'))
                 summary.add_failed(ep_name)
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             safe_print(f"\n  [*] Resolving {len(to_process)} link(s)...")
             resolved = {}
+
+            def _resolve_one(ep_url):
+                # Each worker gets its OWN session. The parent `session` is a
+                # single connection-pool object and neither curl_cffi nor
+                # requests Sessions are thread-safe: sharing one across N
+                # concurrent resolvers corrupts the pool and deadlocks in the
+                # C layer (the freeze that stopped downloads after the first
+                # batch when parallel>1). A private session per thread removes
+                # the shared state entirely.
+                worker_session = make_session()
+                try:
+                    return ResolverRegistry.resolve(ep_url, worker_session)
+                finally:
+                    try:
+                        worker_session.close()
+                    except Exception:
+                        pass
+
             with ThreadPoolExecutor(max_workers=min(len(to_process), 8)) as ex:
                 futures = {
-                    ex.submit(ResolverRegistry.resolve, ep_url, session): (ep_url, ep_name)
+                    ex.submit(_resolve_one, ep_url): (ep_url, ep_name)
                     for ep_url, ep_name in to_process
                 }
                 for f in as_completed(futures):
@@ -371,7 +390,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
                     items.append((direct, safe_filename(f"{ep_name}.{ext}"), ep_name, ep_url))
                 else:
-                    safe_print(f"  [✗] Could not extract link: {ep_name}")
+                    safe_print(f"{render_message('no_download_link')} ({ep_name})")
                     summary.add_failed(ep_name)
 
             if items:
@@ -395,7 +414,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                         f.result()
                     except Exception as e:
                         if not _stopped(ctx):
-                            safe_print(f"  [✗] Thread error for {ep_name}: {e}")
+                            safe_print(f"  [X] Thread error for {ep_name}: {e}")
                             summary.add_failed(ep_name)
                 ex.shutdown(wait=False, cancel_futures=True)
 
@@ -426,7 +445,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                               wait_fn=ctx.get('wait'),
                               source_url=ep_url)
             else:
-                safe_print(f"  [✗] Could not extract link on retry")
+                safe_print(render_message('no_download_link'))
                 retry_summary.add_failed(failed_fname)
         retry_summary.report(f"{name} (retry)")
 

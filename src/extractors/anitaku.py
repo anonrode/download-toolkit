@@ -4,7 +4,7 @@ def extract_anitaku(url, session, ctx=None):
     ctx  = ctx or {}
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
-    safe_print("[*] Anitaku mode")
+    safe_print(render_message('site_mode', site='Anitaku'))
     slug       = url.rstrip('/').split('/')[-1]
     is_episode = 'episode-' in slug
     name       = re.sub(r'-episode-\d+.*$', '', slug) if is_episode else slug
@@ -16,7 +16,7 @@ def extract_anitaku(url, session, ctx=None):
     def download_episode(ep_url, ep_name):
         r = safe_get(session, ep_url, referer=ANITAKU_BASE + '/', timeout=30)
         if r is None:
-            safe_print(f"  [✗] Could not fetch: {ep_name}")
+            safe_print(f"  [X] Could not fetch: {ep_name}")
             summary.add_failed(ep_name)
             return
         tamil_match = re.search(r"""(https://tamilembed\.lol/embed/[^\s"'<>]+)""", r.text)
@@ -45,17 +45,17 @@ def extract_anitaku(url, session, ctx=None):
                                      quality=quality, current_process=cur_proc,
                                      stop_flag=stop, pause_flag=pause)
         if not result:
-            safe_print(f"  [✗] All methods failed: {ep_name}")
+            safe_print(f"  [X] All methods failed: {ep_name}")
             diagnose_page(soup2, ep_url, "tamilembed.lol embed URL")
 
     if is_episode:
-        safe_print(f"[*] Single episode — saving to: {folder}")
+        safe_print(f"[*] Single episode - saving to: {folder}")
         download_episode(url, safe_filename(slug))
     else:
-        safe_print("[*] Fetching episode list...")
+        safe_print(render_message('fetching_episode_list'))
         r = safe_get(session, url, referer=ANITAKU_BASE + '/', timeout=30)
         if r is None:
-            safe_print("[!] Could not fetch series page")
+            safe_print(render_message('page_fetch_failed'))
             return
         soup  = BeautifulSoup(r.text, 'html.parser')
         seen  = set()
@@ -76,7 +76,7 @@ def extract_anitaku(url, session, ctx=None):
                     seen.add(href)
                     ep_links.append((href, a.get_text(strip=True) or href.split('/')[-1]))
         if not ep_links:
-            safe_print("[!] No episode links found")
+            safe_print(render_message('no_episode_links'))
             diagnose_page(soup, url, "episode-* links")
             return
 
@@ -86,9 +86,9 @@ def extract_anitaku(url, session, ctx=None):
         ep_links.sort(key=ep_num)
         ep_links = _filter_by_episode_range(ep_links, ctx)
         if not ep_links:
-            safe_print("[*] No episodes matched your selection")
+            safe_print(render_message('no_episodes_in_range'))
             return
-        safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
+        safe_print(f"[*] Found {len(ep_links)} episode(s) - saving to: {folder}")
         _notify_start(name, len(ep_links))
 
         for i, (ep_url, ep_text) in enumerate(ep_links, 1):
@@ -99,7 +99,7 @@ def extract_anitaku(url, session, ctx=None):
             safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
             done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
             if done:
-                safe_print(f"  [✓] Already downloaded — skipping")
+                safe_print(render_message('already_saved'))
                 summary.add_skipped()
                 continue
             download_episode(ep_url, ep_name)

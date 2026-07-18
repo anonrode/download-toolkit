@@ -24,6 +24,7 @@ from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .downloader import safe_print, UA_DESKTOP, BASE_DIR, CONFIG_DIR
+from .messages import render as render_message
 
 # ─── CACHE ────────────────────────────────────────────────────
 CACHE_FILE    = os.path.join(os.path.dirname(__file__), '.search_cache.json')
@@ -360,7 +361,7 @@ def _search_plutomovies(query, results, lock, timeout=15):
             break
 
     if found_any:
-        safe_print("  [✓] Found on PlutoMovies")
+        safe_print("  " + render_message('search_found_on', site='PlutoMovies'))
 
 # ─── SITE SEARCHERS ───────────────────────────────────────────
 
@@ -395,7 +396,7 @@ def _search_site(domain, wave1, wave2, base, season_slug, year,
                 cancel_event.set()
             with lock:
                 results.append((site_name, url))
-            safe_print(f"  [✓] Found on {site_name}")
+            safe_print("  " + render_message('search_found_on', site=site_name))
             return
 
         # Wave 1 missed — run wave 2 only if not cancelled
@@ -409,14 +410,14 @@ def _search_site(domain, wave1, wave2, base, season_slug, year,
     if url:
         with lock:
             results.append((site_name, url))
-        safe_print(f"  [✓] Found on {site_name}")
+        safe_print("  " + render_message('search_found_on', site=site_name))
 
 # ─── MAIN SEARCH ──────────────────────────────────────────────
 
 def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
     base, season_slug, year = _parse_query(query)
     if not base:
-        safe_print("[!] Empty query")
+        safe_print(render_message('search_empty_query'))
         return []
     cache_key = f"{site_filter or 'all'}:{base}:{season_slug}:{year}:{'fast' if fast else 'full'}:{hint or ''}"
 
@@ -433,7 +434,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
     if use_cache:
         cached = _cache_get(cache_key)
         if cached:
-            safe_print(f"  [cached] {base}")
+            safe_print("  " + render_message('search_cached', query=base))
             return cached
 
     results = []
@@ -488,8 +489,8 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
 
 def _present_results(results, raw_query):
     if not results:
-        safe_print(f"\n[!] Nothing found for: {raw_query}")
-        safe_print("[*] Try different spelling or paste URL directly")
+        safe_print("\n" + render_message('search_nothing_found', query=raw_query))
+        safe_print(render_message('search_try_again'))
         return None
 
     # Limit each site/platform to at most 3 results to ensure search results diversity
@@ -517,7 +518,7 @@ def _present_results(results, raw_query):
         return None
 
     print()
-    print(f"  {'─'*55}")
+    print(f"  {'-'*55}")
     for i, (site, url) in enumerate(display_results, 1):
         if site.startswith("PlutoMovies "):
             source = site.replace("PlutoMovies ", "Pluto")
@@ -527,7 +528,7 @@ def _present_results(results, raw_query):
             slug = url.rstrip('/').split('/')[-1]
             title = slug.replace('-', ' ').title()
             print(f"  [{i}] [{site}] {title}")
-    print(f"  {'─'*55}")
+    print(f"  {'-'*55}")
     try:
         choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(display_results)).strip())
     except (ValueError, EOFError, KeyboardInterrupt):
@@ -551,7 +552,7 @@ def search(raw_query, session=None):
         query = query[:-12].strip()
 
     timeout = _search_timeout(45)
-    safe_print(f"\n[*] Searching: {query}")
+    safe_print("\n" + render_message('search_running', query=query))
     results = _run_search(query, site_filter=site_filter, fast=False, timeout=timeout)
     return _present_results(results, raw_query)
 
@@ -575,23 +576,23 @@ def fsearch(raw_query, session=None):
         query = query[:-12].strip()
 
     if hint:
-        safe_print(f"\n[*] Fast search ({hint}): {query}")
+        safe_print("\n" + render_message('fast_search_running_hint', hint=hint, query=query))
     else:
-        safe_print(f"\n[*] Fast search: {query}")
+        safe_print("\n" + render_message('fast_search_running', query=query))
 
     timeout = _search_timeout(45)
     results = _run_search(query, site_filter=site_filter, fast=True, hint=hint, timeout=timeout)
     return _present_results(results, raw_query)
 
 def rebuild_index_command():
-    safe_print("[*] No index in this version — search uses direct slug probing")
+    safe_print(render_message('search_no_index'))
 
 def clear_search_cache():
     try:
         if os.path.exists(CACHE_FILE):
             os.remove(CACHE_FILE)
-            safe_print("[✓] Search cache cleared")
+            safe_print(render_message('cache_cleared'))
         else:
-            safe_print("[*] No cache file found")
+            safe_print(render_message('cache_none'))
     except Exception as e:
-        safe_print(f"[!] Could not clear cache: {e}")
+        safe_print(render_message('cache_clear_failed', error=e))

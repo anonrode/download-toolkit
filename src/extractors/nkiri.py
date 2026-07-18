@@ -4,7 +4,7 @@ def extract_nkiri(url, session, ctx=None):
     ctx  = ctx or {}
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
-    safe_print("[*] NKiri/TheNkiri mode")
+    safe_print(render_message('site_mode', site='NKiri/TheNkiri'))
     slug = url.rstrip('/').split('/')[-1]
     name = re.sub(r'-(korean|complete|drama|series|nollywood|hollywood|tv|movie).*$', '', slug, flags=re.IGNORECASE)
     name = clean_name(name)
@@ -14,7 +14,7 @@ def extract_nkiri(url, session, ctx=None):
 
     r = safe_get(session, url, timeout=20, referer='https://thenkiri.com/')
     if r is None:
-        safe_print("[!] Could not fetch page")
+        safe_print(render_message('page_fetch_failed'))
         return
     soup = BeautifulSoup(r.text, 'html.parser')
 
@@ -26,9 +26,9 @@ def extract_nkiri(url, session, ctx=None):
     if dw_links:
         dw_links = _filter_by_episode_range(dw_links, ctx)
         if not dw_links:
-            safe_print("[!] No episodes matched that range")
+            safe_print(render_message('no_episodes_in_range'))
             return
-        safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) — saving to: {folder}")
+        safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) - saving to: {folder}")
         _notify_start(name, len(dw_links))
 
         batch_size = max(1, parallel)
@@ -49,7 +49,7 @@ def extract_nkiri(url, session, ctx=None):
                 if not done:
                     done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
                 if done:
-                    safe_print(f"  [✓] Already downloaded — skipping")
+                    safe_print(render_message('already_saved'))
                     summary.add_skipped()
                 else:
                     to_process.append((ep_url, ep_name))
@@ -69,7 +69,7 @@ def extract_nkiri(url, session, ctx=None):
                                   stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
                                   source_url=ep_url)
                 else:
-                    safe_print(f"  [✗] Could not extract link")
+                    safe_print(f"  [X] Could not extract link")
                     summary.add_failed(ep_name)
             else:
                 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -93,7 +93,7 @@ def extract_nkiri(url, session, ctx=None):
                         ext = 'mkv' if '.mkv' in direct else 'mp4'
                         items.append((direct, safe_filename(f"{ep_name}.{ext}"), ep_url))
                     else:
-                        safe_print(f"  [✗] Could not extract link: {ep_name}")
+                        safe_print(f"  [X] Could not extract link: {ep_name}")
                         summary.add_failed(ep_name)
 
                 if items:
@@ -154,9 +154,9 @@ def extract_nkiri(url, session, ctx=None):
     if cdn_links:
         cdn_links = _filter_by_episode_range(cdn_links, ctx)
         if not cdn_links:
-            safe_print("[!] No episodes matched that range")
+            safe_print(render_message('no_episodes_in_range'))
             return
-        safe_print(f"[*] Found {len(cdn_links)} CDN link(s) — saving to: {folder}")
+        safe_print(f"[*] Found {len(cdn_links)} CDN link(s) - saving to: {folder}")
         _notify_start(name, len(cdn_links))
         items = []
         for cdn_url in cdn_links:
@@ -180,7 +180,7 @@ def extract_nkiri(url, session, ctx=None):
         summary.report(name)
         return
 
-    safe_print("[!] No download links found")
+    safe_print(render_message('no_download_link'))
     diagnose_page(soup, url, "downloadwella.com or nkiserv.com links")
 
 def extract_dramakey_com(url, session, ctx=None):

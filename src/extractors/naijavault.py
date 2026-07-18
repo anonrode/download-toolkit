@@ -4,7 +4,7 @@ def extract_naijavault(url, session, ctx=None):
     ctx  = ctx or {}
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
-    safe_print("[*] NaijaVault mode")
+    safe_print(render_message('site_mode', site='NaijaVault'))
     slug = url.rstrip('/').split('/')[-1]
     name = re.sub(r'-\d{4}.*$', '', slug)
     name = re.sub(r'-season-\d+.*$', '', name, flags=re.IGNORECASE)
@@ -50,7 +50,7 @@ def extract_naijavault(url, session, ctx=None):
             format_a   = [(label, url)]
 
     if not format_a and not format_b:
-        safe_print("[!] No episode links found")
+        safe_print(render_message('no_episode_links'))
         diagnose_page(soup, url, "/dl- or lulacloud.com/d/ links")
         return
 
@@ -61,10 +61,10 @@ def extract_naijavault(url, session, ctx=None):
         format_a = [item for kind, item in combined if kind == 'a']
         format_b = [item for kind, item in combined if kind == 'b']
         if not format_a and not format_b:
-            safe_print("[!] No episodes matched that range")
+            safe_print(render_message('no_episodes_in_range'))
             return
         total = len(format_a) + len(format_b)
-    safe_print(f"[*] Found {total} episode(s) — Format A: {len(format_a)}, Format B: {len(format_b)}")
+    safe_print(f"[*] Found {total} episode(s) - Format A: {len(format_a)}, Format B: {len(format_b)}")
     safe_print(f"[*] Saving to: {folder}")
     _notify_start(name, total)
 
@@ -96,7 +96,7 @@ def extract_naijavault(url, session, ctx=None):
         if not done:
             done, _ = already_downloaded(folder, safe_filename(f"{ep_label}.mp4"), series_url=url)
         if done:
-            safe_print(f"  [✓] Already downloaded — skipping")
+            safe_print(render_message('already_saved'))
             summary.add_skipped()
             continue
 
@@ -110,7 +110,7 @@ def extract_naijavault(url, session, ctx=None):
         ep_name = safe_filename(ft_m.group(1)) if ft_m else safe_filename(f"{ep_label}.mkv")
 
         if ep_name.lower().endswith('.zip'):
-            safe_print(f"  [*] ZIP — downloading season archive")
+            safe_print(f"  [*] ZIP - downloading season archive")
             du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
             if du_m:
                 zip_url = du_m.group(1)
@@ -192,7 +192,7 @@ def extract_naijavault(url, session, ctx=None):
             if not done:
                 done, _ = already_downloaded(folder, safe_filename(f"{ep_label}.mp4"), series_url=url)
             if done:
-                safe_print(f"  [✓] Already downloaded — skipping")
+                safe_print(render_message('already_saved'))
                 summary.add_skipped()
                 continue
 

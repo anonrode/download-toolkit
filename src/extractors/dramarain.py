@@ -28,9 +28,9 @@ def extract_dramarain(url, session, ctx=None):
     if waffi_links:
         waffi_links = _filter_by_episode_range(waffi_links, ctx)
         if not waffi_links:
-            safe_print("[!] No episodes matched that range")
+            safe_print(render_message('no_episodes_in_range'))
             return
-        safe_print(f"[*] Found {len(waffi_links)} direct link(s) — saving to: {folder}")
+        safe_print(f"[*] Found {len(waffi_links)} direct link(s) - saving to: {folder}")
         _notify_start(name, len(waffi_links))
         for i, (label, link) in enumerate(waffi_links, 1):
             if _stopped(ctx): break
@@ -39,7 +39,7 @@ def extract_dramarain(url, session, ctx=None):
             safe_print(f"\n[{i}/{len(waffi_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
-                safe_print(f"  [✓] Already downloaded — skipping")
+                safe_print(render_message('already_saved'))
                 summary.add_skipped()
                 continue
             direct = _strip_preview_param(link)
@@ -60,9 +60,9 @@ def extract_dramarain(url, session, ctx=None):
     if dw_links:
         dw_links = _filter_by_episode_range(dw_links, ctx)
         if not dw_links:
-            safe_print("[!] No episodes matched that range")
+            safe_print(render_message('no_episodes_in_range'))
             return
-        safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) — saving to: {folder}")
+        safe_print(f"[*] Found {len(dw_links)} downloadwella link(s) - saving to: {folder}")
         _notify_start(name, len(dw_links))
         for i, (label, ep_url) in enumerate(dw_links, 1):
             if _stopped(ctx): break
@@ -71,7 +71,7 @@ def extract_dramarain(url, session, ctx=None):
             safe_print(f"\n[{i}/{len(dw_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
-                safe_print(f"  [✓] Already downloaded — skipping")
+                safe_print(render_message('already_saved'))
                 summary.add_skipped()
                 continue
             direct = ResolverRegistry.resolve(ep_url, session)
@@ -82,7 +82,7 @@ def extract_dramarain(url, session, ctx=None):
                               stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
                               source_url=ep_url)
             else:
-                safe_print(f"  [✗] Could not resolve link")
+                safe_print(f"  [X] Could not resolve link")
                 summary.add_failed(fname)
             time.sleep(0.5)
         if summary.failed == 0 and not _stopped(ctx):
@@ -98,9 +98,9 @@ def extract_dramarain(url, session, ctx=None):
     if dl_links:
         dl_links = _filter_by_episode_range(dl_links, ctx)
         if not dl_links:
-            safe_print("[!] No episodes matched that range")
+            safe_print(render_message('no_episodes_in_range'))
             return
-        safe_print(f"[*] Found {len(dl_links)} episode(s) — saving to: {folder}")
+        safe_print(f"[*] Found {len(dl_links)} episode(s) - saving to: {folder}")
         _notify_start(name, len(dl_links))
         for i, (label, dl_url) in enumerate(dl_links, 1):
             if _stopped(ctx): break
@@ -109,7 +109,7 @@ def extract_dramarain(url, session, ctx=None):
             safe_print(f"\n[{i}/{len(dl_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
-                safe_print(f"  [✓] Already downloaded — skipping")
+                safe_print(render_message('already_saved'))
                 summary.add_skipped()
                 continue
             direct = ResolverRegistry.resolve(dl_url, session)
@@ -120,7 +120,7 @@ def extract_dramarain(url, session, ctx=None):
                               stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
                               source_url=dl_url)
             else:
-                safe_print(f"  [✗] Could not resolve link")
+                safe_print(f"  [X] Could not resolve link")
                 summary.add_failed(fname)
             time.sleep(0.5)
         if summary.failed == 0 and not _stopped(ctx):

@@ -4,7 +4,7 @@ def extract_plutomovies(url, session, ctx=None):
     ctx  = ctx or {}
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
-    safe_print("[*] PlutoMovies mode")
+    safe_print(render_message('site_mode', site='PlutoMovies'))
     is_movie = '/movie/' in url
     slug     = url.rstrip('/').split('/')[-1]
     name     = re.sub(r'-\d{4}.*$', '', slug).replace('-', ' ').title()
@@ -22,7 +22,7 @@ def extract_plutomovies(url, session, ctx=None):
 
     if is_movie or dl_link:
         if dl_link:
-            safe_print(f"[*] Direct link found — saving to: {folder}")
+            safe_print(f"[*] Direct link found - saving to: {folder}")
             direct = ResolverRegistry.resolve(dl_link, session)
             if direct:
                 ext = 'mkv' if 'mkv' in direct.lower() else 'mp4'
@@ -31,10 +31,10 @@ def extract_plutomovies(url, session, ctx=None):
                               bandwidth_limit=bw, current_process=cur_proc,
                               stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
             else:
-                safe_print("[✗] Could not resolve download link")
+                safe_print(render_message('no_download_link'))
                 summary.add_failed(name)
         else:
-            safe_print("[✗] No download link found on page")
+            safe_print(render_message('no_download_link'))
             summary.add_failed(name)
         if summary.failed == 0 and not _stopped(ctx):
             mark_series_complete(url)
@@ -89,7 +89,7 @@ def extract_plutomovies(url, session, ctx=None):
                 if txt:
                     season_name = txt
                 break
-        safe_print("\n[*] Season: " + season_name)
+        safe_print("\n" + render_message('season_label', season=season_name))
         page      = 1
         seen_eps  = set()
         all_eps   = []
@@ -181,25 +181,25 @@ def extract_plutomovies(url, session, ctx=None):
             if not done:
                 done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
             if done:
-                safe_print(f"  [✓] Already downloaded — skipping")
+                safe_print(render_message('already_saved'))
                 summary.add_skipped()
                 continue
 
             if not dl_link:
-                safe_print(f"  [✗] Could not fetch episode page")
+                safe_print(f"  [X] Could not fetch episode page")
                 summary.add_failed(ep_name)
                 continue
             if not direct:
-                safe_print(f"  [✗] Could not resolve download link")
+                safe_print(f"  [X] Could not resolve download link")
                 summary.add_failed(ep_name)
                 continue
 
             # HEAD check — re-resolve if token expired
             if not _cdn_alive(direct):
-                safe_print(f"  [*] CDN token expired — re-resolving...")
+                safe_print(f"  [*] CDN token expired - re-resolving...")
                 direct = ResolverRegistry.resolve(dl_link, session)
                 if not direct:
-                    safe_print(f"  [✗] Re-resolve failed")
+                    safe_print(f"  [X] Re-resolve failed")
                     summary.add_failed(ep_name)
                     continue
 
@@ -214,7 +214,7 @@ def extract_plutomovies(url, session, ctx=None):
     if not episodes_seen and not _stopped(ctx):
         # Every season scraped/filtered to zero — do NOT report success or
         # wipe resume state. Surface the breakage instead.
-        safe_print("[!] No episodes found across any season")
+        safe_print(render_message('no_episodes_found'))
         diagnose_page(soup, url, "episode links")
         summary.report()
         return
@@ -289,7 +289,7 @@ def _yt_playlist_items_prompt(count):
     'all' means download everything.
     """
     count_str = str(count) if count else '?'
-    safe_print(f"\n  Playlist detected — {count_str} videos")
+    safe_print(f"\n  Playlist detected - {count_str} videos")
     safe_print(f"  [1] Download all")
     safe_print(f"  [2] Range      (e.g. 5-10)")
     safe_print(f"  [3] Specific   (e.g. 1,3,7)")
@@ -313,7 +313,7 @@ def _yt_playlist_items_prompt(count):
                 raise ValueError("start must be less than end")
             return r
         except Exception:
-            safe_print("  [!] Invalid range — use format: 5-10")
+            safe_print(render_message('invalid_range'))
             return None
     if choice == '3':
         try:
@@ -321,6 +321,6 @@ def _yt_playlist_items_prompt(count):
             [int(x) for x in items.split(',')]  # validate
             return items
         except Exception:
-            safe_print("  [!] Invalid selection")
+            safe_print(render_message('invalid_selection'))
             return None
     return None

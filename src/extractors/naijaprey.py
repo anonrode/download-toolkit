@@ -4,7 +4,7 @@ def extract_naijaprey(url, session, ctx=None):
     ctx = ctx or {}
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
-    safe_print("[*] NaijaPrey mode")
+    safe_print(render_message('site_mode', site='NaijaPrey'))
     slug   = url.rstrip('/').split('/')[-1]
     name   = clean_name(slug)
     safe_print(f"[*] Title: {name}")
@@ -19,14 +19,14 @@ def extract_naijaprey(url, session, ctx=None):
         if 'vdl.np-downloader.com' in a['href']
     ))
     if not ep_links:
-        safe_print("[!] No vdl.np-downloader.com links found on page")
+        safe_print(render_message('no_episode_links'))
         diagnose_page(soup, url, "vdl.np-downloader.com links")
         return
     ep_links = _filter_by_episode_range(ep_links, ctx)
     if not ep_links:
-        safe_print("[!] No episodes matched that range")
+        safe_print(render_message('no_episodes_in_range'))
         return
-    safe_print(f"[*] Found {len(ep_links)} episode(s) — saving to: {folder}")
+    safe_print(f"[*] Found {len(ep_links)} episode(s) - saving to: {folder}")
     _notify_start(name, len(ep_links))
     summary = DownloadSummary()
 
@@ -42,7 +42,7 @@ def extract_naijaprey(url, session, ctx=None):
         if not done:
             done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
         if done:
-            safe_print(f"  [✓] Already downloaded — skipping")
+            safe_print(render_message('already_saved'))
             summary.add_skipped()
             continue
 
@@ -64,7 +64,7 @@ def extract_naijaprey(url, session, ctx=None):
                                   stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
                                   source_url=ws_url)
                 else:
-                    safe_print(f"  [✗] Wildshare failed")
+                    safe_print(f"  [X] Wildshare failed")
                     summary.add_failed(ep_name)
             else:
                 safe_print(f"  [!] No wildshare link found")
