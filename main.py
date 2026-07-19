@@ -1683,6 +1683,24 @@ def watch_clipboard(session, cfg):
 
 
 # ─── MAIN REPL ────────────────────────────────────────────────
+class _LazySession:
+    """Defers make_session() (which forces the ~290ms curl_cffi/requests load)
+    until the first command actually needs the HTTP session. Drawing the banner
+    and sitting at the prompt never touch it, so exiting right after launch pays
+    nothing. `.close()` is a no-op if the session was never built."""
+    def __init__(self, factory):
+        self._factory = factory
+        self._real = None
+    def _get(self):
+        if self._real is None:
+            self._real = self._factory()
+        return self._real
+    def close(self):
+        if self._real is not None:
+            self._real.close()
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
 def main():
     setup_android()
     cfg = load_config()
@@ -1711,7 +1729,7 @@ def main():
     set_output_mode(cfg.get('log_level', 'normal'))
     from src.messages import set_color
     set_color(cfg.get('color', 'auto'))
-    session = make_session()
+    session = _LazySession(make_session)
     setup_signal_handler()
     termux_controls = start_termux_pause_controls()
     # _start_pause_listener() — removed (caused terminal glitches)
