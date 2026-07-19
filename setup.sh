@@ -200,11 +200,13 @@ if [ -n "$TMUX" ]; then
     # Already inside tmux — shell is ready, do nothing
     :
 else
-    # Kill any existing session and start fresh
+    # Kill any existing session and start fresh.
+    # NOTE: no git fetch/reset here — that hit GitHub over the network on EVERY
+    # launch (2-5s delay before the app even started). The app self-updates
+    # in-app via schedule_auto_update() on a 7-day cadence, so the launch path
+    # stays offline and instant. Run setup.sh (or the in-app `update`) to pull.
     tmux kill-session -t download 2>/dev/null
     cd ~/download-toolkit
-    git fetch --all -q
-    git reset --hard origin/main -q
     tmux new-session -s download python main.py
 fi
 CHECKEOF
@@ -224,11 +226,13 @@ if [ -n "$TMUX" ]; then
     # Already inside tmux — shell is ready, do nothing
     :
 else
-    # Kill any existing session and start fresh
+    # Kill any existing session and start fresh.
+    # NOTE: no git fetch/reset here — that hit GitHub over the network on EVERY
+    # launch (2-5s delay before the app even started). The app self-updates
+    # in-app via schedule_auto_update() on a 7-day cadence, so the launch path
+    # stays offline and instant. Run setup.sh (or the in-app `update`) to pull.
     tmux kill-session -t download 2>/dev/null
     cd ~/download-toolkit
-    git fetch --all -q
-    git reset --hard origin/main -q
     tmux new-session -s download python main.py
 fi
 EOF
