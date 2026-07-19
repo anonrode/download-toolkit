@@ -230,6 +230,7 @@ DEFAULT_CONFIG = {
     # Logging
     'enable_progress_log':  True,       # Log downloads to .download.log
     'log_level':            'normal',   # 'normal' or 'debug'
+    'color':                'auto',     # 'auto' (color only on a TTY), 'always', or 'never'
     'auto_update_days':     7,          # Weekly auto-update cadence
     'social_quality':       '720p',     # Prefer 720p for non-YouTube social videos
     'enable_android_notifications': True,       # Toggle Termux system notifications
@@ -954,6 +955,16 @@ def handle_settings(parts, cfg):
             except (KeyboardInterrupt, EOFError):
                 pass
 
+        elif choice == '18':
+            # Cycle color mode: auto -> always -> never -> auto
+            from src.messages import set_color
+            order = ['auto', 'always', 'never']
+            cur = cfg.get('color', 'auto')
+            nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else 'auto'
+            cfg['color'] = nxt
+            save_config(cfg)
+            set_color(nxt)  # apply immediately so the confirmation reflects it
+            print(f"[ok] Color output set to: {nxt}")
 
         elif choice == '13':
             # Manage Sites loop
@@ -1016,43 +1027,50 @@ def _show_settings(cfg):
     except Exception:
         space_s = "unknown"
 
-    print(f"\n==================================================")
-    print(f"  ANONRODE SETTINGS")
-    print(f"==================================================")
-    print(f"  Quality:   {q:<17} Parallel:  {p}")
-    print(f"  Bandwidth: {'unlimited' if not bw else f'{bw}KB/s':<17} Output:    {mode}")
-    print(f"  Social:    {social_q:<17} Update:    {auto_days} days")
-    print(f"  Timeout:   {timeout}s{' ':<15} Channel:   {ytdlp_channel}")
-    print(f"  Save dir:  {BASE_DIR}")
-    print(f"  Storage:   {space_s}")
-    print(f"==================================================")
-    print(f"  Active Features:")
-    print(f"  [OK] Parallel Search          [OK] Pause/Resume (Ctrl+P on Termux)")
-    print(f"  [OK] Expired Link Refresh     [OK] Smart Queue")
-    print(f"==================================================")
-    print(f"  Supported Sites (6):")
-    print(f"  Searchable:  NKiri | DramaKey | PlutoMovies | AllAnime")
-    print(f"  Link Only:   9JaRocks | DramaRain | Socials")
-    print(f"==================================================")
-    print(f"  1) Download Quality   ->  [{q}]")
-    print(f"  2) Parallel Downloads ->  [{p}]")
-    print(f"  3) Bandwidth Limit    ->  [{'unlimited' if not bw else f'{bw} KB/s'}]")
-    print(f"  4) Stall Timeout      ->  [{timeout}s]")
-    print(f"  5) Max Retry Limit    ->  [{retries} attempts]")
-    print(f"  6) Search Timeout     ->  [{search_timeout}s]")
-    print(f"  7) Search Cache       ->  [{'Enabled' if search_cache else 'Disabled'}]")
-    print(f"  8) Auto Update Days   ->  [{auto_days} days]")
-    print(f"  9) Storage Guard      ->  [{guard} GB]")
-    print(f" 10) Auto Resume        ->  [{'Enabled' if auto_resume else 'Disabled'}]")
-    print(f" 11) Log level          ->  [{mode}]")
-    print(f" 12) yt-dlp Channel     ->  [{ytdlp_channel}]")
-    print(f" 13) Manage Sites       ->  [{len(dis)} disabled]")
-    print(f" 14) Anime Mode         ->  [{cfg.get('anime_mode', 'sub')}]")
-    print(f" 15) aria2c Connections ->  [{cfg.get('aria2c_connections', 16)}]")
-    print(f" 16) aria2c Splits      ->  [{cfg.get('aria2c_splits', 16)}]")
-    print(f" 17) Min Split Size     ->  [{cfg.get('aria2c_min_split_size', '1M')}]")
-    print(f"  0) Back to command prompt")
-    print(f"==================================================")
+    from src.messages import paint
+    bar  = paint("=" * 50, 'cyan')
+    dash = paint("-" * 50, 'cyan')
+    def opt(n, label, val):
+        return f"  {paint(f'{n:>2})', 'byellow')} {label:<21} {paint(f'[{val}]', 'bcyan')}"
+
+    print()
+    print(bar)
+    print(f"  {paint('ANONRODE SETTINGS', 'bold', 'bcyan')}")
+    print(bar)
+    print(f"  {paint('Quality:', 'gray')}   {q:<17} {paint('Parallel:', 'gray')}  {p}")
+    print(f"  {paint('Bandwidth:', 'gray')} {'unlimited' if not bw else f'{bw}KB/s':<17} {paint('Output:', 'gray')}    {mode}")
+    print(f"  {paint('Social:', 'gray')}    {social_q:<17} {paint('Update:', 'gray')}    {auto_days} days")
+    print(f"  {paint('Timeout:', 'gray')}   {str(timeout) + 's':<17} {paint('Channel:', 'gray')}   {ytdlp_channel}")
+    print(f"  {paint('Save dir:', 'gray')}  {BASE_DIR}")
+    print(f"  {paint('Storage:', 'gray')}   {space_s}")
+    print(dash)
+    ok = paint('[OK]', 'bgreen')
+    print(f"  {ok} Parallel Search          {ok} Pause/Resume (Ctrl+P on Termux)")
+    print(f"  {ok} Expired Link Refresh     {ok} Smart Queue")
+    print(dash)
+    print(f"  {paint('Searchable:', 'gray')}  NKiri | DramaKey | PlutoMovies | AllAnime")
+    print(f"  {paint('Link Only:', 'gray')}   9JaRocks | DramaRain | Socials")
+    print(bar)
+    print(opt(1,  'Download Quality',   q))
+    print(opt(2,  'Parallel Downloads', p))
+    print(opt(3,  'Bandwidth Limit',    'unlimited' if not bw else f'{bw} KB/s'))
+    print(opt(4,  'Stall Timeout',      f'{timeout}s'))
+    print(opt(5,  'Max Retry Limit',    f'{retries} attempts'))
+    print(opt(6,  'Search Timeout',     f'{search_timeout}s'))
+    print(opt(7,  'Search Cache',       'Enabled' if search_cache else 'Disabled'))
+    print(opt(8,  'Auto Update Days',   f'{auto_days} days'))
+    print(opt(9,  'Storage Guard',      f'{guard} GB'))
+    print(opt(10, 'Auto Resume',        'Enabled' if auto_resume else 'Disabled'))
+    print(opt(11, 'Log level',          mode))
+    print(opt(12, 'yt-dlp Channel',     ytdlp_channel))
+    print(opt(13, 'Manage Sites',       f'{len(dis)} disabled'))
+    print(opt(14, 'Anime Mode',         cfg.get('anime_mode', 'sub')))
+    print(opt(15, 'aria2c Connections', cfg.get('aria2c_connections', 16)))
+    print(opt(16, 'aria2c Splits',      cfg.get('aria2c_splits', 16)))
+    print(opt(17, 'Min Split Size',     cfg.get('aria2c_min_split_size', '1M')))
+    print(opt(18, 'Color Output',       cfg.get('color', 'auto')))
+    print(f"  {paint(' 0)', 'byellow')} Back to command prompt")
+    print(bar)
 
 # ─── RESUME ───────────────────────────────────────────────────
 def handle_resume_command(session, cfg):
@@ -1283,58 +1301,66 @@ def setup_android():
     return True
 
 # ─── BANNER ───────────────────────────────────────────────────
+# Block-letter logo — pure ASCII (# fill), ~46 cols so it fits portrait phones.
+_LOGO = r"""
+  ___   _  _  ___  _  _ ___  ___  ___  ___
+ / _ \ | \| |/ _ \| \| | _ \/ _ \|   \| __|
+| (_) || .` | (_) | .` |   / (_) | |) | _|
+ \___/ |_|\_|\___/|_|\_|_|_\\___/|___/|___|
+""".strip("\n")
+
+
 def print_banner(cfg):
     import shutil as _shutil
+    from src.messages import paint
     try:
         columns, _ = _shutil.get_terminal_size(fallback=(80, 24))
     except Exception:
         columns = 80
 
-    if columns >= 115:
-        # Layout A (Landscape)
-        print("=" * 60)
-        print("  ANONRODE v2.2")
-        print("=" * 60)
-        print("  KEY FEATURES")
-        print("   - Parallel Search   - Search all sites at once")
-        print("   - Pause & Resume    - Press Ctrl+P anytime")
-        print("   - Link Auto-Update  - Refreshes expired downloads")
-        print("   - Smart Queue       - Queue up multiple series")
-        print("   - Storage Guard     - Auto-pauses if space is full")
-        print("-" * 60)
-        print("  SUPPORTED SITES")
-        print("   Movies & Series:")
-        print("   - NKiri        [Very Fast]  Korean & Nollywood")
-        print("   - 9JaRocks     [Very Fast]  Nollywood & Hollywood")
-        print("   - PlutoMovies  [Fast]       Blockbusters & Shows")
-        print("   Asian Dramas:")
-        print("   - DramaKey     [Normal]     Chinese & Korean")
-        print("   - DramaRain    [Normal]     Chinese & Japanese")
-        print("   Social Media:")
-        print("   - YouTube      [Fast]       Videos & Playlists")
-        print("   - Pinterest    [Fast]       Pins & Boards")
-        print("=" * 60)
-    else:
-        # Layout B (Portrait / Mobile)
-        print("=" * 60)
-        print("  ANONRODE v2.2")
-        print("=" * 60)
-        print("  KEY FEATURES")
-        print("   - Parallel Search   - Search all sites at once")
-        print("   - Pause & Resume    - Press Ctrl+P anytime")
-        print("   - Link Auto-Update  - Refreshes expired downloads")
-        print("   - Smart Queue       - Queue up multiple series")
-        print("   - Storage Guard     - Auto-pauses if space is full")
-        print("-" * 60)
-        print("  SUPPORTED SITES")
-        print("   - NKiri        [Very Fast]  Korean & Nollywood")
-        print("   - 9JaRocks     [Very Fast]  Nollywood & Hollywood")
-        print("   - PlutoMovies  [Fast]       Blockbusters & Shows")
-        print("   - DramaKey     [Normal]     Chinese & Korean")
-        print("   - DramaRain    [Normal]     Chinese & Japanese")
-        print("   - YouTube      [Fast]       Videos & Playlists")
-        print("   - Pinterest    [Fast]       Pins & Boards")
-        print("=" * 60)
+    def bar(ch='='):
+        print(paint(ch * 60, 'cyan'))
+
+    def head(text):
+        print("  " + paint(text, 'bold', 'bcyan'))
+
+    def feature(name, desc):
+        print("   " + paint("-", 'gray') + " " + paint(f"{name:<18}", 'bgreen') + paint(desc, 'gray'))
+
+    _SPEED_COLOR = {'Very Fast': 'bgreen', 'Fast': 'green', 'Normal': 'byellow'}
+
+    def site(name, speed, desc):
+        tag = paint(f"[{speed}]", _SPEED_COLOR.get(speed, 'white'))
+        print("   " + paint("-", 'gray') + f" {name:<12} {tag:<22} " + paint(desc, 'gray'))
+
+    bar('=')
+    for line in _LOGO.splitlines():
+        print(paint(line, 'bcyan'))
+    print("  " + paint("v2.2", 'gray') + "  " + paint("Anon's download toolkit", 'dim'))
+    bar('=')
+    head("KEY FEATURES")
+    feature("Parallel Search", "Search all sites at once")
+    feature("Pause & Resume", "Press Ctrl+P anytime")
+    feature("Link Auto-Update", "Refreshes expired downloads")
+    feature("Smart Queue", "Queue up multiple series")
+    feature("Storage Guard", "Auto-pauses if space is full")
+    bar('-')
+    head("SUPPORTED SITES")
+    is_landscape = columns >= 115
+    if is_landscape:
+        print("   " + paint("Movies & Series:", 'white'))
+    site("NKiri", "Very Fast", "Korean & Nollywood")
+    site("9JaRocks", "Very Fast", "Nollywood & Hollywood")
+    site("PlutoMovies", "Fast", "Blockbusters & Shows")
+    if is_landscape:
+        print("   " + paint("Asian Dramas:", 'white'))
+    site("DramaKey", "Normal", "Chinese & Korean")
+    site("DramaRain", "Normal", "Chinese & Japanese")
+    if is_landscape:
+        print("   " + paint("Social Media:", 'white'))
+    site("YouTube", "Fast", "Videos & Playlists")
+    site("Pinterest", "Fast", "Pins & Boards")
+    bar('=')
 
 # make_session has been centralized and is imported from downloader.py
 
@@ -1683,6 +1709,8 @@ def main():
     register_app_state(app)
 
     set_output_mode(cfg.get('log_level', 'normal'))
+    from src.messages import set_color
+    set_color(cfg.get('color', 'auto'))
     session = make_session()
     setup_signal_handler()
     termux_controls = start_termux_pause_controls()

@@ -3,6 +3,75 @@
 Business logic should emit message IDs; this layer decides how Anon says it.
 """
 
+import os
+import sys
+
+# ─── COLOR ────────────────────────────────────────────────────
+# Plain ANSI escape codes only — no Unicode box-art or emoji, which render
+# as mojibake on many Termux setups. ANSI SGR codes are pure ASCII and are
+# well supported on Termux, so color is the one safe way to add richness.
+CODES = {
+    'reset': '\033[0m', 'bold': '\033[1m', 'dim': '\033[2m',
+    'red': '\033[31m', 'green': '\033[32m', 'yellow': '\033[33m',
+    'blue': '\033[34m', 'magenta': '\033[35m', 'cyan': '\033[36m',
+    'white': '\033[37m', 'gray': '\033[90m',
+    'bred': '\033[91m', 'bgreen': '\033[92m', 'byellow': '\033[93m',
+    'bcyan': '\033[96m',
+}
+
+_COLOR_ON = False
+
+
+def _detect_color():
+    # Honor the NO_COLOR convention (https://no-color.org) and only emit color
+    # when stdout is a real terminal — piping to a file/log stays clean ASCII.
+    if os.environ.get('NO_COLOR'):
+        return False
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _enable_windows_vt():
+    # Windows 10+ consoles need VT processing turned on before ANSI works;
+    # best-effort so the dev machine isn't full of raw escape codes.
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.SetConsoleMode(k.GetStdHandle(-11), 7)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
+
+def set_color(mode='auto'):
+    """mode: 'auto' (TTY + NO_COLOR aware), 'always', or 'never'."""
+    global _COLOR_ON
+    if mode == 'always':
+        _COLOR_ON = True
+    elif mode == 'never':
+        _COLOR_ON = False
+    else:
+        _COLOR_ON = _detect_color()
+    if _COLOR_ON:
+        _enable_windows_vt()
+    return _COLOR_ON
+
+
+def color_enabled():
+    return _COLOR_ON
+
+
+def paint(text, *names):
+    """Wrap text in the named ANSI codes, or return it untouched if color is off."""
+    if not _COLOR_ON or not names:
+        return text
+    prefix = ''.join(CODES.get(n, '') for n in names)
+    return f"{prefix}{text}{CODES['reset']}"
+
+
 LABELS = {
     'ok': '[OK]',
     'info': '[..]',
@@ -10,6 +79,17 @@ LABELS = {
     'warn': '[!]',
     'fail': '[X]',
     'debug': '[debug]',
+}
+
+# Color per label level — applied only to the bracket tag, not the message body,
+# so text stays readable and copy-pasteable.
+LABEL_COLORS = {
+    'ok': ('bgreen',),
+    'info': ('bcyan',),
+    'paused': ('byellow',),
+    'warn': ('byellow',),
+    'fail': ('bred',),
+    'debug': ('gray',),
 }
 
 MESSAGES = {
@@ -142,7 +222,8 @@ MESSAGES = {
 
 def render(message_id, **values):
     level, template = MESSAGES[message_id]
-    return f"{LABELS[level]} {template.format(**values)}"
+    label = paint(LABELS[level], *LABEL_COLORS.get(level, ()))
+    return f"{label} {template.format(**values)}"
 
 
 def emit(printer, message_id, debug=None, is_debug=False, **values):

@@ -14,7 +14,7 @@ import tempfile
 import requests
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from .messages import emit as emit_message, render as render_message
+from .messages import emit as emit_message, render as render_message, paint
 
 try:
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -218,13 +218,14 @@ def ui_screen(title, rows=None, footer=None):
     width = 50
     with PRINT_LOCK:
         print()
-        print("ANONRODE")
-        print(title)
-        print("-" * width)
+        print(paint("ANONRODE", "bcyan", "bold"))
+        print(paint(title, "bold"))
+        print(paint("-" * width, "gray"))
         for key, value in rows:
             if value is None or value == '':
                 continue
-            print(f"{str(key) + ':':<12} {value}")
+            label = f"{str(key) + ':':<12}"  # pad before painting so width is correct
+            print(f"{paint(label, 'cyan')} {value}")
         if footer:
             print()
             print(footer)
@@ -520,7 +521,7 @@ class LiveProgress:
         self._done = True
         update_status(status='Complete', current=self._name, progress='100%')
         size_s = f' ({size_mb:.1f} MB)' if size_mb is not None else ''
-        line   = f'  [OK] Done: {self._name}{size_s}'
+        line   = f'  {paint("[OK]", "bgreen")} Done: {self._name}{size_s}'
         try:
             with PRINT_LOCK:
                 if self._parallel or not self._started:
@@ -536,7 +537,7 @@ class LiveProgress:
             return
         self._done = True
         update_status(status='Failed', current=self._name)
-        line = f'  [X] Failed: {self._name}'
+        line = f'  {paint("[X]", "bred", "bold")} Failed: {self._name}'
         try:
             with PRINT_LOCK:
                 if self._parallel or not self._started:
@@ -555,7 +556,7 @@ class LiveProgress:
             return
         self._done = True
         update_status(status='Stopped', current=self._name)
-        line = f'  [stop] Stopped: {self._name} (saved for resume)'
+        line = f'  {paint("[stop]", "byellow")} Stopped: {self._name} {paint("(saved for resume)", "gray")}'
         try:
             with PRINT_LOCK:
                 if self._parallel or not self._started:
