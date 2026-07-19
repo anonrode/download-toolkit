@@ -17,11 +17,11 @@ def extract_9jarocks(url, session, ctx=None):
     lf_links = list(dict.fromkeys(
         (a.get_text(strip=True), a['href'])
         for a in soup.find_all('a', href=True)
-        if 'loadedfiles.org' in a['href']
+        if 'loadedfiles.st' in a['href'] or 'loadedfiles.org' in a['href']
     ))
     if not lf_links:
         safe_print(render_message('no_episode_links'))
-        diagnose_page(soup, url, "loadedfiles.org links")
+        diagnose_page(soup, url, "loadedfiles.st links")
         return
     lf_links = _filter_by_episode_range(lf_links, ctx)
     if not lf_links:

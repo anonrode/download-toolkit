@@ -133,25 +133,32 @@ class LoadedfilesResolver(BaseResolver):
     @staticmethod
     def can_resolve(url: str) -> bool:
         netloc = urlparse(url).netloc.lower()
-        return netloc in ['loadedfiles.org', 'www.loadedfiles.org']
+        return netloc in ['loadedfiles.st', 'www.loadedfiles.st',
+                          'loadedfiles.org', 'www.loadedfiles.org']
 
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
+            # The loadedfiles.org host is dead (no DNS); the same file hashes are
+            # served live on loadedfiles.st. Some source sites (dramakey.cc) still
+            # link the stale .org host, so rewrite to the live .st host on entry.
+            url = url.replace('loadedfiles.org', 'loadedfiles.st')
             r1 = safe_get(session, url, referer='https://my9jarocks.bz/')
             if not r1:
                 return None
-            m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.org/[^']+)'", r1.text)
+            m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.(?:st|org)/[^']+)'", r1.text)
             if not m1:
                 return None
-            r2 = safe_get(session, m1.group(1), referer='https://loadedfiles.org/')
+            step1 = m1.group(1).replace('loadedfiles.org', 'loadedfiles.st')
+            r2 = safe_get(session, step1, referer='https://loadedfiles.st/')
             if not r2:
                 return None
-            m2 = re.search(r"var downloadUrl = '(https://loadedfiles\.org/[^']+)'", r2.text)
+            m2 = re.search(r"var downloadUrl = '(https://loadedfiles\.(?:st|org)/[^']+)'", r2.text)
             if not m2:
                 return None
             try:
-                r3 = session.get(m2.group(1), timeout=20, allow_redirects=False)
+                step2 = m2.group(1).replace('loadedfiles.org', 'loadedfiles.st')
+                r3 = session.get(step2, timeout=20, allow_redirects=False)
                 return r3.headers.get('location')
             except Exception as e:
                 safe_print(f"      [!] Loadedfiles redirect: {e}")
@@ -509,6 +516,25 @@ class NaijaVaultGatewayResolver(BaseResolver):
             safe_print(f"      [!] NaijaVaultGateway: Resolution error: {e}")
             return None
 
+class PixelDrainResolver(BaseResolver):
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        return 'pixeldrain.com' in urlparse(url).netloc.lower()
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        # pixeldrain exposes a stable direct-download API: the /u/{id} share
+        # slug maps 1:1 to /api/file/{id}?download. Also accept an already-built
+        # api URL so a re-resolve is a clean no-op (returns itself).
+        try:
+            m = re.search(r'pixeldrain\.com/(?:u|api/file)/([A-Za-z0-9]+)', url)
+            if not m:
+                return None
+            return f'https://pixeldrain.com/api/file/{m.group(1)}?download'
+        except Exception as e:
+            safe_print(f"      [!] PixelDrain: {e}")
+            return None
+
 class PlutoMoviesResolver(BaseResolver):
     @staticmethod
     def can_resolve(url: str) -> bool:
@@ -559,6 +585,7 @@ class ResolverRegistry:
         DramaGatewayResolver,
         NaijaVaultGatewayResolver,
         PlutoMoviesResolver,
+        PixelDrainResolver,
     ]
 
     @classmethod
@@ -572,7 +599,7 @@ class ResolverRegistry:
         _path = urlparse(url).path.lower()
         if any(_path.endswith(ext) for ext in ['.mp4', '.mkv', '.m3u8', '.webm']):
             parsed = urlparse(url).netloc.lower()
-            resolver_domains = ['waffi.cloud', 'loadedfiles.org', 'wildshare.net', 'vikingfile.com', 'lulacloud.com', 'streamtape.com', 'watchadsontape.com', 'vidmoly.me', 'vidbasic.to']
+            resolver_domains = ['waffi.cloud', 'loadedfiles.st', 'loadedfiles.org', 'wildshare.net', 'vikingfile.com', 'lulacloud.com', 'pixeldrain.com', 'streamtape.com', 'watchadsontape.com', 'vidmoly.me', 'vidbasic.to']
             if not any(dom in parsed for dom in resolver_domains):
                 return url
 

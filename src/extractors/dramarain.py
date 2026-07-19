@@ -53,6 +53,47 @@ def extract_dramarain(url, session, ctx=None):
         summary.report()
         return
 
+    # Method 1b: loadedfiles links (current dramakey.cc layout — same files/host
+    # as 9jaRocks). dramakey still links the dead loadedfiles.org host; the
+    # resolver rewrites .org -> the live .st host, so these resolve fine.
+    lf_links = list(dict.fromkeys(
+        (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
+        if 'loadedfiles.st' in a['href'] or 'loadedfiles.org' in a['href']))
+    if lf_links:
+        lf_links = _filter_by_episode_range(lf_links, ctx)
+        if not lf_links:
+            safe_print(render_message('no_episodes_in_range'))
+            return
+        safe_print(f"[*] Found {len(lf_links)} loadedfiles link(s) - saving to: {folder}")
+        _notify_start(name, len(lf_links))
+        for i, (label, ep_url) in enumerate(lf_links, 1):
+            if _stopped(ctx): break
+            _wait(ctx)
+            fname = safe_filename(f"{name} {_episode_label(ep_url, label, i)}.mp4")
+            safe_print(f"\n[{i}/{len(lf_links)}] {fname}")
+            done, _ = already_downloaded(folder, fname, series_url=url)
+            if done:
+                safe_print(render_message('already_saved'))
+                summary.add_skipped()
+                continue
+            direct = ResolverRegistry.resolve(ep_url, session)
+            if direct:
+                ext = 'mkv' if '.mkv' in direct else 'mp4'
+                fname = safe_filename(f"{name} {_episode_label(ep_url, label, i)}.{ext}")
+                download_file(direct, folder, fname, summary,
+                              series_url=url, series_name=name,
+                              bandwidth_limit=bw, quality=quality, current_process=cur_proc,
+                              stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                              source_url=ep_url)
+            else:
+                safe_print(f"  [X] Could not resolve link")
+                summary.add_failed(fname)
+            time.sleep(0.5)
+        if summary.failed == 0 and not _stopped(ctx):
+            mark_series_complete(url)
+        summary.report()
+        return
+
     # Method 2: downloadwella.com / wetafiles.com intermediate links
     dw_links = list(dict.fromkeys(
         (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
@@ -129,4 +170,4 @@ def extract_dramarain(url, session, ctx=None):
         return
 
     safe_print(f"[!] No download links found")
-    diagnose_page(soup, url, "waffi.cloud or downloadwella.com links")
+    diagnose_page(soup, url, "loadedfiles, waffi.cloud or downloadwella.com links")

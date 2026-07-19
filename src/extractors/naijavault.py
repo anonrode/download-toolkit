@@ -36,8 +36,16 @@ def extract_naijavault(url, session, ctx=None):
             seen.add(href)
             format_b.append((a.get_text(strip=True), href))
 
+    # Format C: pixeldrain.com/u/ direct links (current NaijaVault layout)
+    format_c = []
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if 'pixeldrain.com/u/' in href and href not in seen:
+            seen.add(href)
+            format_c.append((a.get_text(strip=True), href))
+
     # Single dl- page pasted directly
-    if not format_a and not format_b:
+    if not format_a and not format_b and not format_c:
         is_dl = (
             'var downloadURL' in r.text or
             re.search(r'vikingfile\.com', r.text) or
@@ -49,22 +57,23 @@ def extract_naijavault(url, session, ctx=None):
             label      = page_title.get_text(strip=True) if page_title else slug
             format_a   = [(label, url)]
 
-    if not format_a and not format_b:
+    if not format_a and not format_b and not format_c:
         safe_print(render_message('no_episode_links'))
-        diagnose_page(soup, url, "/dl- or lulacloud.com/d/ links")
+        diagnose_page(soup, url, "/dl-, lulacloud.com/d/ or pixeldrain.com/u/ links")
         return
 
-    total = len(format_a) + len(format_b)
+    total = len(format_a) + len(format_b) + len(format_c)
     if ctx.get('episode_filter'):
-        combined = [(kind, item) for kind, seq in (('a', format_a), ('b', format_b)) for item in seq]
+        combined = [(kind, item) for kind, seq in (('a', format_a), ('b', format_b), ('c', format_c)) for item in seq]
         combined = _filter_by_episode_range(combined, ctx)
         format_a = [item for kind, item in combined if kind == 'a']
         format_b = [item for kind, item in combined if kind == 'b']
-        if not format_a and not format_b:
+        format_c = [item for kind, item in combined if kind == 'c']
+        if not format_a and not format_b and not format_c:
             safe_print(render_message('no_episodes_in_range'))
             return
-        total = len(format_a) + len(format_b)
-    safe_print(f"[*] Found {total} episode(s) - Format A: {len(format_a)}, Format B: {len(format_b)}")
+        total = len(format_a) + len(format_b) + len(format_c)
+    safe_print(f"[*] Found {total} episode(s) - Format A: {len(format_a)}, Format B: {len(format_b)}, Format C: {len(format_c)}")
     safe_print(f"[*] Saving to: {folder}")
     _notify_start(name, total)
 
@@ -218,6 +227,37 @@ def extract_naijavault(url, session, ctx=None):
                         if fv:
                             direct = fv.group(0)
 
+            _resolve_and_download(ep_label, ep_name, direct)
+            time.sleep(0.5)
+
+    # ── Process Format C (pixeldrain.com/u/ direct) ──
+    if not zip_hit:
+        for i, (label, pd_url) in enumerate(format_c, 1):
+            if _stopped(ctx):
+                break
+            ep_label = clean_ep_name(label) or f"episode-{i}"
+            safe_print(f"\n[C {i}/{len(format_c)}] {ep_label}")
+
+            # Pull the real filename from the pixeldrain info API so the file
+            # extension is correct (the api download URL carries no extension).
+            ep_name = safe_filename(f"{ep_label}.mkv")
+            fid_m = re.search(r'pixeldrain\.com/u/([A-Za-z0-9]+)', pd_url)
+            if fid_m:
+                try:
+                    info = session.get(f'https://pixeldrain.com/api/file/{fid_m.group(1)}/info',
+                                       timeout=15).json()
+                    if info.get('name'):
+                        ep_name = safe_filename(info['name'])
+                except Exception:
+                    pass
+
+            done, _ = already_downloaded(folder, ep_name, series_url=url)
+            if done:
+                safe_print(render_message('already_saved'))
+                summary.add_skipped()
+                continue
+
+            direct = ResolverRegistry.resolve(pd_url, session)
             _resolve_and_download(ep_label, ep_name, direct)
             time.sleep(0.5)
 
