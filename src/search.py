@@ -37,41 +37,53 @@ except Exception:
     USE_ASYNC = False
 
 
-def ensure_async(quiet=False):
-    """One-time bootstrap so users who already installed the toolkit (and never
-    re-run setup.sh) still pick up the async engine. Code updates reach them via
-    the launch-time `git reset --hard`, but a new pip dep does not — so we
-    self-install aiohttp here, mirroring extractors.base._ensure_package (the
-    same pattern used for cryptography). Safe to call every startup: it's a
-    no-op once aiohttp is present. Returns the resulting USE_ASYNC state.
+def ensure_async():
+    """One-time, non-blocking bootstrap so users who installed before the async
+    engine existed (and never re-run setup.sh) still pick it up. Code updates
+    reach them via the launch-time `git reset --hard`, but a new pip dep does
+    not — so we self-install aiohttp.
+
+    Critical: this must NOT slow down or hang startup. On Termux, installing
+    aiohttp compiles C extensions and can take minutes, so the install runs in
+    a background daemon thread with a timeout, and a marker file ensures it is
+    only ever attempted ONCE — a slow or failed install is never retried on
+    later launches. Legacy search works the whole time; async simply takes over
+    on the next launch once aiohttp is present. Returns immediately.
     """
-    global USE_ASYNC, aiohttp, asyncio
     if USE_ASYNC:
-        return True
-    try:
-        import asyncio as _aio  # stdlib; import failure here means fall back
-    except Exception:
-        return False
-    if not quiet:
-        safe_print("[*] Installing aiohttp for faster search...")
-    try:
-        subprocess.run(
-            ['pip', 'install', 'aiohttp', '--break-system-packages', '-q'],
-            check=True, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        import aiohttp as _http
-        asyncio = _aio
-        aiohttp = _http
-        USE_ASYNC = True
-        if not quiet:
-            safe_print("[✓] aiohttp installed — search is now faster")
-    except Exception as e:
-        # Non-fatal: legacy path still works. Don't nag on every launch.
-        if not quiet:
-            safe_print(f"[!] aiohttp install skipped ({e}); using classic search")
-        USE_ASYNC = False
-    return USE_ASYNC
+        return
+    marker = os.path.join(CONFIG_DIR, '.aiohttp_install_tried')
+    if os.path.exists(marker):
+        return  # already tried once — don't block or retry, legacy path is fine
+
+    def _install():
+        try:
+            # Record the attempt up front so a hang/crash can't cause a re-run.
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            with open(marker, 'w') as f:
+                f.write(str(int(time.time())))
+        except Exception:
+            pass
+        try:
+            subprocess.run(
+                ['pip', 'install', 'aiohttp', '--break-system-packages', '-q'],
+                check=True, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=300,
+            )
+            global USE_ASYNC, aiohttp, asyncio
+            import asyncio as _aio
+            import aiohttp as _http
+            asyncio = _aio
+            aiohttp = _http
+            USE_ASYNC = True
+            safe_print("[*] Faster search engine ready — active on next launch.")
+        except Exception:
+            # Non-fatal and silent: legacy search keeps working, and the marker
+            # above means we won't try again.
+            pass
+
+    threading.Thread(target=_install, daemon=True, name='aiohttp-bootstrap').start()
 
 from .downloader import safe_print, UA_DESKTOP, BASE_DIR, CONFIG_DIR
 from .messages import render as render_message
