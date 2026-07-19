@@ -102,23 +102,64 @@ BATEOF
     exit 0
 fi
 
-# ─── UPDATE PACKAGES (non-interactive) ────────────
-info "Updating package lists..."
-DEBIAN_FRONTEND=noninteractive pkg update -y \
-  -o Dpkg::Options::="--force-confnew" 2>/dev/null
-ok "Packages updated"
+# ─── BOOTSTRAP + SELF-UPDATE (first pass only) ────
+# bash reads this whole script into memory at launch. If we pulled a newer
+# setup.sh partway through and kept executing, the rest of THIS run would still
+# be the OLD in-memory logic (that bug wrote a stale .bashrc). So on the first
+# pass we do only the minimum needed to pull — update pkgs, install git+python,
+# fetch the repo — then re-exec the freshly pulled script exactly once. The
+# guard var (ANONRODE_SETUP_REEXEC) prevents an infinite loop, and the heavy
+# installs below run only on the second pass, so nothing is done twice.
+if [ "$ANONRODE_SETUP_REEXEC" != "1" ]; then
+    info "Updating package lists..."
+    DEBIAN_FRONTEND=noninteractive pkg update -y \
+      -o Dpkg::Options::="--force-confnew" 2>/dev/null
+    ok "Packages updated"
 
-# ─── INSTALL SYSTEM PACKAGES ONE BY ONE ──────────
-info "Installing Python..."
-DEBIAN_FRONTEND=noninteractive pkg install python -y \
-  -o Dpkg::Options::="--force-confnew" 2>/dev/null \
-  && ok "Python installed" || warn "Python install failed — may already be installed"
+    info "Installing Python..."
+    DEBIAN_FRONTEND=noninteractive pkg install python -y \
+      -o Dpkg::Options::="--force-confnew" 2>/dev/null \
+      && ok "Python installed" || warn "Python install failed — may already be installed"
 
-info "Installing Git..."
-DEBIAN_FRONTEND=noninteractive pkg install git -y \
-  -o Dpkg::Options::="--force-confnew" 2>/dev/null \
-  && ok "Git installed" || warn "Git install failed — may already be installed"
+    info "Installing Git..."
+    DEBIAN_FRONTEND=noninteractive pkg install git -y \
+      -o Dpkg::Options::="--force-confnew" 2>/dev/null \
+      && ok "Git installed" || warn "Git install failed — may already be installed"
 
+    echo ""
+    if [ -d "$HOME/download-toolkit" ]; then
+        info "Toolkit already installed - updating..."
+        cd "$HOME/download-toolkit"
+        git fetch --all -q
+        git reset --hard origin/main 2>&1 | tee /tmp/gitpull.log
+        if grep -q "Already up to date" /tmp/gitpull.log; then
+            ok "Toolkit already up to date"
+        else
+            ok "Toolkit updated"
+        fi
+    else
+        info "Downloading toolkit..."
+        git clone https://github.com/anonrode/download-toolkit.git "$HOME/download-toolkit" \
+          && ok "Toolkit downloaded" || {
+            fail "Download failed — check your internet connection"
+            exit 1
+          }
+    fi
+
+    if [ ! -f "$HOME/download-toolkit/main.py" ]; then
+        fail "main.py not found — setup cannot continue"
+        exit 1
+    fi
+
+    export ANONRODE_SETUP_REEXEC=1
+    info "Re-running with the updated setup script..."
+    exec bash "$HOME/download-toolkit/setup.sh" "$@"
+fi
+
+# ─── FULL INSTALL (second pass — fresh script) ────
+# Reached only after the re-exec above, so this is the just-pulled logic and
+# runs exactly once. git+python are already installed; the repo is already
+# up to date. Install the remaining tools and Python deps.
 info "Installing aria2..."
 DEBIAN_FRONTEND=noninteractive pkg install aria2 -y \
   -o Dpkg::Options::="--force-confnew" 2>/dev/null \
@@ -160,32 +201,7 @@ pip install aiohttp --break-system-packages -q \
 
 # cryptography requires Rust to compile on Termux — skipped (openssl handles decryption instead)
 
-# ─── CLONE OR UPDATE REPO ────────────────────────
-echo ""
-if [ -d "$HOME/download-toolkit" ]; then
-    info "Toolkit already installed - updating..."
-    cd "$HOME/download-toolkit"
-    git fetch --all -q
-    git reset --hard origin/main 2>&1 | tee /tmp/gitpull.log
-    if grep -q "Already up to date" /tmp/gitpull.log; then
-        ok "Toolkit already up to date"
-    else
-        ok "Toolkit updated"
-    fi
-else
-    info "Downloading toolkit..."
-    git clone https://github.com/anonrode/download-toolkit.git "$HOME/download-toolkit" \
-      && ok "Toolkit downloaded" || {
-        fail "Download failed — check your internet connection"
-        exit 1
-      }
-fi
-
-# Verify main.py exists before setting up launcher
-if [ ! -f "$HOME/download-toolkit/main.py" ]; then
-    fail "main.py not found — setup cannot continue"
-    exit 1
-fi
+cd "$HOME/download-toolkit"
 
 # ─── SET UP AUTO-LAUNCH ──────────────────────────
 echo ""
