@@ -22,6 +22,8 @@ SITE_MAP = {
     DRAMAKEY_CC:       extract_dramarain,
     DRAMARAIN_DOMAIN:  extract_dramarain,
     JAROCKS_DOMAIN:    extract_9jarocks,
+    '9jarocks.com':    extract_9jarocks,  # legacy host, 301s to my9jarocks.bz
+    '9jarocks.net':    extract_9jarocks,  # dead but harmless as an alias
     NAIJAPREY_DOMAIN:  extract_naijaprey,
     MYASIANTV_DOMAIN:  extract_myasiantv,
     'myasiantv9.com.ro': extract_myasiantv,

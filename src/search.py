@@ -15,13 +15,63 @@ Commands:
 
 import os
 import re
+import sys
 import json
 import time
 import datetime
 import threading
 import requests
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Async engine is optional. If aiohttp is missing (or asyncio can't start),
+# search transparently falls back to the legacy requests/ThreadPool path
+# below — nothing here is load-bearing for the synchronous fallback.
+import subprocess
+
+try:
+    import asyncio
+    import aiohttp
+    USE_ASYNC = True
+except Exception:
+    USE_ASYNC = False
+
+
+def ensure_async(quiet=False):
+    """One-time bootstrap so users who already installed the toolkit (and never
+    re-run setup.sh) still pick up the async engine. Code updates reach them via
+    the launch-time `git reset --hard`, but a new pip dep does not — so we
+    self-install aiohttp here, mirroring extractors.base._ensure_package (the
+    same pattern used for cryptography). Safe to call every startup: it's a
+    no-op once aiohttp is present. Returns the resulting USE_ASYNC state.
+    """
+    global USE_ASYNC, aiohttp, asyncio
+    if USE_ASYNC:
+        return True
+    try:
+        import asyncio as _aio  # stdlib; import failure here means fall back
+    except Exception:
+        return False
+    if not quiet:
+        safe_print("[*] Installing aiohttp for faster search...")
+    try:
+        subprocess.run(
+            ['pip', 'install', 'aiohttp', '--break-system-packages', '-q'],
+            check=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        import aiohttp as _http
+        asyncio = _aio
+        aiohttp = _http
+        USE_ASYNC = True
+        if not quiet:
+            safe_print("[✓] aiohttp installed — search is now faster")
+    except Exception as e:
+        # Non-fatal: legacy path still works. Don't nag on every launch.
+        if not quiet:
+            safe_print(f"[!] aiohttp install skipped ({e}); using classic search")
+        USE_ASYNC = False
+    return USE_ASYNC
 
 from .downloader import safe_print, UA_DESKTOP, BASE_DIR, CONFIG_DIR
 from .messages import render as render_message
@@ -162,6 +212,16 @@ PLUTOMOVIES_RESULT_RE = re.compile(
 # only (movies never carry an SxxEyy marker in their title).
 PLUTOMOVIES_EPISODE_RE = re.compile(r'\bS\d{1,2}\s?E\d{1,3}\b', re.IGNORECASE)
 PLUTOMOVIES_MAX_RESULTS = 12
+
+# ─── DRAMAKEY.CC / DRAMARAIN SLUG PATTERNS ────────────────────
+# dramakey.cc has NO server-side search — ?s= returns the same static
+# 24-card catalog regardless of query (confirmed: identical byte-length
+# for every query) and filters client-side in JS. So it is slug-guessed,
+# not searched. Its card URLs follow /{country}/{slug} (confirmed live:
+# /chinese/sweet-trap, /korean/..., etc.). DramaRain shares the extractor
+# and is slug-guessed with the same DramaKey-style suffix patterns.
+DRAMAKEY_CC_COUNTRIES = ['chinese', 'korean', 'thai', 'japanese', 'philippines']
+DRAMAKEY_CC_PATTERNS  = [c + '/{base}' for c in DRAMAKEY_CC_COUNTRIES]
 
 # ─── QUERY PARSING ────────────────────────────────────────────
 
@@ -412,30 +472,350 @@ def _search_site(domain, wave1, wave2, base, season_slug, year,
             results.append((site_name, url))
         safe_print("  " + render_message('search_found_on', site=site_name))
 
+# ─── RELEVANCE FILTER ─────────────────────────────────────────
+# WordPress search endpoints (NKiri RSS, NaijaVault WP-JSON, NaijaPrey RSS,
+# 9jaRocks RSS) rank fuzzily — a query for "reborn rich" returned the real
+# match DEAD LAST of 7 items, behind 6 unrelated titles. Slug-guessing never
+# had this problem (exact URL or nothing), so search endpoints MUST be
+# relevance-filtered or the right answer buries itself. We score by query-
+# token overlap in the result title, boost exact/substring matches, and drop
+# zero-overlap junk. Slug-probe hits (NKiri/DramaKey/Pluto) are already exact
+# and skip this — they carry score=None and are never dropped or reordered.
+
+_REL_STOP = {'the', 'a', 'an', 'of', 'and', 's01', 's02', 'complete', 'season'}
+# Keep-threshold for fuzzy search results. 0.6 means a 2-word query needs BOTH
+# words (1/2 = 0.5 is dropped), a 3-word query needs 2+ (2/3 = 0.67 kept). The
+# +0.5 exact-substring boost still lets a genuine phrase match clear the bar.
+# Chosen to kill 1-shared-token noise ("blood sisters" -> "in cold blood",
+# "the two sisters") without dropping real hits.
+_RELEVANCE_MIN = 0.6
+
+def _rel_tokens(text):
+    toks = re.findall(r'[a-z0-9]+', (text or '').lower())
+    return {t for t in toks if t not in _REL_STOP and len(t) > 1}
+
+def _relevance_score(query, title):
+    """0.0–1.0 fraction of query tokens present in the title, +0.5 exact-substring
+    boost. Returns 0.0 for zero overlap (caller drops these)."""
+    q = _rel_tokens(query)
+    if not q:
+        return 1.0
+    t = _rel_tokens(title)
+    overlap = len(q & t) / len(q)
+    if query.strip().lower() in (title or '').lower():
+        overlap = min(1.0, overlap + 0.5)
+    return overlap
+
+def _filter_by_relevance(query, scored_results):
+    """scored_results: list of (site, url, title). Drops zero-overlap items,
+    sorts best-first, returns [(site, url), ...]."""
+    ranked = []
+    for site, url, title in scored_results:
+        score = _relevance_score(query, title)
+        if score >= _RELEVANCE_MIN:
+            ranked.append((score, site, url))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return [(site, url) for _, site, url in ranked]
+
+# ─── ASYNC ENGINE ─────────────────────────────────────────────
+# One aiohttp session, all sources probed concurrently, first slug-hit can
+# cancel the rest (fast mode). Search endpoints (RSS/JSON/HTML) run alongside
+# slug probes; their results are relevance-filtered before merging. This is a
+# strict superset of the legacy path — same (site, url) result schema.
+
+_RSS_ITEM  = re.compile(r'<item>(.*?)</item>', re.I | re.S)
+_RSS_TITLE = re.compile(r'<title>(.*?)</title>', re.I | re.S)
+_RSS_LINK  = re.compile(r'<link>(.*?)</link>', re.I | re.S)
+
+def _rss_clean(s):
+    return (s or '').replace('<![CDATA[', '').replace(']]>', '').strip()
+
+def _async_conn_limit(default=20):
+    return 10 if _is_termux() else default
+
+# 9jaRocks RSS returns live my9jarocks.bz URLs, sometimes with a www. prefix.
+# detect_site() strips www. and now maps both my9jarocks.bz and the legacy
+# 9jarocks.com/.net aliases to extract_9jarocks, so these URLs are accepted
+# as-is. No host rewrite needed — the RSS links are already the live, working
+# pages (verified: 200 / real content). Kept as a pass-through hook in case a
+# future mirror needs remapping.
+def _normalize_9jarocks(url):
+    return url
+
+async def _afetch(session, url, timeout=12):
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout),
+                               allow_redirects=True) as r:
+            return r.status, str(r.url), await r.text()
+    except Exception:
+        return 0, url, ''
+
+async def _ahead(session, url):
+    try:
+        async with session.head(url, timeout=aiohttp.ClientTimeout(total=10),
+                                allow_redirects=True) as r:
+            return url, r.status, str(r.url)
+    except Exception:
+        return url, 0, url
+
+async def _averify_title(session, url, base):
+    """GET the page and confirm the query appears in its <title>. Guards against
+    soft-404s — e.g. dramakey.cc/philippines/{anything} returns 200 serving the
+    homepage catalog rather than a real series page. A genuine series page's
+    title carries the drama name; the catalog homepage does not."""
+    status, _, text = await _afetch(session, url)
+    if status != 200 or not text:
+        return False
+    m = re.search(r'<title>(.*?)</title>', text, re.I | re.S)
+    if not m:
+        return False
+    title = m.group(1).lower()
+    return _relevance_score(base.replace('-', ' '), title) >= 0.5
+
+async def _aprobe_slug(session, base_url, patterns, base, season_slug, year,
+                       site_name, cancel_event, verify_title=False):
+    """Probe all slug patterns CONCURRENTLY; return the highest-priority 200.
+    Priority = pattern order (wave1 before wave2), so we keep the pattern index
+    and pick the lowest-index 200, matching legacy behavior. When verify_title
+    is set, a 200 must also pass a <title> relevance check (soft-404 guard)."""
+    if cancel_event.is_set():
+        return None
+    domain = base_url.rstrip('/')
+    urls = []
+    for p in patterns:
+        path = p.replace('{base}', base).replace('{season}', season_slug).replace('{year}', year)
+        urls.append(domain + '/' + path.strip('/') + '/')
+    results = await asyncio.gather(*[_ahead(session, u) for u in urls],
+                                   return_exceptions=True)
+    status_by_url = {}
+    for res in results:
+        if isinstance(res, Exception):
+            continue
+        url, status, final = res
+        status_by_url[url] = (status, final)
+    # Walk in priority order — first 200 wins (mirrors legacy _probe_patterns).
+    for u in urls:
+        status, final = status_by_url.get(u, (0, u))
+        if status == 200:
+            if verify_title and not await _averify_title(session, final, base):
+                continue  # soft-404: 200 but page isn't the series we asked for
+            return (site_name, final)
+    return None
+
+async def _asearch_rss(session, feed_url, site_name, query, url_fixup=None):
+    """Fetch a WordPress RSS search feed, return scored (site, url, title) list."""
+    status, _, text = await _afetch(session, feed_url)
+    if status != 200 or not text:
+        return []
+    out = []
+    for item in _RSS_ITEM.findall(text):
+        t = _RSS_TITLE.search(item)
+        l = _RSS_LINK.search(item)
+        if not (t and l):
+            continue
+        title = _rss_clean(t.group(1))
+        link = _rss_clean(l.group(1))
+        if url_fixup:
+            link = url_fixup(link)
+        out.append((site_name, link, title))
+    return out
+
+async def _asearch_naijavault(session, query):
+    url = f"https://naijavault.com/wp-json/wp/v2/posts?search={quote(query)}"
+    status, _, text = await _afetch(session, url)
+    if status != 200 or not text:
+        return []
+    out = []
+    try:
+        data = json.loads(text)
+        for post in (data if isinstance(data, list) else []):
+            title = (post.get('title', {}) or {}).get('rendered', '')
+            link = post.get('link', '')
+            if link:
+                out.append(('NaijaVault', link, title))
+    except Exception:
+        pass
+    return out
+
+async def _asearch_pluto(session, query):
+    """PlutoMovies real HTML search — reuse the proven regex + episode filter."""
+    query_clean = query.replace("'", "").replace('’', '')
+    if not query_clean.strip():
+        return []
+    for page in (1, 2):
+        url = f"https://plutomovies.com/search/{quote(query_clean)}/page/{page}"
+        status, _, html = await _afetch(session, url)
+        matches = PLUTOMOVIES_RESULT_RE.findall(html) if (status == 200 and html) else []
+        if matches:
+            out, seen = [], set()
+            for link, kind, title in matches:
+                title = title.strip()
+                if kind == 'series' and PLUTOMOVIES_EPISODE_RE.search(title):
+                    continue
+                full = 'https://plutomovies.com' + link
+                if full in seen:
+                    continue
+                seen.add(full)
+                # Pluto search is already server-side relevant; carry title but
+                # it won't be dropped (kept out of the relevance-drop path).
+                out.append((f"PlutoMovies ({kind}): {title}", full))
+                if len(out) >= PLUTOMOVIES_MAX_RESULTS:
+                    break
+            return out
+    return []
+
+async def _arun(query, site_filter, fast, hint, timeout):
+    base, season_slug, year = _parse_query(query)
+    conn = aiohttp.TCPConnector(limit=_async_conn_limit(20), limit_per_host=6, ssl=False)
+    headers = {
+        'User-Agent':      UA_DESKTOP,
+        'Accept':          'text/html,application/xhtml+xml,application/json,*/*;q=0.9',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    cancel_event = asyncio.Event()
+    slug_results = []       # exact hits, never relevance-dropped
+    search_scored = []      # (site, url, title) for relevance filtering
+    pluto_results = []      # already relevance-ranked by server
+
+    async with aiohttp.ClientSession(connector=conn, headers=headers) as session:
+        tasks = []
+
+        # NKiri: slug probe + RSS search
+        if site_filter not in ('dramakey', 'plutomovies'):
+            nkiri_pat = list(NKIRI_WAVE1) + ([] if fast else list(NKIRI_WAVE2))
+            tasks.append(('slug', _aprobe_slug(session, 'https://thenkiri.com', nkiri_pat,
+                          base, season_slug, year, 'NKiri', cancel_event)))
+            tasks.append(('search', _asearch_rss(
+                session, f"https://thenkiri.com/search/{quote(query)}/feed/rss2/",
+                'NKiri', query)))
+
+        # DramaKey.com + .cc + DramaRain: slug probe only (no server search)
+        if site_filter not in ('nkiri', 'plutomovies'):
+            dk_pat = list(DRAMAKEY_WAVE1) + ([] if fast else list(DRAMAKEY_WAVE2))
+            tasks.append(('slug', _aprobe_slug(session, 'https://dramakey.com', dk_pat,
+                          base, season_slug, year, 'DramaKey', cancel_event)))
+            tasks.append(('slug', _aprobe_slug(session, 'https://dramakey.cc',
+                          DRAMAKEY_CC_PATTERNS, base, season_slug, year,
+                          'DramaKey.cc', cancel_event, verify_title=True)))
+            tasks.append(('slug', _aprobe_slug(session, 'https://dramarain.com', dk_pat,
+                          base, season_slug, year, 'DramaRain', cancel_event)))
+
+        # Search-only sources
+        if site_filter not in ('nkiri', 'dramakey'):
+            tasks.append(('pluto', _asearch_pluto(session, query)))
+            tasks.append(('search', _asearch_rss(
+                session, f"https://9jarocks.com/search/{quote(query)}/feed/rss2/",
+                '9jaRocks', query, url_fixup=_normalize_9jarocks)))
+            tasks.append(('search', _asearch_rss(
+                session, f"https://www.naijaprey.tv/search/{quote(query)}/feed/rss2/",
+                'NaijaPrey', query)))
+            tasks.append(('search', _asearch_naijavault(session, query)))
+
+        kinds = [k for k, _ in tasks]
+        coros = [c for _, c in tasks]
+
+        async def _guard(coro):
+            # Per-task deadline so ONE slow source can't discard the others'
+            # results. gather() with a single outer wait_for would cancel every
+            # task (even completed ones) on timeout — that regressed real hits.
+            try:
+                return await asyncio.wait_for(coro, timeout=timeout)
+            except (asyncio.TimeoutError, Exception):
+                return None
+
+        done = await asyncio.gather(*[_guard(c) for c in coros],
+                                    return_exceptions=True)
+
+        for kind, res in zip(kinds, done):
+            if isinstance(res, Exception):
+                continue
+            if kind == 'slug' and res:
+                slug_results.append(res)
+                if fast:
+                    cancel_event.set()
+            elif kind == 'search' and res:
+                search_scored.extend(res)
+            elif kind == 'pluto' and res:
+                pluto_results.extend(res)
+
+    # Stream "found on X" for each exact slug hit as we finish (UI feedback).
+    for site, _ in slug_results:
+        safe_print("  " + render_message('search_found_on', site=site))
+
+    # Merge: exact slug hits first, then relevance-filtered search, then Pluto.
+    ranked_search = _filter_by_relevance(query, search_scored)
+    merged = slug_results + ranked_search + pluto_results
+    # Dedupe on a normalized key (drop query string + trailing slash) so an RSS
+    # result carrying ?utm_source= doesn't duplicate the clean slug-probe hit.
+    seen, final = set(), []
+    for site, url in merged:
+        try:
+            p = urlparse(url)
+            key = (p.netloc.lower(), p.path.rstrip('/').lower())
+        except Exception:
+            key = (url,)
+        if key in seen:
+            continue
+        seen.add(key)
+        final.append((site, url))
+    return final
+
+def _run_search_async(query, site_filter=None, fast=False, hint=None, timeout=45):
+    """Async entry. Sets the Windows selector policy (aiohttp needs it, and it
+    keeps Ctrl+C responsive), runs the engine, returns [(site, url), ...]."""
+    if sys.platform == 'win32':
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except Exception:
+            pass
+    return asyncio.run(_arun(query, site_filter, fast, hint, timeout))
+
 # ─── MAIN SEARCH ──────────────────────────────────────────────
 
 def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
+    """Cache-aware dispatcher. Prefers the aiohttp async engine; falls back to
+    the legacy requests/ThreadPool path if aiohttp is unavailable or the async
+    run raises. Cache read/write is shared across both paths."""
     base, season_slug, year = _parse_query(query)
     if not base:
         safe_print(render_message('search_empty_query'))
         return []
     cache_key = f"{site_filter or 'all'}:{base}:{season_slug}:{year}:{'fast' if fast else 'full'}:{hint or ''}"
 
-    use_cache = True
-    try:
-        config_path = os.path.join(CONFIG_DIR, '.config.json')
-        if os.path.exists(config_path):
-            with open(config_path) as f:
-                use_cache = json.load(f).get('search_cache', True)
-    except Exception:
-        pass
-
-    # Check cache first if enabled
+    use_cache = _search_cache_enabled()
     if use_cache:
         cached = _cache_get(cache_key)
         if cached:
             safe_print("  " + render_message('search_cached', query=base))
             return cached
+
+    results = None
+    if USE_ASYNC:
+        try:
+            results = _run_search_async(query, site_filter, fast, hint, timeout)
+        except Exception:
+            results = None  # fall through to legacy
+    if results is None:
+        results = _run_search_legacy(query, site_filter, fast, hint, timeout)
+
+    if results and use_cache:
+        _cache_set(cache_key, results)
+    return results
+
+def _search_cache_enabled():
+    try:
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                return json.load(f).get('search_cache', True)
+    except Exception:
+        pass
+    return True
+
+def _run_search_legacy(query, site_filter=None, fast=False, hint=None, timeout=45):
+    base, season_slug, year = _parse_query(query)
+    if not base:
+        return []
 
     results = []
     lock    = threading.Lock()
@@ -481,9 +861,6 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
         t.join(timeout=max(0, deadline - time.time()))
     if any(t.is_alive() for t in threads):
         cancel_event.set()
-
-    if results and use_cache:
-        _cache_set(cache_key, results)
 
     return results
 

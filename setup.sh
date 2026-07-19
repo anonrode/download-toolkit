@@ -25,7 +25,7 @@ if [ "$IS_TERMUX" -ne 1 ]; then
     command -v git >/dev/null 2>&1 || warn "git not found — update/clone may fail"
 
     info "Installing Python packages..."
-    python -m pip install requests beautifulsoup4 yt-dlp curl_cffi -q \
+    python -m pip install requests beautifulsoup4 yt-dlp curl_cffi aiohttp -q \
       && ok "Python packages installed" || warn "Some Python packages failed to install"
 
     info "Installing ffmpeg..."
@@ -154,6 +154,9 @@ pip install yt-dlp --break-system-packages -q \
 
 pip install curl_cffi --break-system-packages -q \
   && ok "curl_cffi installed" || warn "curl_cffi install failed (wildshare/naijaprey may not work)"
+
+pip install aiohttp --break-system-packages -q \
+  && ok "aiohttp installed" || warn "aiohttp install failed (search falls back to classic mode)"
 
 # cryptography requires Rust to compile on Termux — skipped (openssl handles decryption instead)
 

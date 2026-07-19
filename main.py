@@ -1673,7 +1673,11 @@ def main():
 
     from src.downloader import show_history, register_state_callback, register_app_state, set_output_mode, make_session
     from src.extractors import process_link_queue
-    from src.search import search, fsearch, clear_search_cache
+    from src.search import search, fsearch, clear_search_cache, ensure_async
+
+    # One-time: pull in the aiohttp async search engine for users who installed
+    # before it existed and never re-run setup.sh. No-op once present.
+    ensure_async()
 
     register_state_callback(app.set_download_state)
     register_app_state(app)

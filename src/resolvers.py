@@ -138,7 +138,7 @@ class LoadedfilesResolver(BaseResolver):
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            r1 = safe_get(session, url, referer='https://9jarocks.net/')
+            r1 = safe_get(session, url, referer='https://my9jarocks.bz/')
             if not r1:
                 return None
             m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.org/[^']+)'", r1.text)
