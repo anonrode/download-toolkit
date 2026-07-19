@@ -6,7 +6,7 @@ def extract_plutomovies(url, session, ctx=None):
 
     safe_print(render_message('site_mode', site='PlutoMovies'))
     is_movie = '/movie/' in url
-    slug     = url.rstrip('/').split('/')[-1]
+    slug     = url_slug(url)
     name     = re.sub(r'-\d{4}.*$', '', slug).replace('-', ' ').title()
     safe_print(f"[*] Title: {name}")
     folder   = os.path.join(BASE_DIR, safe_filename(name))

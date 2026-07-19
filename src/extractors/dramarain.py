@@ -6,7 +6,7 @@ def extract_dramarain(url, session, ctx=None):
     site = 'DramaKey.cc' if DRAMAKEY_CC in url else 'DramaRain'
     safe_print(f"[*] {site} mode")
 
-    slug   = url.rstrip('/').split('/')[-1]
+    slug   = url_slug(url)
     name   = re.sub(r'-(chinese|korean|thai|japanese|drama|tvshows|movies?).*$', '', slug, flags=re.IGNORECASE)
     name   = clean_name(name)
     safe_print(f"[*] Title: {name}")

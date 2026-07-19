@@ -5,7 +5,7 @@ def extract_naijaprey(url, session, ctx=None):
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print(render_message('site_mode', site='NaijaPrey'))
-    slug   = url.rstrip('/').split('/')[-1]
+    slug   = url_slug(url)
     name   = clean_name(slug)
     safe_print(f"[*] Title: {name}")
     folder = os.path.join(BASE_DIR, safe_filename(name))

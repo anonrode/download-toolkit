@@ -5,7 +5,7 @@ def extract_nkiri(url, session, ctx=None):
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print(render_message('site_mode', site='NKiri/TheNkiri'))
-    slug = url.rstrip('/').split('/')[-1]
+    slug = url_slug(url)
     name = re.sub(r'-(korean|complete|drama|series|nollywood|hollywood|tv|movie).*$', '', slug, flags=re.IGNORECASE)
     name = clean_name(name)
     safe_print(f"[*] Title: {name}")

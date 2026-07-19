@@ -547,6 +547,25 @@ class LiveProgress:
         except Exception:
             pass
 
+    def stopped_for_resume(self):
+        # Clean user stop (Ctrl+C) — the partial file is saved for resume, so
+        # this is NOT a failure. Closes the progress line without the [X] glyph
+        # so the user doesn't see a misleading "Failed" after "saved for resume".
+        if self._done:
+            return
+        self._done = True
+        update_status(status='Stopped', current=self._name)
+        line = f'  [stop] Stopped: {self._name} (saved for resume)'
+        try:
+            with PRINT_LOCK:
+                if self._parallel or not self._started:
+                    sys.stdout.write(line + '\n')
+                else:
+                    sys.stdout.write('\r' + line + ' ' * 20 + '\n')
+                sys.stdout.flush()
+        except Exception:
+            pass
+
 # ─── DISK SPACE ───────────────────────────────────────────────
 def get_free_space_gb():
     try:
@@ -1472,7 +1491,7 @@ def download_with_aria2c(url, folder, filename, summary,
                 stopped = True
 
             if stopped:
-                progress.fail()
+                progress.stopped_for_resume()
                 # Mirror the PAUSE branch: write a per-worker resume receipt so
                 # every interrupted parallel episode resumes from its partial
                 # bytes. Ctrl+C previously left the shared AppState slot to the
@@ -1952,11 +1971,12 @@ def download_with_ytdlp(url, folder, filename, summary,
             summary.add_failed(filename)
             return False
         else:
-            progress.fail()
             if _is_stopped(stop_flag):
+                progress.stopped_for_resume()
                 ui_emit('ytdlp_stopped')
                 _ytdlp_record_paused(series_url, series_name, folder, filename)
             else:
+                progress.fail()
                 ui_emit('ytdlp_failed')
                 summary.add_failed(filename)
             return False

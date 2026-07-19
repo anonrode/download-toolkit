@@ -5,7 +5,7 @@ def extract_myasiantv(url, session, ctx=None):
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print(render_message('site_mode', site='MyAsianTV'))
-    slug = url.rstrip('/').split('/')[-1]
+    slug = url_slug(url)
     name = re.sub(r'-episode-\d+.*$', '', slug)
     name = re.sub(r'-\d{4}.*$', '', name)
     name = clean_name(name)

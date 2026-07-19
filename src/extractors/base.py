@@ -89,6 +89,12 @@ def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
                 time.sleep(2)
     return None
 
+def url_slug(url):
+    # Drop fragment (#...) and query (?utm_source=rss&...) before taking the
+    # last path segment. RSS/feed links append tracking params that would
+    # otherwise end up in the title and download folder name.
+    return url.split('#')[0].split('?')[0].rstrip('/').split('/')[-1]
+
 def clean_name(slug):
     name = re.sub(r'[-_]+', ' ', slug)
     name = re.sub(r'\s+', ' ', name).strip()
@@ -279,7 +285,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
 
     safe_print(f"[*] {site_label} mode")
-    slug   = url.rstrip('/').split('/')[-1]
+    slug   = url_slug(url)
     name   = clean_name(name_cleaner(slug))
     safe_print(f"[*] Series: {name}")
     folder = os.path.join(BASE_DIR, safe_filename(name))
