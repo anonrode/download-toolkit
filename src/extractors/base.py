@@ -3,8 +3,25 @@ import re
 import time
 import subprocess
 from urllib.parse import urljoin, urlparse
-from bs4 import BeautifulSoup
-import requests
+
+# Lazy `requests` + `BeautifulSoup`: together they cost ~900ms to import and
+# nothing needs them to draw the banner or run the REPL — only an actual
+# scrape/download does. Both are imported on first use, not at startup.
+class _LazyRequests:
+    _mod = None
+    def _load(self):
+        if _LazyRequests._mod is None:
+            import requests as _r
+            _LazyRequests._mod = _r
+        return _LazyRequests._mod
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+requests = _LazyRequests()
+
+def BeautifulSoup(*args, **kwargs):
+    from bs4 import BeautifulSoup as _BS
+    return _BS(*args, **kwargs)
 
 from ..resolvers import ResolverRegistry
 from ..messages import render as render_message

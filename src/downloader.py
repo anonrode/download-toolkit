@@ -11,9 +11,25 @@ import threading
 import signal
 import subprocess
 import tempfile
-import requests
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+
+# Lazy `requests`: importing it (+ urllib3 + charset_normalizer) costs ~790ms
+# and nothing needs it to draw the banner or run the REPL prompt — only an
+# actual download/scrape does. This proxy imports the real module on first
+# attribute access (including inside `except requests.X` clauses, which Python
+# evaluates lazily), so the cost is paid at first use, not at startup.
+class _LazyRequests:
+    _mod = None
+    def _load(self):
+        if _LazyRequests._mod is None:
+            import requests as _r
+            _LazyRequests._mod = _r
+        return _LazyRequests._mod
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+requests = _LazyRequests()
 from .messages import emit as emit_message, render as render_message, paint
 
 try:

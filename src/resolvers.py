@@ -1,13 +1,33 @@
 import re
 import sys
 import time
-import urllib3
-import requests
-from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
-# Suppress certificate warnings (useful for expired SSL certs on hosts like wetafiles)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Lazy `requests`/`urllib3`/`BeautifulSoup`: importing them (+ charset_normalizer)
+# costs ~900ms and nothing needs them to draw the banner or run the REPL — only
+# an actual resolve/scrape does. They load on first use, not at startup. The
+# InsecureRequestWarning suppression (for expired SSL certs on hosts like
+# wetafiles) runs once, the first time requests is loaded.
+class _LazyRequests:
+    _mod = None
+    def _load(self):
+        if _LazyRequests._mod is None:
+            import requests as _r
+            import urllib3 as _u3
+            try:
+                _u3.disable_warnings(_u3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
+            _LazyRequests._mod = _r
+        return _LazyRequests._mod
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+requests = _LazyRequests()
+
+def BeautifulSoup(*args, **kwargs):
+    from bs4 import BeautifulSoup as _BS
+    return _BS(*args, **kwargs)
 
 # Ensure console stdout is configured to handle UTF-8 symbols when supported.
 try:

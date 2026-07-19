@@ -20,8 +20,22 @@ import json
 import time
 import datetime
 import threading
-import requests
 from urllib.parse import quote, urlparse
+
+# Lazy `requests`: the legacy search path and cache use it, but importing it
+# (+ urllib3 + charset_normalizer, ~700ms) would block every launch since main
+# imports this module at startup for ensure_async(). Loads on first use.
+class _LazyRequests:
+    _mod = None
+    def _load(self):
+        if _LazyRequests._mod is None:
+            import requests as _r
+            _LazyRequests._mod = _r
+        return _LazyRequests._mod
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+requests = _LazyRequests()
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Async engine is optional. If aiohttp is missing (or asyncio can't start),
@@ -29,12 +43,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # below — nothing here is load-bearing for the synchronous fallback.
 import subprocess
 
-try:
-    import asyncio
-    import aiohttp
-    USE_ASYNC = True
-except Exception:
-    USE_ASYNC = False
+# Detect aiohttp WITHOUT importing it — the actual `import aiohttp` costs
+# ~400ms (C extensions) and would block every launch even though search
+# isn't touched until the user runs it. find_spec is cheap; the real import
+# happens lazily in the async functions below, so the cost is paid only on
+# the first search, not at startup.
+import importlib.util as _ilu
+USE_ASYNC = _ilu.find_spec('aiohttp') is not None
+asyncio = None   # bound lazily by _ensure_async_imported()
+aiohttp = None
 
 
 def ensure_async():
@@ -772,9 +789,30 @@ async def _arun(query, site_filter, fast, hint, timeout):
         final.append((site, url))
     return final
 
+def _ensure_async_imported():
+    """Bind aiohttp/asyncio into module globals on first async search.
+
+    Kept out of module top-level so the ~400ms aiohttp C-extension import
+    doesn't block every launch. Returns True if the async engine is usable."""
+    global aiohttp, asyncio, USE_ASYNC
+    if aiohttp is not None and asyncio is not None:
+        return True
+    try:
+        import asyncio as _aio
+        import aiohttp as _http
+        asyncio = _aio
+        aiohttp = _http
+        return True
+    except Exception:
+        USE_ASYNC = False
+        return False
+
+
 def _run_search_async(query, site_filter=None, fast=False, hint=None, timeout=45):
     """Async entry. Sets the Windows selector policy (aiohttp needs it, and it
     keeps Ctrl+C responsive), runs the engine, returns [(site, url), ...]."""
+    if not _ensure_async_imported():
+        return None
     if sys.platform == 'win32':
         try:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
