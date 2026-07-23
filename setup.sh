@@ -25,17 +25,32 @@ if [ "$IS_TERMUX" -ne 1 ]; then
     command -v git >/dev/null 2>&1 || warn "git not found — update/clone may fail"
 
     info "Installing Python packages..."
-    python -m pip install requests beautifulsoup4 yt-dlp curl_cffi aiohttp -q \
-      && ok "Python packages installed" || warn "Some Python packages failed to install"
+    if [ -f "$HOME/download-toolkit/requirements.txt" ]; then
+        python -m pip install -r "$HOME/download-toolkit/requirements.txt" -q \
+          && ok "Python packages installed" || warn "Some Python packages failed to install"
+    else
+        python -m pip install requests beautifulsoup4 yt-dlp curl_cffi aiohttp -q \
+          && ok "Python packages installed" || warn "Some Python packages failed to install"
+    fi
 
     info "Installing ffmpeg..."
-    if command -v winget >/dev/null 2>&1; then
+    if command -v ffmpeg >/dev/null 2>&1; then
+        ok "ffmpeg already installed"
+    elif command -v winget >/dev/null 2>&1; then
         winget install --id Gyan.FFmpeg -e --silent >/dev/null 2>&1 \
           && ok "ffmpeg installed via winget" || warn "ffmpeg install failed — install manually from https://ffmpeg.org/download.html"
-    elif command -v ffmpeg >/dev/null 2>&1; then
-        ok "ffmpeg already installed"
     else
         warn "ffmpeg not found — install from https://ffmpeg.org/download.html and add to PATH"
+    fi
+
+    info "Installing aria2c (fast downloads + torrents)..."
+    if command -v aria2c >/dev/null 2>&1; then
+        ok "aria2c already installed"
+    elif command -v winget >/dev/null 2>&1; then
+        winget install --id aria2.aria2 -e --silent >/dev/null 2>&1 \
+          && ok "aria2c installed via winget" || warn "aria2c install failed — torrents/fast downloads unavailable. Install from https://github.com/aria2/aria2/releases"
+    else
+        warn "aria2c not found — torrents and fast multi-connection downloads need it. Install from https://github.com/aria2/aria2/releases and add to PATH"
     fi
 
     if [ -d "$HOME/download-toolkit" ]; then
