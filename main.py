@@ -1678,7 +1678,7 @@ def cmd_torrent(query, session, cfg):
     print()
     ui_emit('torrent_searching', query=query)
 
-    results, blocked_count, error = search_tpb(query)
+    results, blocked_count, error, intent = search_tpb(query)
 
     if error:
         ui_emit('torrent_search_failed', error=error)
@@ -1691,7 +1691,7 @@ def cmd_torrent(query, session, cfg):
     print()
     ui_emit('torrent_results_count', count=len(results))
 
-    displayed = present_torrent_results(results, blocked_count=blocked_count)
+    displayed = present_torrent_results(results, blocked_count=blocked_count, intent=intent)
     if not displayed:
         return
 

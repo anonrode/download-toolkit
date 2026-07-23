@@ -135,32 +135,127 @@ _STOP_TOKENS = frozenset([
     'x264', 'x265', 'hevc', 'avc', 'web', 'dl', 'bluray', 'webrip',
     'aac', 'dts', 'atmos', 'ddp', 'dd', 'ac3', 'eac3',
     'mkv', 'mp4', 'avi',
+    # Filler words users tack on that release names rarely carry — these
+    # must NOT count against a match or "batman movie" kills "The Batman".
+    'the', 'a', 'an', 'of', 'and',
+    'movie', 'movies', 'film', 'show', 'series', 'tv', 'full',
+    'free', 'download', 'watch', 'online', 'stream',
 ])
+
+
+def _is_year(tok):
+    """A 4-digit token that looks like a release year (1900-2099)."""
+    return len(tok) == 4 and tok.isdigit() and tok[:2] in ('19', '20')
 
 
 def _tokenize(text):
     return set(re.findall(r'[a-z0-9]+', text.lower()))
 
 
+# Season/episode markers a user might type, most-specific first. Each yields
+# (season, episode) with episode possibly None. Matched against the raw query.
+_QUERY_SE_PATTERNS = [
+    # s1e3, s01e03, s01 e03
+    (re.compile(r'(?i)\bs(\d{1,2})\s*e(\d{1,3})\b'),
+     lambda m: (int(m.group(1)), int(m.group(2)))),
+    # 1x03
+    (re.compile(r'(?i)\b(\d{1,2})x(\d{1,3})\b'),
+     lambda m: (int(m.group(1)), int(m.group(2)))),
+    # season 1 episode 3
+    (re.compile(r'(?i)\bseason\s*(\d{1,2})\s*episode\s*(\d{1,3})\b'),
+     lambda m: (int(m.group(1)), int(m.group(2)))),
+    # season 1 / season1
+    (re.compile(r'(?i)\bseason\s*(\d{1,2})\b'),
+     lambda m: (int(m.group(1)), None)),
+    # s1 / s01  (also catches a trailing "silos01" once split on the boundary)
+    (re.compile(r'(?i)\bs(\d{1,2})\b'),
+     lambda m: (int(m.group(1)), None)),
+    # episode 3 / e03 with no season
+    (re.compile(r'(?i)\b(?:episode|e)\s*(\d{1,3})\b'),
+     lambda m: (None, int(m.group(1)))),
+]
+
+
+def _parse_query_intent(query):
+    """Pull season/episode intent out of a free-text query.
+
+    Returns dict {title, season, episode, raw}:
+      - title:   the query with S/E markers stripped, for relevance scoring
+      - season:  int or None
+      - episode: int or None
+      - raw:     the original query
+
+    Handles 'silo s1', 'silo s01', 'silo season 1', 'silos01', 'silo s1e3',
+    'silo 1x03', 'silo season 1 episode 3'. The stripped title is what the
+    relevance filter scores against, so these spellings can't sink a match.
+    """
+    raw = query.strip()
+    # Split a glued season suffix like 'silos01' -> 'silos 01' won't help;
+    # instead insert a boundary before a trailing sNN so \b patterns catch it.
+    work = re.sub(r'(?i)([a-z])(s\d{1,2}(?:e\d{1,3})?)\b', r'\1 \2', raw)
+
+    season = episode = None
+    title = work
+    for pattern, extract in _QUERY_SE_PATTERNS:
+        m = pattern.search(work)
+        if m:
+            s, e = extract(m)
+            if season is None and s is not None:
+                season = s
+            if episode is None and e is not None:
+                episode = e
+            # Strip this marker from the title text.
+            title = title[:m.start()] + ' ' + title[m.end():]
+            # Keep scanning: 'season 1' + separate 'episode 3' both apply.
+    title = re.sub(r'\s+', ' ', title).strip()
+    if not title:
+        title = raw  # query was nothing but markers; fall back to raw
+    return {'title': title, 'season': season, 'episode': episode, 'raw': raw}
+
+
 def _relevance_score(query_tokens, title):
-    """Token-set subset alignment score. Returns 0.0-1.0+."""
+    """Token-set subset alignment score. Returns 0.0-1.0+.
+
+    Scoring is driven by the *meaningful* query words only — stop tokens
+    (quality/codec/filler like 'the', 'movie') and year tokens are dropped
+    from the denominator so they can't sink an otherwise-good match. A year
+    that DOES appear in the title still helps (small bonus), it just never
+    hurts when it's missing or different.
+    """
     title_tokens = _tokenize(title) - _STOP_TOKENS
-    clean_query = query_tokens - _STOP_TOKENS
+    clean_query = (query_tokens - _STOP_TOKENS)
+    query_years = {t for t in clean_query if _is_year(t)}
+    core_query = {t for t in clean_query if not _is_year(t)}
 
-    if not clean_query:
-        return 1.0  # empty query matches everything
+    if not core_query:
+        # Query was nothing but filler/year — fall back to matching on years
+        # if present, else treat as a match-all.
+        if query_years:
+            return 1.0 if (query_years & title_tokens) else 0.5
+        return 1.0
 
-    overlap = len(clean_query & title_tokens)
-    score = overlap / len(clean_query)
+    overlap = len(core_query & title_tokens)
+    score = overlap / len(core_query)
 
-    # Exact substring bonus
-    if all(t in title.lower() for t in clean_query):
+    # Year present in BOTH query and title → small confidence bonus, never a
+    # penalty for absence/mismatch.
+    if query_years and (query_years & title_tokens):
+        score += 0.15
+
+    # Exact substring bonus — all core words appear verbatim in the title.
+    if all(t in title.lower() for t in core_query):
         score += 0.3
 
     return score
 
 
-_RELEVANCE_MIN = 0.7  # strict — must match at least 70% of query tokens
+# Keep matches that cover at least ~45% of the meaningful query words. Lower
+# than the old 0.7 so partial-but-real matches survive; the results are still
+# sorted best-first so junk sinks to the bottom rather than being hidden.
+_RELEVANCE_MIN = 0.45
+# If the strict pass finds nothing, show anything with at least one real
+# word in common rather than returning an empty screen.
+_RELEVANCE_FALLBACK = 0.15
 
 
 # ─── SEARCH ────────────────────────────────────────────────────
@@ -184,39 +279,69 @@ def search_tpb(query):
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        return ([], 0, f'search failed: {e}')
+        return ([], 0, f'search failed: {e}', None)
 
     # apibay returns [{"id":"0","name":"No results..."}] for no results
     if not data or (len(data) == 1 and data[0].get('id') == '0'):
-        return ([], 0, None)
+        return ([], 0, None, None)
 
     # Keep only Video-category torrents (200-299). Drops ebooks (601),
     # audiobooks (102), music, games, etc. that match the title text.
     data = [d for d in data if _is_video_category(d.get('category', ''))]
     if not data:
-        return ([], 0, None)
+        return ([], 0, None, None)
 
     # Security filter (layers 1-4)
     safe, blocked_count, block_reasons = filter_results(data)
 
-    # Relevance filter
-    query_tokens = _tokenize(query)
-    relevant = []
+    # Relevance filter. Parse season/episode intent out of the query first so
+    # markers like 's1', 'season 1', 'silos01' don't sink the title match —
+    # relevance scores only against the stripped title. Score everything, take
+    # the strict set; if empty, fall back to a looser threshold so a real
+    # search never returns a blank screen just because release names are messy.
+    intent = _parse_query_intent(query)
+    query_tokens = _tokenize(intent['title'])
+    scored = []
     for r in safe:
-        score = _relevance_score(query_tokens, r['name'])
-        if score >= _RELEVANCE_MIN:
-            r['_relevance'] = score
-            relevant.append(r)
+        r['_relevance'] = _relevance_score(query_tokens, r['name'])
+        scored.append(r)
+
+    relevant = [r for r in scored if r['_relevance'] >= _RELEVANCE_MIN]
+    if not relevant:
+        relevant = [r for r in scored if r['_relevance'] >= _RELEVANCE_FALLBACK]
 
     # Enrich results with parsed metadata
     for r in relevant:
         _enrich_result(r)
 
-    # Sort: quality tier desc, seeders desc
-    relevant.sort(key=lambda r: (r.get('_quality_tier', 0), int(r.get('seeders', 0))),
-                  reverse=True)
+    # Sort within the flat list; grouping/season-priority happens at display.
+    # Keys, most-significant first:
+    #   relevance bucket (loose fallback can't outrank a solid hit)
+    #   season match      (asked-for season floats up; None intent = neutral)
+    #   quality tier      (1080p over 720p, etc. — your main ask)
+    #   episode ascending (E01, E02, E03 within a season/quality run)
+    #   seeders           (final tiebreak)
+    want_season = intent['season']
 
-    return (relevant, blocked_count, None)
+    def _season_rank(r):
+        if want_season is None:
+            return 0
+        return 1 if r.get('_season_num') == want_season else -1
+
+    def _episode_key(r):
+        # Ascending episode order, but sort() is reverse=True below, so negate.
+        ep = r.get('_episode_num')
+        return -(ep if ep is not None else 9999)
+
+    relevant.sort(
+        key=lambda r: (round(r.get('_relevance', 0) / 0.15),
+                       _season_rank(r),
+                       r.get('_quality_tier', 0),
+                       _episode_key(r),
+                       int(r.get('seeders', 0))),
+        reverse=True)
+
+    return (relevant, blocked_count, None, intent)
 
 
 # ─── RESULT ENRICHMENT ──────────────────────────────────────────
@@ -232,6 +357,9 @@ def _enrich_result(r):
         r['_scope'] = 'SEASON_PACK'
     else:
         r['_scope'] = 'MOVIE_OR_GENERAL'
+
+    # Season / episode numbers for grouping + ordering (None if absent).
+    r['_season_num'], r['_episode_num'] = _parse_release_se(name)
 
     # Quality tier
     r['_quality_tier'] = 0
@@ -283,6 +411,30 @@ def _enrich_result(r):
     r['_health_bar'] = _make_health_bar(r['_health_pct'])
 
 
+_RELEASE_SE_PATTERNS = [
+    re.compile(r'(?i)\bS(\d{1,2})E(\d{1,3})\b'),          # S01E03
+    re.compile(r'(?i)\b(\d{1,2})x(\d{2,3})\b'),           # 1x03
+    re.compile(r'(?i)Season\s*(\d{1,2}).*?Episode\s*(\d{1,3})'),
+]
+_RELEASE_S_PATTERNS = [
+    re.compile(r'(?i)\bS(\d{1,2})(?!E\d)\b'),             # S01 (no episode)
+    re.compile(r'(?i)\bSeason\s*(\d{1,2})\b'),            # Season 1
+]
+
+
+def _parse_release_se(name):
+    """Extract (season, episode) ints from a release name; None where absent."""
+    for pat in _RELEASE_SE_PATTERNS:
+        m = pat.search(name)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+    for pat in _RELEASE_S_PATTERNS:
+        m = pat.search(name)
+        if m:
+            return (int(m.group(1)), None)
+    return (None, None)
+
+
 def _make_health_bar(pct):
     """ASCII health bar: [==========] 100%"""
     filled = pct // 10
@@ -292,28 +444,63 @@ def _make_health_bar(pct):
 
 # ─── DISPLAY ───────────────────────────────────────────────────
 
-def present_torrent_results(results, blocked_count):
+def present_torrent_results(results, blocked_count, intent=None):
     """Format and print search results grouped by scope.
 
-    Caps at 5 results per group (15 total max) to keep output scannable.
-    Returns the displayed subset (caller handles selection from this list).
+    Caps per group to keep output scannable. When the query named a season
+    (intent['season']), episodes/packs for that season lead and other seasons
+    drop to a trailing group instead of vanishing. Returns the displayed
+    subset (caller handles selection from this list).
     """
     if not results:
         return []
 
-    # Group by scope
-    packs = [r for r in results if r['_scope'] == 'SEASON_PACK'][:5]
-    episodes = [r for r in results if r['_scope'] == 'EPISODE'][:5]
-    movies = [r for r in results if r['_scope'] == 'MOVIE_OR_GENERAL'][:5]
+    intent = intent or {}
+    want_season = intent.get('season')
+
+    def _in_season(r):
+        # No season asked → everything counts as "in scope".
+        if want_season is None:
+            return True
+        return r.get('_season_num') == want_season
+
+    # Group by scope. Episodes/packs get split by asked-for season when set.
+    packs = [r for r in results if r['_scope'] == 'SEASON_PACK' and _in_season(r)][:6]
+    episodes = [r for r in results if r['_scope'] == 'EPISODE' and _in_season(r)][:12]
+    movies = [r for r in results if r['_scope'] == 'MOVIE_OR_GENERAL'][:6]
+    other_season = []
+    if want_season is not None:
+        other_season = [
+            r for r in results
+            if r['_scope'] in ('SEASON_PACK', 'EPISODE') and not _in_season(r)
+        ][:6]
 
     displayed = []
     groups = []
+    ep_header = 'EPISODES'
+    pack_header = 'SEASON PACKS'
+    if want_season is not None:
+        ep_header = f'EPISODES · SEASON {want_season}'
+        pack_header = f'SEASON PACKS · SEASON {want_season}'
     if packs:
-        groups.append(('SEASON PACKS', packs))
+        groups.append((pack_header, packs))
     if episodes:
-        groups.append(('SINGLE EPISODES', episodes))
+        groups.append((ep_header, episodes))
     if movies:
         groups.append(('MOVIES / GENERAL', movies))
+    if other_season:
+        groups.append(('OTHER SEASONS', other_season))
+
+    # Echo what we understood, so the user can see the query was parsed.
+    if intent.get('season') is not None or intent.get('episode') is not None:
+        bits = []
+        if intent.get('title'):
+            bits.append(intent['title'].title())
+        if intent.get('season') is not None:
+            bits.append(f'Season {intent["season"]}')
+        if intent.get('episode') is not None:
+            bits.append(f'Episode {intent["episode"]}')
+        print(f'  {paint("parsed:", "gray")} {paint(" · ".join(bits), "cyan")}')
 
     print()
     idx = 1
