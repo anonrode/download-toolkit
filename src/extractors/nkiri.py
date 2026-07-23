@@ -75,9 +75,11 @@ def extract_nkiri(url, session, ctx=None):
                 from concurrent.futures import ThreadPoolExecutor, as_completed
                 safe_print(f"\n  [*] Resolving {len(to_process)} link(s)...")
                 resolved = {}
+                def _resolve_with_own_session(ep_url):
+                    return ResolverRegistry.resolve(ep_url, make_session())
                 with ThreadPoolExecutor(max_workers=min(len(to_process), 8)) as ex:
                     futures = {
-                        ex.submit(ResolverRegistry.resolve, ep_url, session): (ep_url, ep_name)
+                        ex.submit(_resolve_with_own_session, ep_url): (ep_url, ep_name)
                         for ep_url, ep_name in to_process
                     }
                     for f in as_completed(futures):
@@ -149,7 +151,7 @@ def extract_nkiri(url, session, ctx=None):
     # Priority 2: direct CDN links (newer posts)
     cdn_links = list(dict.fromkeys(
         a['href'] for a in soup.find_all('a', href=True)
-        if 'nkiserv.com' in a['href'] and a['href'].endswith('.mkv')
+        if 'nkiserv.com' in a['href'] and (a['href'].endswith('.mkv') or a['href'].endswith('.mp4'))
     ))
     if cdn_links:
         cdn_links = _filter_by_episode_range(cdn_links, ctx)
@@ -161,7 +163,7 @@ def extract_nkiri(url, session, ctx=None):
         items = []
         for cdn_url in cdn_links:
             fname = cdn_url.split('/')[-1]
-            fname = re.sub(r'\.\([^)]+\)\.[a-z0-9]+\.mkv$', '.mkv', fname, flags=re.IGNORECASE)
+            fname = re.sub(r'\.\([^)]+\)\.[a-z0-9]+\.(mkv|mp4)$', lambda m: '.' + m.group(1), fname, flags=re.IGNORECASE)
             fname = safe_filename(fname)
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:

@@ -217,6 +217,15 @@ MESSAGES = {
     'tmux_missing': ('warn', 'tmux not found - install it with: pkg install tmux'),
     'clipboard_watch_exit_hint': ('info', 'Press Ctrl+C once to exit watch mode and return to the main menu.'),
     'pyperclip_installing': ('info', 'pyperclip not found - Anon is installing it...'),
+    # torrent.py / cmd_torrent
+    'torrent_searching': ('info', 'Anon is searching torrents for: {query}'),
+    'torrent_search_failed': ('fail', 'Torrent search failed: {error}'),
+    'torrent_nothing_found': ('warn', 'No safe torrents found for: {query}'),
+    'torrent_results_count': ('ok', 'Found {count} verified-safe result(s).'),
+    'torrent_download_start': ('info', 'Anon is starting torrent download: {name}'),
+    'torrent_download_done': ('ok', 'Torrent complete: {name}'),
+    'torrent_download_failed': ('fail', 'Torrent download failed: {name}'),
+    'torrent_security_block': ('warn', 'Blocked by security: {reason}'),
 }
 
 

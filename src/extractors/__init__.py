@@ -9,10 +9,8 @@ from .naijaprey import extract_naijaprey
 from .myasiantv import extract_myasiantv
 from .dramarain import extract_dramarain
 from .naijavault import extract_naijavault
-from .anitaku import extract_anitaku
 from .plutomovies import extract_plutomovies
 from .social import extract_social
-from .allanime import extract_allanime, search_allanime, _get_episode_list
 
 # Map site domains to their respective extractor function
 SITE_MAP = {
@@ -28,7 +26,6 @@ SITE_MAP = {
     MYASIANTV_DOMAIN:  extract_myasiantv,
     'myasiantv9.com.ro': extract_myasiantv,
     NAIJAVAULT_DOMAIN: extract_naijavault,
-    ANITAKU_DOMAIN:    extract_anitaku,
     PLUTO_DOMAIN:      extract_plutomovies,
 }
 
@@ -89,7 +86,7 @@ def process_link_queue(links, session, ctx=None):
             continue
         if not extractor:
             safe_print(render_message('unsupported_site'))
-            safe_print(render_message('supported_sites', sites='NKiri, DramaKey, DramaRain, NaijaVault, 9jaRocks, NaijaPrey, MyAsianTV, Anitaku, PlutoMovies, YouTube, Instagram, TikTok, Facebook, Pinterest'))
+            safe_print(render_message('supported_sites', sites='NKiri, DramaKey, DramaRain, NaijaVault, 9jaRocks, NaijaPrey, MyAsianTV, PlutoMovies, YouTube, Instagram, TikTok, Facebook, Pinterest'))
             outcomes.append({'url': url, 'status': 'failed'})
             continue
         try:

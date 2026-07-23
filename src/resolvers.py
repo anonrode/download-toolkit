@@ -50,6 +50,62 @@ def find_direct_video(text):
             return found[0].rstrip('.,;)')
     return None
 
+def _exc_chain(exc):
+    """Walk an exception's __cause__/__context__ chain."""
+    seen = []
+    cur = exc
+    while cur is not None and cur not in seen:
+        seen.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    return seen
+
+
+def _is_network_error(exc):
+    """True if the exception is a transient connectivity failure (DNS drop,
+    connection refused/reset, timeout) rather than a real 'not found'.
+
+    These deserve a wait-for-network retry — the target link almost certainly
+    still exists; the device just lost signal for a moment.
+    """
+    names = {type(e).__name__ for e in _exc_chain(exc)}
+    net_markers = {
+        'ConnectionError', 'ConnectTimeout', 'ReadTimeout', 'Timeout',
+        'NewConnectionError', 'MaxRetryError', 'NameResolutionError',
+        'ConnectTimeoutError', 'gaierror',
+    }
+    return bool(names & net_markers)
+
+
+def _resolver_wait_for_network(stop_flag=None, max_wait=60):
+    """Wait (bounded) for connectivity to return before a resolver retry.
+
+    BOUNDED on purpose: the download-loop's wait_for_network() can block
+    forever (correct there — a paused download should wait indefinitely), but
+    a resolver retry must NOT hang the whole app if the network never comes
+    back or check_connection() is blocked by a captive portal / firewall.
+    Caps at max_wait seconds, polling every 3s, then gives up so the resolve
+    fails normally instead of freezing the terminal.
+    """
+    from .downloader import check_connection
+    waited = 0
+    while waited < max_wait:
+        if stop_flag is not None:
+            try:
+                from .downloader import _is_stopped
+                if _is_stopped(stop_flag):
+                    return False
+            except Exception:
+                pass
+        try:
+            if check_connection():
+                return True
+        except Exception:
+            pass
+        time.sleep(3)
+        waited += 3
+    return False
+
+
 def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
     if _seen is None:
         _seen = set()
@@ -112,6 +168,9 @@ class DownloadwellaResolver(BaseResolver):
 
     @staticmethod
     def resolve(url: str, session) -> str:
+        # Network failures (DNS drop, reset) re-raise so the registry's unified
+        # wait-and-retry handles them — a dropped connection does NOT mean the
+        # link is gone. Real "not found" (bad HTTP / no form) fails fast.
         try:
             # verify=False handles SSL issues on expired host certs
             try:
@@ -121,28 +180,30 @@ class DownloadwellaResolver(BaseResolver):
             if not r or r.status_code != 200:
                 safe_print(f"      [!] Downloadwella: Failed to load page (HTTP {r.status_code if r else 'No Response'})")
                 return None
-                
+
             soup = BeautifulSoup(r.text, 'html.parser')
             form = soup.find('form')
             if not form:
                 safe_print("      [!] Downloadwella: No form element found on page")
                 return None
-                
+
             data = {inp.get('name'): inp.get('value', '')
                     for inp in form.find_all('input') if inp.get('name')}
             data['method_free'] = 'Free Download'
-            
+
             try:
                 r2 = session.post(url, data=data, timeout=20, verify=False)
             except TypeError:
                 r2 = session.post(url, data=data, timeout=20)
-            
+
             if not r2 or r2.status_code != 200:
                 safe_print(f"      [!] Downloadwella: Post request failed (HTTP {r2.status_code if r2 else 'No Response'})")
                 return None
-                
+
             return find_direct_video(r2.text)
         except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] Downloadwella: Network request failed: {e}")
             return None
         except Exception as e:
@@ -218,6 +279,8 @@ class WildshareResolver(BaseResolver):
             finally:
                 s.close()
         except Exception as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] Wildshare: {e}")
             return None
 
@@ -252,6 +315,8 @@ class StreamtapeResolver(BaseResolver):
                 safe_print(f"      [!] Streamtape JS pattern not matched — site may have changed")
             return find_direct_video(r.text)
         except Exception as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] Streamtape: {e}")
             return None
 
@@ -273,6 +338,8 @@ class VidmolyResolver(BaseResolver):
                 return m.group(1)
             return None
         except requests.RequestException as e:
+            if _is_network_error(e):
+                raise  # let the registry wait-and-retry
             safe_print(f"      [!] Vidmoly: Network request failed: {e}")
             return None
         except Exception as e:
@@ -292,6 +359,8 @@ class VidbasicResolver(BaseResolver):
                 return None
             return find_direct_video(r.text)
         except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] Vidbasic: Network request failed: {e}")
             return None
         except Exception as e:
@@ -321,6 +390,8 @@ class EmbedResolver(BaseResolver):
                 return None
             return find_direct_video(r.text)
         except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] Embed: Network request failed: {e}")
             return None
         except Exception as e:
@@ -389,6 +460,8 @@ class VikingFileResolver(BaseResolver):
             safe_print(f"      [!] VikingFile: could not resolve {url[:60]}")
             return None
         except Exception as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] VikingFile: {e}")
             return None
 
@@ -437,6 +510,8 @@ class LulaCloudResolver(BaseResolver):
             safe_print(f"      [!] LulaCloud: could not resolve {url[:60]}")
             return None
         except Exception as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] LulaCloud: {e}")
             return None
 
@@ -467,6 +542,8 @@ class DramaGatewayResolver(BaseResolver):
                 return m.group(1)
             return None
         except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] DramaGateway: Network request failed: {e}")
             return None
         except Exception as e:
@@ -530,6 +607,8 @@ class NaijaVaultGatewayResolver(BaseResolver):
                     return href
             return None
         except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] NaijaVaultGateway: Network request failed: {e}")
             return None
         except Exception as e:
@@ -582,6 +661,8 @@ class PlutoMoviesResolver(BaseResolver):
                 return m.group(1)
             return None
         except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
             safe_print(f"      [!] PlutoMovies: Network request failed: {e}")
             return None
         except Exception as e:
@@ -625,13 +706,33 @@ class ResolverRegistry:
 
         for resolver in cls.RESOLVERS:
             if resolver.can_resolve(url):
-                res = resolver.resolve(url, session)
+                # Wrap each resolver in a network-aware retry: a dropped
+                # connection (DNS/reset/timeout) does NOT mean the host is
+                # gone — wait for the network and try again, up to 3 times,
+                # instead of failing the episode on a transient blip. Real
+                # "not found" (a clean None with no exception) fails fast.
+                res = None
+                for attempt in range(3):
+                    try:
+                        res = resolver.resolve(url, session)
+                        break
+                    except Exception as e:
+                        if _is_network_error(e) and attempt < 2:
+                            name = getattr(resolver, '__name__', 'Resolver').replace('Resolver', '')
+                            safe_print(f"      [!] {name}: network dropped - "
+                                       f"waiting for connection (retry {attempt+1}/3)...")
+                            _resolver_wait_for_network()
+                            continue
+                        # Not a network error, or out of retries — let the
+                        # resolver's own handler have logged it; give up.
+                        res = None
+                        break
                 if res and res != url:
                     return cls.resolve(res, session, _depth=_depth + 1)
                 return res
-                
+
         # Direct passthrough fallback
         if 'nkiserv.com' in url or 'cdn' in url:
             return url
-            
+
         return url

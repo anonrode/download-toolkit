@@ -755,6 +755,23 @@ def mark_episode_current(series_url, series_name, ep_filename):
         state[key]['name'] = series_name
         _save_resume_state_unlocked(state)
 
+def mark_episode_failed(series_url, series_name, ep_filename):
+    """Record an episode that failed to resolve/download so it survives in the
+    `resume` menu even when the app exits. Keeps the series resumable instead
+    of the failure living only in the in-memory summary."""
+    with RESUME_LOCK:
+        state = _load_resume_state_unlocked()
+        key = series_url
+        if key not in state:
+            state[key] = {'name': series_name, 'done': [], 'failed': [], 'current': None}
+        if 'failed' not in state[key]:
+            state[key]['failed'] = []
+        if ep_filename not in state[key]['failed'] and ep_filename not in state[key].get('done', []):
+            state[key]['failed'].append(ep_filename)
+        state[key]['name'] = series_name
+        state[key]['current'] = None
+        _save_resume_state_unlocked(state)
+
 def mark_series_waiting_for_network(series_url, series_name='Queued download'):
     """Keep an unresolved series visible in `resume` until its link can be retried."""
     mark_episode_current(series_url, series_name, 'Waiting for network')
@@ -1133,6 +1150,8 @@ def safe_filename(name):
     name = re.sub(r'[<>:"/\\|?*]', '', name)
     name = re.sub(r'\s+', ' ', name)
     name = name.strip().lstrip('.').rstrip('.')
+    if not name:
+        return 'file'
     # Truncate to stay within filesystem limits (255 bytes max on most FS)
     stem, dot, ext = name.rpartition('.')
     if dot and len(ext) <= 10:
@@ -1304,6 +1323,298 @@ def _try_reresolve(source_url, current_url, attempt):
         pass
     return current_url
 
+def _is_magnet(url):
+    """Check if a URL is a magnet link."""
+    return isinstance(url, str) and url.startswith('magnet:')
+
+
+def _download_magnet_aria2c(url, folder, filename, summary,
+                            bandwidth_limit=0, current_process=None,
+                            stop_flag=None, pause_flag=None,
+                            parallel_mode=False, config=None):
+    """Download a magnet link via aria2c BitTorrent mode.
+
+    Key differences from HTTP downloads:
+    - Filename is unknown until metadata arrives (torrent names itself)
+    - No expected file size upfront — we parse aria2c's own progress output
+    - One torrent may contain many files (a season pack of episodes)
+    - Files are NOT playable until the torrent reaches 100%
+    - Completion = exit code 0
+    """
+    config = config or {}
+
+    max_concurrent = int(config.get('parallel', 2))
+    bt_peers = min(max(int(config.get('aria2c_connections', 16)) * 3, 20), 100)
+    timeout = int(config.get('download_timeout', 120))
+
+    cmd = [
+        'aria2c',
+        '--enable-dht=true',
+        '--bt-enable-lpd=true',
+        '--enable-peer-exchange=true',
+        '--seed-time=0',
+        '--seed-ratio=0.0',
+        '--follow-torrent=mem',
+        '--bt-stop-timeout=300',
+        '--bt-tracker-connect-timeout=30',
+        '--bt-max-peers', str(bt_peers),
+        '--max-concurrent-downloads', str(max_concurrent),
+        '--file-allocation=none',
+        '--console-log-level=error',
+        '--summary-interval=1',        # emit one progress line per second
+        '--check-certificate=false',
+        '--bt-metadata-only=false',
+        # ── Resume reliability ──────────────────────────────────
+        # aria2c resumes BitTorrent automatically from the .aria2 control
+        # file + partial data. These make that robust across hard kills:
+        '--auto-save-interval=15',     # flush .aria2 control file every 15s
+        '--bt-save-metadata=true',     # cache torrent metadata to disk
+        '--bt-load-saved-metadata=true',  # reuse it on resume (skip re-fetch)
+        '--allow-overwrite=false',     # never clobber a partial file
+        '--continue=true',             # resume any partial files present
+        '-d', folder,
+    ]
+    if bandwidth_limit > 0:
+        cmd += ['--max-download-limit', f'{bandwidth_limit}K']
+    cmd.append(url)
+
+    # Short display title for the torrent
+    title = filename[:52] + '...' if len(filename) > 55 else filename
+    print()
+    print(f'  {paint("TORRENT", "bold", "bcyan")}  {title}')
+    print(f'  {paint("[..]", "bcyan")} Connecting to peers (can take up to 30s)...')
+
+    # Parse the full aria2c BT summary line:
+    #   [#abc123 1.2GiB/4.5GiB(26%) CN:44 SD:3 DL:5.2MiB ETA:8m]
+    # CN = connections, SD = seeders, DL = download speed
+    full_re = re.compile(
+        r'([\d.]+[KMGT]?i?B)\s*/\s*([\d.]+[KMGT]?i?B)\s*\((\d+)%\)'
+        r'\s+CN:(\d+)(?:\s+SD:(\d+))?.*?DL:\s*([\d.]+[KMGT]?i?B)'
+        r'(?:.*?ETA:\s*([0-9hmsdw]+))?'
+    )
+
+    state = {'started': False, 'last_pct': 0}
+
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, creationflags=_POPEN_FLAGS,
+        )
+        register_process(proc)
+        if current_process is not None:
+            current_process.proc = proc
+
+        stopped = False
+        last_line_time = time.time()
+
+        while True:
+            if _is_stopped(stop_flag):
+                _graceful_terminate(proc)
+                stopped = True
+                break
+            if _is_paused(pause_flag):
+                _graceful_terminate(proc)
+                finish_process(proc)
+                unregister_process(proc)
+                if current_process is not None:
+                    current_process.proc = None
+                _clear_line()
+                ui_emit('paused_saved')
+                while _is_paused(pause_flag) and not _is_stopped(stop_flag):
+                    time.sleep(0.3)
+                if _is_stopped(stop_flag):
+                    stopped = True
+                    break
+                ui_emit('resume_start')
+                proc = subprocess.Popen(
+                    cmd, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1, creationflags=_POPEN_FLAGS,
+                )
+                register_process(proc)
+                if current_process is not None:
+                    current_process.proc = proc
+                continue
+
+            line = proc.stdout.readline()
+            if not line:
+                if proc.poll() is not None:
+                    break
+                if time.time() - last_line_time > max(180, timeout * 2):
+                    _graceful_terminate(proc)
+                    break
+                time.sleep(0.2)
+                continue
+
+            last_line_time = time.time()
+            m = full_re.search(line)
+            if m:
+                done, total, pct, conns, seeds, speed, eta = m.groups()
+                if not state['started']:
+                    state['started'] = True
+                    _clear_line()
+                    print(f'  {paint("[OK]", "bgreen")} Connected - downloading '
+                          f'(files are playable only at 100%)')
+                state['last_pct'] = int(pct)
+                _render_torrent_bar(
+                    pct=int(pct), done=done, total=total,
+                    speed=speed, peers=conns, seeds=seeds or '0', eta=eta or '--',
+                )
+
+        finish_process(proc)
+        code = proc.returncode if proc.returncode is not None else -1
+        unregister_process(proc)
+        if current_process is not None:
+            current_process.proc = None
+
+        _clear_line()
+
+        if stopped:
+            pct = state['last_pct']
+            print(f'  {paint("[stop]", "byellow")} Stopped at {pct}%.')
+            if pct < 100:
+                print(f'  {paint("[!]", "byellow")} Torrent files are incomplete - '
+                      f'they will NOT play until fully downloaded.')
+                print(f'  {paint("->", "gray")} Search again and pick the same torrent to '
+                      f'continue (aria2c resumes from the partial files).')
+            summary.add_failed(filename)
+            return False
+
+        if code != 0:
+            print(f'  {paint("[X]", "bred")} Download failed (aria2c exit {code}). '
+                  f'Partial files kept in the folder.')
+            summary.add_failed(filename)
+            return False
+
+        # Success — validate downloaded files (Layer 7: magic-byte check)
+        from .security import validate_downloaded_file
+        downloaded_files = _find_new_media_files(folder)
+        blocked = []
+        for fp in downloaded_files:
+            safe, ftype, reason = validate_downloaded_file(fp, folder)
+            if not safe:
+                blocked.append((fp, reason))
+
+        if blocked:
+            for fp, reason in blocked:
+                print(f'  {paint("[X]", "bred")} {reason}')
+            print(f'  {paint("[!]", "byellow")} {len(blocked)} file(s) failed the '
+                  f'security check and were removed.')
+            if len(blocked) == len(downloaded_files):
+                summary.add_failed(filename)
+                return False
+
+        n = len(downloaded_files) - len(blocked)
+        print(f'  {paint("[OK]", "bgreen", "bold")} Complete - {n} file(s) ready to play')
+        print(f'  {paint("->", "gray")} {folder}')
+        summary.add_success()
+        return True
+
+    except Exception as e:
+        try:
+            _graceful_terminate(proc)
+            unregister_process(proc)
+        except Exception:
+            pass
+        _clear_line()
+        print(f'  {paint("[X]", "bred")} Torrent error: {e}')
+        summary.add_failed(filename)
+        return False
+
+
+_TORRENT_PROG_LAST = [0.0]
+_TORRENT_LINE_LEN = [0]
+
+
+def _clear_line():
+    """Erase the current \\r progress line so following output isn't garbled."""
+    try:
+        with PRINT_LOCK:
+            if _TORRENT_LINE_LEN[0] > 0:
+                sys.stdout.write('\r' + ' ' * _TORRENT_LINE_LEN[0] + '\r')
+                sys.stdout.flush()
+                _TORRENT_LINE_LEN[0] = 0
+    except Exception:
+        pass
+
+
+def _make_bar(pct, width=20):
+    """Build a proportional ASCII progress bar: [==========>.........]"""
+    filled = int(pct / 100 * width)
+    if filled >= width:
+        return '[' + '=' * width + ']'
+    return '[' + '=' * filled + '>' + '.' * (width - filled - 1) + ']'
+
+
+def _render_torrent_bar(pct, done, total, speed, peers, seeds, eta):
+    """Render a rich single-line torrent progress bar (throttled to 0.5s)."""
+    now = time.time()
+    if now - _TORRENT_PROG_LAST[0] < 0.5 and pct < 100:
+        return
+    _TORRENT_PROG_LAST[0] = now
+
+    update_status(status='Downloading', current=f'torrent {pct}%', progress=f'{pct}%')
+
+    bar = _make_bar(pct)
+    # Normalize "GiB" -> "GB" etc. for cleaner display
+    done_s = done.replace('i', '')
+    total_s = total.replace('i', '')
+    speed_s = speed.replace('i', '')
+
+    plain = (f'  {bar} {pct:>3}%  {done_s}/{total_s}  '
+             f'{speed_s}/s  {peers}p/{seeds}s  ETA {eta}')
+
+    # Colorize just the bar (pad first, then paint — ANSI breaks width math)
+    colored = plain.replace(bar, paint(bar, 'bgreen' if pct >= 100 else 'bcyan'))
+
+    try:
+        with PRINT_LOCK:
+            pad = max(0, _TORRENT_LINE_LEN[0] - len(plain))
+            sys.stdout.write('\r' + colored + ' ' * pad)
+            sys.stdout.flush()
+            _TORRENT_LINE_LEN[0] = len(plain)
+    except Exception:
+        pass
+
+
+def _scan_folder_size(folder):
+    """Sum the sizes of all non-hidden files in folder (for torrent progress)."""
+    total = 0
+    try:
+        for entry in os.scandir(folder):
+            if entry.is_file() and not entry.name.startswith('.'):
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _find_new_media_files(folder):
+    """Find media files in the torrent download folder (recursive, 2 levels)."""
+    media_exts = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv',
+                  '.webm', '.m4v', '.ts', '.mpg', '.mpeg', '.m2ts'}
+    found = []
+
+    def _scan(path, depth):
+        try:
+            for entry in os.scandir(path):
+                if entry.is_file():
+                    _, ext = os.path.splitext(entry.name)
+                    if ext.lower() in media_exts:
+                        found.append(entry.path)
+                elif entry.is_dir() and depth > 0:
+                    _scan(entry.path, depth - 1)
+        except OSError:
+            pass
+
+    _scan(folder, 2)
+    return found
+
+
 def download_with_aria2c(url, folder, filename, summary,
                          bandwidth_limit=0, current_process=None,
                          retries=3, stop_flag=None, pause_flag=None,
@@ -1318,6 +1629,9 @@ def download_with_aria2c(url, folder, filename, summary,
       - Check receipt system
       - Use aria2c's --continue flag to resume from byte offset
       - Much faster than starting over
+
+    For magnet URIs: uses BitTorrent flags, scans folder for growing
+    files (filename unknown upfront), completes on exit code 0.
     """
     config = config or {}
     try:
@@ -1332,6 +1646,9 @@ def download_with_aria2c(url, folder, filename, summary,
 
     if not _check_aria2c_availability():
         ui_emit('missing_tool', tool='aria2c', command='pkg install aria2')
+        if _is_magnet(url):
+            summary.add_failed(filename)
+            return False
         return download_with_requests(
             url, folder, filename, summary,
             stop_flag=stop_flag,
@@ -1343,6 +1660,18 @@ def download_with_aria2c(url, folder, filename, summary,
         )
 
     os.makedirs(folder, exist_ok=True)
+
+    # ── MAGNET/TORRENT PATH ──────────────────────────────────────
+    if _is_magnet(url):
+        return _download_magnet_aria2c(
+            url, folder, filename, summary,
+            bandwidth_limit=bandwidth_limit,
+            current_process=current_process,
+            stop_flag=stop_flag,
+            pause_flag=pause_flag,
+            parallel_mode=parallel_mode,
+            config=config,
+        )
     safe_fname    = re.sub(r'[^\w]', '_', filename)[:30]
     # Use file hash only (no thread_id) so aria2c can find its session
     # file across pause/resume cycles even if the thread changes.
@@ -1770,7 +2099,7 @@ def _download_with_requests_impl(s, url, folder, filename, summary, stop_flag=No
                             if total > 0:
                                 pct = downloaded * 100 / total
                                 ela = max(time.time() - start_time, 0.001)
-                                bytes_per_second = downloaded / ela
+                                bytes_per_second = (downloaded - existing_size) / ela
                                 spd = bytes_per_second / 1024 / 1024
                                 eta_s = int((total - downloaded) / bytes_per_second) if bytes_per_second > 0 else 0
                                 eta = f'{eta_s // 60}:{eta_s % 60:02d}'
@@ -1865,6 +2194,54 @@ def _ytdlp_record_paused(series_url, series_name, folder, filename, expected_siz
     except Exception:
         pass
 
+def _load_config_for_subs():
+    """Load the on-disk config dict (best-effort) for subtitle/UI helpers."""
+    try:
+        config_path = os.path.join(CONFIG_DIR, '.config.json')
+        if not os.path.exists(config_path):
+            config_path = os.path.join(BASE_DIR, '.config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as _f:
+                return json.load(_f)
+    except Exception:
+        pass
+    return {}
+
+
+def _ytdlp_subtitle_flags(config, url=None):
+    """Build yt-dlp subtitle args from config.
+
+    Returns a list of flags that download the configured-language subtitle as
+    a .srt file alongside the video. Only for YouTube URLs (the user asked for
+    subs on YouTube specifically). Empty list if disabled or non-YouTube.
+
+    Config keys:
+      youtube_subtitles: bool  — master on/off (default True)
+      subtitle_language: 'en' | 'zh'  — which language (default 'en')
+    """
+    if not config.get('youtube_subtitles', True):
+        return []
+    # YouTube only
+    if url is not None and not ('youtube.com' in url or 'youtu.be' in url):
+        return []
+    lang = str(config.get('subtitle_language', 'en')).lower()
+    # Map friendly names to yt-dlp language codes; accept a couple of aliases.
+    lang_map = {
+        'en': 'en', 'english': 'en',
+        'zh': 'zh', 'chinese': 'zh', 'zh-hans': 'zh-Hans', 'zh-hant': 'zh-Hant',
+    }
+    code = lang_map.get(lang, 'en')
+    # --write-sub grabs real (uploaded) subs; --write-auto-sub falls back to
+    # YouTube's auto-generated captions when no human sub exists. Convert to
+    # SRT so it plays in any player.
+    return [
+        '--write-sub', '--write-auto-sub',
+        '--sub-lang', code,
+        '--sub-format', 'srt/best',
+        '--convert-subs', 'srt',
+    ]
+
+
 def download_with_ytdlp(url, folder, filename, summary,
                         quality=None, current_process=None, stop_flag=None,
                         pause_flag=None, parallel_mode=False,
@@ -1889,7 +2266,7 @@ def download_with_ytdlp(url, folder, filename, summary,
                 config = _json.load(_f)
     except Exception:
         config = {}
-    base        = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
+    base        = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
     out_template = os.path.join(folder, base + '.%(ext)s')
     quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
 
@@ -1907,6 +2284,7 @@ def download_with_ytdlp(url, folder, filename, summary,
             '--retry-sleep', '10',
             '--no-warnings', '--progress', '--newline',
         ]
+        cmd += _ytdlp_subtitle_flags(config, url)
         if _check_aria2c_availability():
             cmd += [
                 '--external-downloader', 'aria2c',
@@ -2151,7 +2529,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                 config = _json.load(_f)
     except Exception:
         config = {}
-    base = re.sub(r'\.(mp4|mkv|m3u8)$', '', filename)
+    base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
     if not out_template:
         out_template = os.path.join(folder, base + '.%(ext)s')
 
@@ -2187,6 +2565,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             '--retries', '3', '--fragment-retries', '3',
             '--no-warnings', '--progress', '--newline',
         ]
+        cmd += _ytdlp_subtitle_flags(config, url)
         if _check_aria2c_availability():
             cmd += [
                 '--external-downloader', 'aria2c',
@@ -2300,6 +2679,21 @@ def download_file(url, folder, filename, summary,
                    — switches LiveProgress to static line mode to avoid
                    interleaved \r corruption
     """
+    # Magnet links skip the HTTP-specific pre-checks (expiry, size, resume state)
+    # and go straight to the torrent download path
+    if _is_magnet(url):
+        if not assert_disk_space():
+            summary.add_failed(filename)
+            return False
+        if _is_stopped(stop_flag):
+            return False
+        return download_with_aria2c(url, folder, filename, summary,
+                                    bandwidth_limit=bandwidth_limit,
+                                    current_process=current_process,
+                                    stop_flag=stop_flag,
+                                    pause_flag=pause_flag,
+                                    parallel_mode=parallel_mode)
+
     # Disk space check before every episode
     if not assert_disk_space():
         summary.add_failed(filename)

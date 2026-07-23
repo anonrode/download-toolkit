@@ -127,6 +127,8 @@ def extract_social(url, session, ctx=None):
                 '--retries', '3', '--fragment-retries', '3',
                 '--no-warnings', '--progress', '--newline',
             ]
+            from src.downloader import _ytdlp_subtitle_flags, _load_config_for_subs
+            cmd += _ytdlp_subtitle_flags(_load_config_for_subs(), url)
             if items_sel != 'all':
                 cmd += ['--playlist-items', items_sel]
             cmd.append(url)

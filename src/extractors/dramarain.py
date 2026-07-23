@@ -35,14 +35,15 @@ def extract_dramarain(url, session, ctx=None):
         for i, (label, link) in enumerate(waffi_links, 1):
             if _stopped(ctx): break
             _wait(ctx)
-            fname = safe_filename(f"{name} {_episode_label(link, label, i)}.mp4")
+            direct = _strip_preview_param(link)
+            ext = 'mkv' if '.mkv' in direct else 'mp4'
+            fname = safe_filename(f"{name} {_episode_label(link, label, i)}.{ext}")
             safe_print(f"\n[{i}/{len(waffi_links)}] {fname}")
             done, _ = already_downloaded(folder, fname, series_url=url)
             if done:
                 safe_print(render_message('already_saved'))
                 summary.add_skipped()
                 continue
-            direct = _strip_preview_param(link)
             download_file(direct, folder, fname, summary,
                           series_url=url, series_name=name,
                           bandwidth_limit=bw, quality=quality, current_process=cur_proc,
@@ -117,6 +118,8 @@ def extract_dramarain(url, session, ctx=None):
                 continue
             direct = ResolverRegistry.resolve(ep_url, session)
             if direct:
+                ext = 'mkv' if '.mkv' in direct else 'mp4'
+                fname = safe_filename(f"{name} {_episode_label(ep_url, label, i)}.{ext}")
                 download_file(direct, folder, fname, summary,
                               series_url=url, series_name=name,
                               bandwidth_limit=bw, quality=quality, current_process=cur_proc,
@@ -155,6 +158,8 @@ def extract_dramarain(url, session, ctx=None):
                 continue
             direct = ResolverRegistry.resolve(dl_url, session)
             if direct:
+                ext = 'mkv' if '.mkv' in direct else 'mp4'
+                fname = safe_filename(f"{name} {_episode_label(dl_url, label, i)}.{ext}")
                 download_file(direct, folder, fname, summary,
                               series_url=url, series_name=name,
                               bandwidth_limit=bw, quality=quality, current_process=cur_proc,

@@ -32,6 +32,7 @@ from ..downloader import (
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
     _notify_start, register_process, unregister_process, finish_process,
     update_status, _drain_futures_interruptible, make_session,
+    mark_episode_failed,
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
@@ -371,6 +372,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
             else:
                 safe_print(render_message('no_download_link'))
                 summary.add_failed(ep_name)
+                mark_episode_failed(url, name, safe_filename(f"{ep_name}.mp4"))
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -415,6 +417,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                 else:
                     safe_print(f"{render_message('no_download_link')} ({ep_name})")
                     summary.add_failed(ep_name)
+                    mark_episode_failed(url, name, safe_filename(f"{ep_name}.mp4"))
 
             if items:
                 per_thread_bw = (bw // len(items)) if bw else 0
@@ -439,38 +442,82 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                         if not _stopped(ctx):
                             safe_print(f"  [X] Thread error for {ep_name}: {e}")
                             summary.add_failed(ep_name)
+                            mark_episode_failed(url, name, safe_filename(f"{ep_name}.mp4"))
                 ex.shutdown(wait=False, cancel_futures=True)
 
     if summary.failed == 0 and not _stopped(ctx):
         mark_series_complete(url)
     summary.report(name)
 
-    if summary.failed > 0 and not _stopped(ctx) and summary.prompt_retry():
-        retry_summary = DownloadSummary()
-        for failed_fname in summary.failed_list:
-            if _stopped(ctx):
-                break
-            safe_print(f"\n[*] Retrying: {failed_fname}")
-            stem = re.sub(r'\.(mkv|mp4)$', '', failed_fname, flags=re.IGNORECASE).lower()
-            ep_url = next((l for l in links if l.lower().replace('.html', '').rstrip('/').endswith(stem)), None)
-            if not ep_url:
-                safe_print(f"  [!] Could not find episode URL for retry")
-                retry_summary.add_failed(failed_fname)
-                continue
-            direct = ResolverRegistry.resolve(ep_url, session)
-            if direct:
-                ext = 'mkv' if '.mkv' in direct else 'mp4'
-                download_file(direct, folder, safe_filename(f"{stem}.{ext}"),
-                              retry_summary, series_url=url, series_name=name,
-                              bandwidth_limit=bw, quality=quality,
-                              current_process=cur_proc, stop_flag=stop,
-                              pause_flag=pause,
-                              wait_fn=ctx.get('wait'),
-                              source_url=ep_url)
-            else:
-                safe_print(render_message('no_download_link'))
-                retry_summary.add_failed(failed_fname)
-        retry_summary.report(f"{name} (retry)")
+    # Auto-retry failed episodes ONCE before asking the user. The resolver
+    # already waits out transient network drops, so a leftover failure usually
+    # just needs one more clean attempt (a peer/CDN hiccup). This means the
+    # common case "1-2 episodes blipped" self-heals without needing you to
+    # catch a [y/N] prompt buried in the output.
+    if summary.failed > 0 and not _stopped(ctx):
+        still_failed = _retry_failed_episodes(
+            summary.failed_list, links, url, name, folder,
+            bw, quality, cur_proc, stop, pause, ctx, session,
+            header='[*] Auto-retrying failed episode(s)...',
+        )
+        # Anything that survived the auto-retry: offer a manual retry too.
+        if still_failed and not _stopped(ctx):
+            leftover = DownloadSummary()
+            for fn in still_failed:
+                leftover.add_failed(fn)
+            if leftover.prompt_retry():
+                _retry_failed_episodes(
+                    still_failed, links, url, name, folder,
+                    bw, quality, cur_proc, stop, pause, ctx, session,
+                    header='[*] Retrying...',
+                )
+
+
+def _retry_failed_episodes(failed_list, links, url, name, folder,
+                           bw, quality, cur_proc, stop, pause, ctx, session,
+                           header=''):
+    """Re-resolve and re-download a list of failed episodes.
+
+    Returns the list of episodes that STILL failed after this pass. Successful
+    retries are cleared from the resume `failed` state by download_file's own
+    completion path (mark_episode_done).
+    """
+    if header:
+        safe_print(f"\n{header}")
+    retry_summary = DownloadSummary()
+    still_failed = []
+    for failed_fname in list(failed_list):
+        if _stopped(ctx):
+            break
+        safe_print(f"\n[*] Retrying: {failed_fname}")
+        stem = re.sub(r'\.(mkv|mp4)$', '', failed_fname, flags=re.IGNORECASE).lower()
+        ep_url = next((l for l in links if l.lower().replace('.html', '').rstrip('/').endswith(stem)), None)
+        if not ep_url:
+            safe_print(f"  [!] Could not find episode URL for retry")
+            still_failed.append(failed_fname)
+            continue
+        direct = ResolverRegistry.resolve(ep_url, session)
+        if direct:
+            ext = 'mkv' if '.mkv' in direct else 'mp4'
+            ok = download_file(direct, folder, safe_filename(f"{stem}.{ext}"),
+                               retry_summary, series_url=url, series_name=name,
+                               bandwidth_limit=bw, quality=quality,
+                               current_process=cur_proc, stop_flag=stop,
+                               pause_flag=pause,
+                               wait_fn=ctx.get('wait'),
+                               source_url=ep_url)
+            if not ok:
+                still_failed.append(failed_fname)
+        else:
+            safe_print(render_message('no_download_link'))
+            mark_episode_failed(url, name, failed_fname)
+            still_failed.append(failed_fname)
+    retry_summary.report(f"{name} (retry)")
+
+    # If everything recovered, the series is complete — clear it from resume.
+    if not still_failed and not _stopped(ctx):
+        mark_series_complete(url)
+    return still_failed
 
 # Expose all symbols including underscore helpers to wildcard imports
 __all__ = [name for name in globals() if not name.startswith('__')]

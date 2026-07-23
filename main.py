@@ -233,6 +233,8 @@ DEFAULT_CONFIG = {
     'color':                'auto',     # 'auto' (color only on a TTY), 'always', or 'never'
     'auto_update_days':     7,          # Weekly auto-update cadence
     'social_quality':       '720p',     # Prefer 720p for non-YouTube social videos
+    'youtube_subtitles':    True,        # Download subtitles for YouTube videos (as .srt)
+    'subtitle_language':    'en',        # Subtitle language: 'en' (English) or 'zh' (Chinese)
     'enable_android_notifications': True,       # Toggle Termux system notifications
     'clipboard_check_interval_sec': 2,         # Clipboard watcher loop frequency in seconds
     'aria2c_connections': _REC_CONNECTIONS,    # -x flag (device-tiered on Android)
@@ -966,6 +968,35 @@ def handle_settings(parts, cfg):
             set_color(nxt)  # apply immediately so the confirmation reflects it
             print(f"[ok] Color output set to: {nxt}")
 
+        elif choice == '19':
+            print("\n=== YouTube Subtitles ===")
+            _on = cfg.get('youtube_subtitles', True)
+            _lang = str(cfg.get('subtitle_language', 'en')).lower()
+            _label = 'English' if _lang in ('en', 'english') else 'Chinese'
+            print(f"  Currently: {'On' if _on else 'Off'} ({_label})")
+            print("  1) On  - English (.srt)")
+            print("  2) On  - Chinese (.srt)")
+            print("  3) Off")
+            print("  0) Back")
+            try:
+                sub_opt = input("Select option (0-3): ").strip()
+                if sub_opt == '1':
+                    cfg['youtube_subtitles'] = True
+                    cfg['subtitle_language'] = 'en'
+                    save_config(cfg)
+                    print("[ok] YouTube subtitles: On (English)")
+                elif sub_opt == '2':
+                    cfg['youtube_subtitles'] = True
+                    cfg['subtitle_language'] = 'zh'
+                    save_config(cfg)
+                    print("[ok] YouTube subtitles: On (Chinese)")
+                elif sub_opt == '3':
+                    cfg['youtube_subtitles'] = False
+                    save_config(cfg)
+                    print("[ok] YouTube subtitles: Off")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
         elif choice == '13':
             # Manage Sites loop
             while True:
@@ -1069,6 +1100,9 @@ def _show_settings(cfg):
     print(opt(16, 'aria2c Splits',      cfg.get('aria2c_splits', 16)))
     print(opt(17, 'Min Split Size',     cfg.get('aria2c_min_split_size', '1M')))
     print(opt(18, 'Color Output',       cfg.get('color', 'auto')))
+    _subs = 'On' if cfg.get('youtube_subtitles', True) else 'Off'
+    _slang = 'English' if str(cfg.get('subtitle_language', 'en')).lower() in ('en', 'english') else 'Chinese'
+    print(opt(19, 'YouTube Subtitles',  f'{_subs} ({_slang})'))
     print(f"  {paint(' 0)', 'byellow')} Back to command prompt")
     print(bar)
 
@@ -1590,6 +1624,118 @@ def cmd_anime(query, session, cfg):
     extract_allanime(show_id, show_name, episodes, mode=mode, ctx=ctx)
 
 
+def cmd_torrent(query, session, cfg):
+    """Search TPB for torrents and download via magnet.
+
+    `torrent resume` lists incomplete torrents and continues one.
+    """
+    from src.torrent import (
+        search_tpb, present_torrent_results, select_and_build_magnet,
+        record_torrent_start, mark_torrent_complete, mark_torrent_stopped,
+        show_torrent_resume_list,
+    )
+    from src.downloader import download_file, DownloadSummary, BASE_DIR as _BASE_DIR
+
+    base_dir = cfg.get('download_dir', _BASE_DIR)
+    folder = os.path.join(base_dir, 'Torrents')
+
+    # ── Resume flow ────────────────────────────────────────────
+    if query.strip().lower() in ('resume', 'r', 'continue'):
+        items = show_torrent_resume_list()
+        if not items:
+            return
+        try:
+            pick = input(f'\n  Pick a number (1-{len(items)}) or 0 to cancel: ').strip()
+            pick = int(pick)
+        except (ValueError, EOFError, KeyboardInterrupt):
+            return
+        if not (1 <= pick <= len(items)):
+            return
+        info_hash, inf = items[pick - 1]
+        magnet = inf['magnet']
+        name = inf['name']
+        _run_torrent_download(magnet, name, info_hash, folder, cfg,
+                              record_torrent_start, mark_torrent_complete,
+                              mark_torrent_stopped, download_file, DownloadSummary)
+        return
+
+    # ── Search flow ────────────────────────────────────────────
+    print()
+    ui_emit('torrent_searching', query=query)
+
+    results, blocked_count, error = search_tpb(query)
+
+    if error:
+        ui_emit('torrent_search_failed', error=error)
+        return
+
+    if not results:
+        ui_emit('torrent_nothing_found', query=query)
+        return
+
+    print()
+    ui_emit('torrent_results_count', count=len(results))
+
+    displayed = present_torrent_results(results, blocked_count=blocked_count)
+    if not displayed:
+        return
+
+    magnet, selected = select_and_build_magnet(displayed)
+    if not magnet:
+        return
+
+    name = selected.get('name', 'torrent_download')
+    info_hash = selected.get('info_hash', '')
+    _run_torrent_download(magnet, name, info_hash, folder, cfg,
+                          record_torrent_start, mark_torrent_complete,
+                          mark_torrent_stopped, download_file, DownloadSummary)
+
+
+def _run_torrent_download(magnet, name, info_hash, folder, cfg,
+                          record_start, mark_complete, mark_stopped,
+                          download_file, DownloadSummary):
+    """Shared download runner for both new and resumed torrents."""
+    print()
+    ui_emit('torrent_download_start', name=name)
+    print(f'  Folder: {folder}')
+    print()
+
+    if info_hash:
+        record_start(info_hash, name, magnet, folder)
+
+    app.reset_download_state()
+    ctx = _make_ctx(cfg)
+    summary = DownloadSummary()
+
+    try:
+        result = download_file(
+            magnet, folder, name,
+            summary,
+            stop_flag=ctx.get('stop'),
+            pause_flag=ctx.get('pause'),
+            wait_fn=ctx.get('wait'),
+            bandwidth_limit=int(cfg.get('bandwidth', 0)),
+        )
+    except KeyboardInterrupt:
+        # Ctrl+C during the torrent — the signal handler already set app.stop
+        # and terminated aria2c. Swallow it here so we return to the prompt
+        # instead of exiting the whole app.
+        app.stop.set()
+        if info_hash:
+            mark_stopped(info_hash)
+        return
+
+    if result:
+        if info_hash:
+            mark_complete(info_hash)
+        ui_emit('torrent_download_done', name=name)
+    else:
+        if info_hash:
+            mark_stopped(info_hash)
+        if not app.stop.is_set():
+            ui_emit('torrent_download_failed', name=name)
+
+
 def watch_clipboard(session, cfg):
     ui_emit('clipboard_watch_start')
     ui_emit('clipboard_watch_exit_hint')
@@ -1962,6 +2108,17 @@ def main():
                 cmd_anime(query, session, cfg)
             else:
                 print('[!] Usage: anime <title>')
+
+        elif lower.startswith('torrent ') or lower.startswith('t '):
+            query = raw.split(' ', 1)[1].strip()
+            if query:
+                cmd_torrent(query, session, cfg)
+            else:
+                print('[!] Usage: torrent <query>   (e.g. torrent silo season 1)')
+                print('           torrent resume    (continue an incomplete torrent)')
+
+        elif lower in ('tresume', 'tr'):
+            cmd_torrent('resume', session, cfg)
 
         elif lower.startswith('search ') or lower.startswith('s '):
             query = raw.split(' ', 1)[1].strip()
