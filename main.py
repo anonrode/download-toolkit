@@ -1142,7 +1142,10 @@ def _git_update(script_dir, announce=False, force=False):
       after_commit   str   – full HEAD after the merge ('' if unknown)
       updated        bool  – HEAD actually advanced (a real fast-forward)
       behind_count   int   – commits HEAD is behind origin/main (0 if unknown)
-      merge_ok       bool  – `git merge --ff-only` returned 0 (incl. no-op)
+      merge_ok       bool  – HEAD now matches origin/main (ff-forward OR,
+                             on a rewritten remote, a hard reset onto it)
+      rebuilt        bool  – ff-only failed so we hard-reset onto origin/main
+                             (remote history was force-pushed); tree was clean
       merge_output   str   – merge stdout (for display)
       error          str   – first error text encountered ('' if none)
     """
@@ -1150,6 +1153,7 @@ def _git_update(script_dir, announce=False, force=False):
         'reached_remote': False, 'was_dirty': False, 'dirty_lines': [],
         'before_commit': '', 'after_commit': '', 'updated': False,
         'behind_count': 0, 'merge_ok': False, 'merge_output': '', 'error': '',
+        'rebuilt': False,
     }
 
     def _run(args, timeout):
@@ -1197,8 +1201,19 @@ def _git_update(script_dir, announce=False, force=False):
         res['merge_output'] = (merge.stdout or '').strip()
         res['merge_ok'] = (merge.returncode == 0)
         if not res['merge_ok']:
-            res['error'] = (merge.stderr or merge.stdout or '').strip()
-            return res
+            # Can't fast-forward. The tree is already known clean (step 1
+            # returns early on any tracked change), so the only reason ff
+            # fails is that local main diverged from origin/main — i.e. the
+            # remote history was rewritten (force-push). There is no local
+            # work to preserve, so snap to the remote. `reset --hard` keeps
+            # untracked files, so a stray download etc. is safe.
+            reset = _run(['git', 'reset', '--hard', 'origin/main'], 30)
+            res['merge_ok'] = (reset.returncode == 0)
+            if not res['merge_ok']:
+                res['error'] = (reset.stderr or reset.stdout
+                                or merge.stderr or merge.stdout or '').strip()
+                return res
+            res['rebuilt'] = True
 
         res['after_commit'] = _commit()
         res['updated'] = bool(
