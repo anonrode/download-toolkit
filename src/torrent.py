@@ -38,6 +38,30 @@ requests = _LazyRequests()
 
 TPB_API = 'https://apibay.org/q.php'
 TPB_TIMEOUT = 12  # seconds
+TPB_RETRIES = 3   # retry a suspected throttle before giving up
+
+# apibay silently rate-limits by IP: when tripped it returns HTTP 200 with the
+# empty-results sentinel [{"id":"0",...}] — identical to a genuine "no results".
+# A bare 'Mozilla/5.0' UA gets throttled almost immediately; a full browser UA
+# plus a thepiratebay Referer/Origin sails through. These headers make apibay
+# treat us like its own web frontend instead of a bot. Verified live: queries
+# that returned zero with the bare UA returned 100 results with these.
+_TPB_HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    ),
+    'Referer': 'https://thepiratebay.org/',
+    'Origin': 'https://thepiratebay.org',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
+
+# Short-lived cache of recent searches. Re-running the same query (paging back,
+# refining, retyping) reuses the response instead of hitting apibay again —
+# fewer requests means we trip the rate limiter far less often.
+_SEARCH_CACHE = {}
+_SEARCH_CACHE_MAX = 32
 
 
 def _is_video_category(cat):
@@ -213,17 +237,25 @@ def _parse_query_intent(query):
     return {'title': title, 'season': season, 'episode': episode, 'raw': raw}
 
 
-def _relevance_score(query_tokens, title):
-    """Token-set subset alignment score. Returns 0.0-1.0+.
+def _relevance_score(query_phrase, title):
+    """Ordered token-alignment score. Returns 0.0-~1.9.
 
     Scoring is driven by the *meaningful* query words only — stop tokens
     (quality/codec/filler like 'the', 'movie') and year tokens are dropped
-    from the denominator so they can't sink an otherwise-good match. A year
-    that DOES appear in the title still helps (small bonus), it just never
-    hurts when it's missing or different.
+    so they can't sink an otherwise-good match. A year that DOES appear in the
+    title helps (small bonus), it never hurts when missing or different.
+
+    Coverage alone saturates: for query 'interstellar', both the film and a
+    'Doctor Who ... The Interstellar Song Contest' episode cover 100% of the
+    query word, so both used to tie. The position bonus breaks that — a title
+    that *opens* with the searched subject scores well above one that only
+    mentions it partway through an episode name. That's what pushes the real
+    movie above coincidental TV matches.
     """
-    title_tokens = _tokenize(title) - _STOP_TOKENS
-    clean_query = (query_tokens - _STOP_TOKENS)
+    q_seq = re.findall(r'[a-z0-9]+', query_phrase.lower())
+    t_seq = re.findall(r'[a-z0-9]+', title.lower())
+    title_tokens = set(t_seq) - _STOP_TOKENS
+    clean_query = set(q_seq) - _STOP_TOKENS
     query_years = {t for t in clean_query if _is_year(t)}
     core_query = {t for t in clean_query if not _is_year(t)}
 
@@ -246,7 +278,15 @@ def _relevance_score(query_tokens, title):
     if all(t in title.lower() for t in core_query):
         score += 0.3
 
+    # Position bonus — the earlier the searched subject appears in the title,
+    # the more likely the title is actually *about* it. Full bonus when the
+    # title leads with a query word, decaying to nothing by ~position 4.
+    first_pos = next((i for i, t in enumerate(t_seq) if t in core_query), None)
+    if first_pos is not None:
+        score += max(0.0, 0.6 - 0.15 * first_pos)
+
     return score
+
 
 
 # Keep matches that cover at least ~45% of the meaningful query words. Lower
@@ -260,34 +300,90 @@ _RELEVANCE_FALLBACK = 0.15
 
 # ─── SEARCH ────────────────────────────────────────────────────
 
+def _looks_empty(data):
+    """True if apibay returned nothing or its no-results sentinel."""
+    return (not data) or (len(data) == 1 and data[0].get('id') == '0')
+
+
+def _fetch_tpb(query):
+    """Hit apibay with browser headers, retrying suspected throttles.
+
+    apibay's rate limiter answers with HTTP 200 + the empty sentinel rather
+    than an error, so an "empty" response is ambiguous: it's either a real
+    no-match or a throttle. We can't tell them apart from one call, so on an
+    empty response we retry a couple of times with a short backoff — a genuine
+    no-match stays empty (costing a little time on rare truly-unknown titles),
+    while a throttle usually clears on the next attempt. The `cat=0` param asks
+    apibay to search all categories explicitly, which it also handles better.
+
+    Returns (data_list, error_str). data_list is [] on a real empty result;
+    error_str is set only on a transport/parse failure.
+    """
+    cache_key = query.strip().lower()
+    if cache_key in _SEARCH_CACHE:
+        return (_SEARCH_CACHE[cache_key], None)
+
+    import time as _time
+    last_err = None
+    data = []
+    for attempt in range(TPB_RETRIES):
+        try:
+            resp = requests.get(
+                TPB_API,
+                params={'q': query, 'cat': '0'},
+                timeout=TPB_TIMEOUT,
+                headers=_TPB_HEADERS,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not _looks_empty(data):
+                break  # got real results
+            last_err = None
+        except Exception as e:
+            last_err = f'search failed: {e}'
+        # Empty or errored — back off briefly and try again (skip after last).
+        if attempt < TPB_RETRIES - 1:
+            _time.sleep(0.8 * (attempt + 1))
+
+    if last_err and _looks_empty(data):
+        return ([], last_err)
+    if _looks_empty(data):
+        return ([], None)
+
+    # Cache the successful (non-empty) response; bound the cache size.
+    if len(_SEARCH_CACHE) >= _SEARCH_CACHE_MAX:
+        _SEARCH_CACHE.pop(next(iter(_SEARCH_CACHE)), None)
+    _SEARCH_CACHE[cache_key] = data
+    return (data, None)
+
+
 def search_tpb(query):
     """Search The Pirate Bay via apibay.org.
 
     Returns:
-        (results: list[dict], blocked_count: int, error: str or None)
+        (results: list[dict], blocked_count: int, error: str or None, intent)
         Each result dict has: name, info_hash, seeders, leechers, size,
         username, status, _trust_tier, _scope, _quality_tier, _quality_label,
         _codec, _audio, _source, _size_str, _health_pct, _health_bar.
     """
-    try:
-        resp = requests.get(
-            TPB_API,
-            params={'q': query},
-            timeout=TPB_TIMEOUT,
-            headers={'User-Agent': 'Mozilla/5.0'},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        return ([], 0, f'search failed: {e}', None)
+    # Parse intent first so we search apibay with the clean title (no S01/E03
+    # markers) — "silo s1" → search "silo", "the last of us s1e1" → "the last of us".
+    # Markers in the raw query confuse apibay's index and return zero results.
+    intent = _parse_query_intent(query)
+    search_term = intent['title'] if intent['title'] else query
 
-    # apibay returns [{"id":"0","name":"No results..."}] for no results
-    if not data or (len(data) == 1 and data[0].get('id') == '0'):
+    data, error = _fetch_tpb(search_term)
+    if error:
+        return ([], 0, error, None)
+    if not data:
         return ([], 0, None, None)
 
     # Keep only Video-category torrents (200-299). Drops ebooks (601),
     # audiobooks (102), music, games, etc. that match the title text.
-    data = [d for d in data if _is_video_category(d.get('category', ''))]
+    # Also drop 0-byte entries — apibay sometimes returns size=0 for
+    # incomplete/fake releases; they're not worth showing.
+    data = [d for d in data if _is_video_category(d.get('category', ''))
+            and int(d.get('size', 0)) > 0]
     if not data:
         return ([], 0, None, None)
 
@@ -300,10 +396,10 @@ def search_tpb(query):
     # the strict set; if empty, fall back to a looser threshold so a real
     # search never returns a blank screen just because release names are messy.
     intent = _parse_query_intent(query)
-    query_tokens = _tokenize(intent['title'])
+    query_phrase = intent['title']
     scored = []
     for r in safe:
-        r['_relevance'] = _relevance_score(query_tokens, r['name'])
+        r['_relevance'] = _relevance_score(query_phrase, r['name'])
         scored.append(r)
 
     relevant = [r for r in scored if r['_relevance'] >= _RELEVANCE_MIN]
