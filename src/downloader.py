@@ -1,5 +1,5 @@
 """
-downloader.py — Download backends, resume state, history, disk space.
+downloader.py -- Download backends, resume state, history, disk space.
 """
 
 import os
@@ -15,7 +15,7 @@ import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 # Lazy `requests`: importing it (+ urllib3 + charset_normalizer) costs ~790ms
-# and nothing needs it to draw the banner or run the REPL prompt — only an
+# and nothing needs it to draw the banner or run the REPL prompt -- only an
 # actual download/scrape does. This proxy imports the real module on first
 # attribute access (including inside `except requests.X` clauses, which Python
 # evaluates lazily), so the cost is paid at first use, not at startup.
@@ -252,7 +252,7 @@ def register_process(proc):
     Stop-gated to close the parallel-download respawn race. A worker can
     finish subprocess.Popen() in the narrow window *after* Ctrl+C's kill
     sweep has already snapshotted ACTIVE_PROCESSES, leaving a freshly
-    spawned aria2c that nothing kills — with N parallel workers there are N
+    spawned aria2c that nothing kills -- with N parallel workers there are N
     such windows, which is why one of two/three survived Ctrl+C.
 
     We decide add-or-refuse under the SAME lock terminate_active_processes()
@@ -269,7 +269,7 @@ def register_process(proc):
             born_after_stop = True
         else:
             ACTIVE_PROCESSES.add(proc)
-    # Terminate outside the lock — _graceful_terminate can wait up to 3s and
+    # Terminate outside the lock -- _graceful_terminate can wait up to 3s and
     # must never hold PROCESS_LOCK against other workers' register/unregister.
     if born_after_stop:
         _graceful_terminate(proc)
@@ -302,7 +302,7 @@ def _drain_futures_interruptible(futures, stop_flag=None, poll=0.3, executor=Non
     while the main thread is executing bytecode. Blocking in
     ThreadPoolExecutor.__exit__ / as_completed() / future.result() parks the
     main thread in a C lock wait, so the handler is deferred until every
-    worker finishes — which is exactly why Ctrl+C appeared dead during
+    worker finishes -- which is exactly why Ctrl+C appeared dead during
     parallel downloads. Polling with a short timeout keeps returning to
     bytecode, so the handler runs promptly and we can react to stop_flag.
 
@@ -565,7 +565,7 @@ class LiveProgress:
             pass
 
     def stopped_for_resume(self):
-        # Clean user stop (Ctrl+C) — the partial file is saved for resume, so
+        # Clean user stop (Ctrl+C) -- the partial file is saved for resume, so
         # this is NOT a failure. Closes the progress line without the [X] glyph
         # so the user doesn't see a misleading "Failed" after "saved for resume".
         if self._done:
@@ -820,7 +820,7 @@ def show_resume_list():
         ui_emit('no_paused_downloads')
         return False
 
-    # Filter out fully completed series — those with no current episode and no failures
+    # Filter out fully completed series -- those with no current episode and no failures
     active = {
         url: inf for url, inf in state.items()
         if inf.get('current') or inf.get('failed')
@@ -960,7 +960,7 @@ def fetch_expected_size(url, session=None):
     except Exception:
         pass
     finally:
-        # Only close a session we created — never one passed in by the caller.
+        # Only close a session we created -- never one passed in by the caller.
         if owns_session and s is not None:
             try:
                 s.close()
@@ -1015,7 +1015,7 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
                 else:
                     ui_emit('already_downloaded_verified')
                     return True, path
-            # Receipt says done but file missing — clean up receipt and re-download
+            # Receipt says done but file missing -- clean up receipt and re-download
             DownloadReceipt.mark_failed(ep_key)
 
     # Fallback: filesystem check (for files without receipt records)
@@ -1130,7 +1130,7 @@ def is_streaming_link(url):
 def check_url_alive(url, session):
     """
     Returns 'ok', 'expired', or 'unknown'.
-    Uses a ranged GET (bytes=0-0) instead of HEAD — many CDNs return 403
+    Uses a ranged GET (bytes=0-0) instead of HEAD -- many CDNs return 403
     to HEAD requests even for valid files, but serve correctly on GET.
     404/410 are definitive expiry signals; 403 is ambiguous, so we treat
     it as 'unknown' and let the download attempt proceed.
@@ -1224,8 +1224,8 @@ def _update_ytdlp(channel='stable'):
     The silent background auto-update path always calls this with no
     args (stable) so an unattended update can't silently put a
     less-tested yt-dlp build in front of a running download. Only the
-    explicit `update` command — where the user is watching and can react
-    — respects the configured ytdlp_channel setting.
+    explicit `update` command -- where the user is watching and can react
+    -- respects the configured ytdlp_channel setting.
     """
     try:
         cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade']
@@ -1336,7 +1336,7 @@ def _download_magnet_aria2c(url, folder, filename, summary,
 
     Key differences from HTTP downloads:
     - Filename is unknown until metadata arrives (torrent names itself)
-    - No expected file size upfront — we parse aria2c's own progress output
+    - No expected file size upfront -- we parse aria2c's own progress output
     - One torrent may contain many files (a season pack of episodes)
     - Files are NOT playable until the torrent reaches 100%
     - Completion = exit code 0
@@ -1487,7 +1487,7 @@ def _download_magnet_aria2c(url, folder, filename, summary,
             summary.add_failed(filename)
             return False
 
-        # Success — validate downloaded files (Layer 7: magic-byte check)
+        # Success -- validate downloaded files (Layer 7: magic-byte check)
         from .security import validate_downloaded_file
         downloaded_files = _find_new_media_files(folder)
         blocked = []
@@ -1565,7 +1565,7 @@ def _render_torrent_bar(pct, done, total, speed, peers, seeds, eta):
     plain = (f'  {bar} {pct:>3}%  {done_s}/{total_s}  '
              f'{speed_s}/s  {peers}p/{seeds}s  ETA {eta}')
 
-    # Colorize just the bar (pad first, then paint — ANSI breaks width math)
+    # Colorize just the bar (pad first, then paint -- ANSI breaks width math)
     colored = plain.replace(bar, paint(bar, 'bgreen' if pct >= 100 else 'bcyan'))
 
     try:
@@ -1633,6 +1633,9 @@ def download_with_aria2c(url, folder, filename, summary,
     For magnet URIs: uses BitTorrent flags, scans folder for growing
     files (filename unknown upfront), completes on exit code 0.
     """
+    if url and isinstance(url, str):
+        import html as _html
+        url = _html.unescape(url).split('?utm_source')[0]
     config = config or {}
     try:
         config_path = os.path.join(CONFIG_DIR, '.config.json')
@@ -1730,7 +1733,7 @@ def download_with_aria2c(url, folder, filename, summary,
         try:
             # Recompute per attempt: _try_reresolve may have changed `url`
             # to a fresh CDN link on a different host, which needs its own
-            # Referer/Origin — reusing the old host's headers gets 403'd.
+            # Referer/Origin -- reusing the old host's headers gets 403'd.
             referer = get_referer_for_url(url)
             cmd = [
                 'aria2c',
@@ -1774,7 +1777,7 @@ def download_with_aria2c(url, folder, filename, summary,
             if current_process is not None:
                 current_process.proc = proc
 
-            # Poll instead of blocking wait — allows stop_flag to interrupt
+            # Poll instead of blocking wait -- allows stop_flag to interrupt
             stopped = False
             stalled = False
             idle_timeout = max(60, int(config.get('download_timeout', 120)) * 2)
@@ -1809,7 +1812,7 @@ def download_with_aria2c(url, folder, filename, summary,
                     if _is_stopped(stop_flag):
                         stopped = True
                         break
-                    # Re-launch aria2c — it picks up from the partial file
+                    # Re-launch aria2c -- it picks up from the partial file
                     ui_emit('resume_start')
                     last_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
                     last_progress = time.time()
@@ -1842,7 +1845,7 @@ def download_with_aria2c(url, folder, filename, summary,
                 # every interrupted parallel episode resumes from its partial
                 # bytes. Ctrl+C previously left the shared AppState slot to the
                 # signal handler, which only captured one episode (last writer
-                # wins) — the other N-1 were marked failed and restarted from 0.
+                # wins) -- the other N-1 were marked failed and restarted from 0.
                 # Writing from this worker's own locals, keyed per-episode,
                 # bypasses that clobber. _cleanup_session_file removes only the
                 # aria2c session .txt, keeping the partial file + .aria2 sidecar
@@ -1871,7 +1874,7 @@ def download_with_aria2c(url, folder, filename, summary,
                 return False
 
             # Detect user cancellation: aria2c code 7 or Windows Ctrl+C.
-            # NOTE: code < 0 is intentionally excluded — on Android/Termux,
+            # NOTE: code < 0 is intentionally excluded -- on Android/Termux,
             # aria2c can exit with a negative signal code even after a successful
             # download. Treating code < 0 as cancel was setting stop_flag and
             # blocking all episodes after ep1. Check file on disk first instead.
@@ -1884,13 +1887,13 @@ def download_with_aria2c(url, folder, filename, summary,
                     file_is_complete = False
 
             if file_is_complete:
-                pass  # File is complete — not a cancel regardless of exit code
+                pass  # File is complete -- not a cancel regardless of exit code
             else:
                 # Only a genuine Ctrl+C is a user-cancel. The signal handler is
                 # the single source of truth: it sets stop_flag and kills all
                 # subprocesses, so a real cancel is already reflected in
                 # _is_stopped(stop_flag). We must NOT infer cancel from aria2c
-                # exit code 7 alone — code 7 ("some downloads were not
+                # exit code 7 alone -- code 7 ("some downloads were not
                 # complete") also fires on ordinary per-episode failures, and
                 # in parallel_mode calling stop_flag.set() here would abort
                 # every other in-flight download in the batch.
@@ -2163,7 +2166,7 @@ def _download_with_requests_impl(s, url, folder, filename, summary, stop_flag=No
 def _ytdlp_record_paused(series_url, series_name, folder, filename, expected_size=0):
     """Write a per-episode resume receipt for an interrupted yt-dlp download.
 
-    yt-dlp has no single `filepath` local — the on-disk partial can be
+    yt-dlp has no single `filepath` local - the on-disk partial can be
     `base.part`, `base.fNNN.mp4`, `base.ext.part`, etc. We scan the folder for
     the largest artifact whose name starts with the sanitized base and record
     that byte count. Mirrors the aria2c stop branch so parallel yt-dlp
@@ -2216,8 +2219,8 @@ def _ytdlp_subtitle_flags(config, url=None):
     subs on YouTube specifically). Empty list if disabled or non-YouTube.
 
     Config keys:
-      youtube_subtitles: bool  — master on/off (default True)
-      subtitle_language: 'en' | 'zh'  — which language (default 'en')
+      youtube_subtitles: bool  -- master on/off (default True)
+      subtitle_language: 'en' | 'zh'  -- which language (default 'en')
     """
     if not config.get('youtube_subtitles', True):
         return []
@@ -2360,7 +2363,7 @@ def download_with_ytdlp(url, folder, filename, summary,
                     summary.add_success()
                     log_download(filename, url, p)
                     return True
-            # yt-dlp exited 0 but no output file — likely failed
+            # yt-dlp exited 0 but no output file -- likely failed
             progress.fail()
             ui_emit('ytdlp_no_output')
             summary.add_failed(filename)
@@ -2434,7 +2437,7 @@ def run_ytdlp_command(cmd, summary, label,
             current_process.proc = None
 
 def _social_quality_format(preferred_quality='720p'):
-    """Build yt-dlp format string directly — no network request needed."""
+    """Build yt-dlp format string directly -- no network request needed."""
     q = str(preferred_quality or '720p').lower()
     if q == 'best':
         return 'bestvideo+bestaudio/best', 'best available'
@@ -2643,7 +2646,7 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
                     summary.add_success()
                     log_download(os.path.basename(p), url, p)
                     return True
-                # yt-dlp exited 0 but no output file found — treat as failure
+                # yt-dlp exited 0 but no output file found -- treat as failure
                 progress.fail()
                 ui_emit('ytdlp_no_output')
                 summary.add_failed(filename)
@@ -2669,14 +2672,14 @@ def download_file(url, folder, filename, summary,
                   current_process=None, stop_flag=None, pause_flag=None,
                   wait_fn=None, parallel_mode=False, source_url=None):
     """
-    Smart downloader — handles resume state, expiry check, disk space,
+    Smart downloader -- handles resume state, expiry check, disk space,
     and routes to the right backend.
 
-    stop_flag:    list([False]) — set to True to abort
-    paused_flag:  list([False]) — set to True to pause
-    wait_fn:      callable — blocks until unpaused
+    stop_flag:    list([False]) -- set to True to abort
+    paused_flag:  list([False]) -- set to True to pause
+    wait_fn:      callable -- blocks until unpaused
     parallel_mode: True when running inside download_batch with parallel>1
-                   — switches LiveProgress to static line mode to avoid
+                   -- switches LiveProgress to static line mode to avoid
                    interleaved \r corruption
     """
     # Magnet links skip the HTTP-specific pre-checks (expiry, size, resume state)

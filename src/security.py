@@ -89,7 +89,8 @@ def check_uploader_trust(result):
         (passed: bool, reason: str, trust_tier: str)
     """
     status = (result.get('status') or '').lower().strip()
-    seeders = int(result.get('seeders', 0))
+    raw_seeders = result.get('seeders')
+    seeders = int(raw_seeders) if raw_seeders is not None else 1
     uploader = result.get('username', 'anonymous')
 
     # Map API status to our tiers

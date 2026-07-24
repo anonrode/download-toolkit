@@ -848,6 +848,15 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
     if results is None:
         results = _run_search_legacy(query, site_filter, fast, hint, timeout)
 
+    if results:
+        import html as _html
+        clean_results = []
+        for name, url in results:
+            clean_name = _html.unescape(name)
+            clean_url = _html.unescape(url).split('?utm_source')[0]
+            clean_results.append((clean_name, clean_url))
+        results = clean_results
+
     if results and use_cache:
         _cache_set(cache_key, results)
     return results
