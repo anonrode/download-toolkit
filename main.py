@@ -1294,6 +1294,46 @@ def _stamp_auto_update():
         pass
 
 
+def _install_ffmpeg():
+    """On-demand ffmpeg install for the `fminstall` command. ffmpeg is only
+    needed to merge separate video+audio streams (some YouTube downloads); the
+    PC setup no longer installs it automatically because the full winget build
+    is ~250 MB. Termux uses pkg; PC uses winget. Never raises."""
+    if shutil.which('ffmpeg'):
+        print("[✓] ffmpeg is already installed.")
+        return
+    try:
+        if IS_ANDROID:
+            print("[*] Installing ffmpeg via pkg...")
+            rc = subprocess.run(
+                ['pkg', 'install', 'ffmpeg', '-y'],
+                stdin=subprocess.DEVNULL, timeout=600
+            ).returncode
+        elif shutil.which('winget'):
+            print("[*] Installing ffmpeg via winget "
+                  "(~250 MB download — this can take a few minutes)...")
+            rc = subprocess.run(
+                ['winget', 'install', '--id', 'Gyan.FFmpeg', '-e',
+                 '--accept-source-agreements', '--accept-package-agreements',
+                 '--disable-interactivity'],
+                stdin=subprocess.DEVNULL, timeout=1800
+            ).returncode
+        else:
+            print("[!] No package manager found (winget/pkg). Install ffmpeg "
+                  "manually from https://ffmpeg.org/download.html and add it to PATH.")
+            return
+        if rc == 0:
+            print("[✓] ffmpeg installed. Restart the app (or open a new "
+                  "terminal) so it is picked up on PATH.")
+        else:
+            print("[!] ffmpeg install failed (exit code "
+                  f"{rc}). Install manually from https://ffmpeg.org/download.html.")
+    except subprocess.TimeoutExpired:
+        print("[!] ffmpeg install timed out. Try again or install manually.")
+    except Exception as e:
+        print(f"[!] ffmpeg install failed: {e}")
+
+
 def _git_status_info(script_dir):
     """Read-only live inspection of the checkout vs origin/main for the
     `version` command. Fetches but never merges or stamps. Never raises.
@@ -2010,6 +2050,7 @@ def main():
             print(f"  update                 - Update toolkit from GitHub")
             print(f"  version                - Show current version & update status")
             print(f"  updateyt               - Update yt-dlp only")
+            print(f"  fminstall              - Install ffmpeg (needed for some YouTube downloads)")
 
             print(f"  doctor                 - Check Termux dependencies")
             print(f"  cleanup                - Delete temporary/stale files")
@@ -2180,6 +2221,9 @@ def main():
                 _update_ytdlp(channel=channel)
             except Exception as e:
                 print(f"[!] yt-dlp update failed: {e}")
+
+        elif lower in ('fminstall', 'installffmpeg', 'install-ffmpeg'):
+            _install_ffmpeg()
 
         elif lower == 'version':
             script_dir = os.path.dirname(os.path.abspath(__file__))

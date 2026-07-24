@@ -215,26 +215,25 @@ class LoadedfilesResolver(BaseResolver):
     def can_resolve(url: str) -> bool:
         netloc = urlparse(url).netloc.lower()
         return netloc in ['loadedfiles.st', 'www.loadedfiles.st',
-                          'loadedfiles.org', 'www.loadedfiles.org']
+                          'loadedfiles.org', 'www.loadedfiles.org',
+                          'loadedfiles.net', 'www.loadedfiles.net']
 
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            # The loadedfiles.org host is dead (no DNS); the same file hashes are
-            # served live on loadedfiles.st. Some source sites (dramakey.cc) still
-            # link the stale .org host, so rewrite to the live .st host on entry.
-            url = url.replace('loadedfiles.org', 'loadedfiles.st')
+            # loadedfiles.org & loadedfiles.net link hashes map directly to live loadedfiles.st
+            url = url.replace('loadedfiles.org', 'loadedfiles.st').replace('loadedfiles.net', 'loadedfiles.st')
             r1 = safe_get(session, url, referer='https://my9jarocks.bz/')
             if not r1:
                 return None
-            m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.(?:st|org)/[^']+)'", r1.text)
+            m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.(?:st|org|net)/[^']+)'", r1.text)
             if not m1:
                 return None
-            step1 = m1.group(1).replace('loadedfiles.org', 'loadedfiles.st')
+            step1 = m1.group(1).replace('loadedfiles.org', 'loadedfiles.st').replace('loadedfiles.net', 'loadedfiles.st')
             r2 = safe_get(session, step1, referer='https://loadedfiles.st/')
             if not r2:
                 return None
-            m2 = re.search(r"var downloadUrl = '(https://loadedfiles\.(?:st|org)/[^']+)'", r2.text)
+            m2 = re.search(r"var downloadUrl = '(https://loadedfiles\.(?:st|org|net)/[^']+)'", r2.text)
             if not m2:
                 return None
             try:

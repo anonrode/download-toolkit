@@ -45,15 +45,12 @@ if [ "$IS_TERMUX" -ne 1 ]; then
           && ok "Python packages installed" || warn "Some Python packages failed to install"
     fi
 
-    info "Installing ffmpeg..."
+    info "Checking ffmpeg..."
     if command -v ffmpeg >/dev/null 2>&1; then
         ok "ffmpeg already installed"
-    elif command -v winget >/dev/null 2>&1; then
-        info "  (winget download — this can take a couple of minutes)"
-        winget_install Gyan.FFmpeg \
-          && ok "ffmpeg installed via winget" || warn "ffmpeg install failed — install manually from https://ffmpeg.org/download.html"
     else
-        warn "ffmpeg not found — install from https://ffmpeg.org/download.html and add to PATH"
+        info "ffmpeg not installed — needed only for merging video+audio (some YouTube downloads)."
+        info "You can install it later inside the app by typing: fminstall"
     fi
 
     info "Installing aria2c (fast downloads + torrents)..."
@@ -108,8 +105,16 @@ EOF
         ok "Python Scripts already in PATH"
     fi
 
-    # Create desktop shortcut
-    DESKTOP=$(python -c "import os; print(os.path.join(os.path.expanduser('~'), 'Desktop'))" 2>/dev/null | tr '\\' '/')
+    # Create desktop shortcut — use the Windows known-folder API so it works
+    # even when OneDrive redirects the Desktop to ~/OneDrive/Desktop.
+    DESKTOP=""
+    if command -v powershell >/dev/null 2>&1; then
+        DESKTOP=$(powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')" 2>/dev/null | tr '\\' '/' | tr -d '\r')
+    fi
+    # Fallback: Python expanduser
+    if [ -z "$DESKTOP" ] || [ ! -d "$DESKTOP" ]; then
+        DESKTOP=$(python -c "import os; print(os.path.join(os.path.expanduser('~'), 'Desktop'))" 2>/dev/null | tr '\\' '/')
+    fi
     if [ -d "$DESKTOP" ]; then
         cat > "$DESKTOP/Anonrode.bat" << 'BATEOF'
 @echo off

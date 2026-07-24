@@ -18,6 +18,19 @@ def extract_naijavault(url, session, ctx=None):
     soup    = BeautifulSoup(r.text, 'html.parser')
     summary = DownloadSummary()
 
+    if '/category/' in url:
+        post_links = list(dict.fromkeys(
+            a['href'] for a in soup.find_all('a', href=True)
+            if NAIJAVAULT_DOMAIN in a['href'] and '/category/' not in a['href'] and '/page/' not in a['href'] and '#' not in a['href']
+        ))
+        if post_links:
+            safe_print(f"[*] Category Hub Page detected. Processing {len(post_links)} post(s)...")
+            for post_url in post_links:
+                if _stopped(ctx):
+                    break
+                extract_naijavault(post_url, session, ctx)
+            return
+
     # ── Scan series page for both link formats ─────────────────
     # Format A: /dl-{hash}/ intermediate pages
     seen   = set()

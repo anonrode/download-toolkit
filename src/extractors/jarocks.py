@@ -17,7 +17,7 @@ def extract_9jarocks(url, session, ctx=None):
     lf_links = list(dict.fromkeys(
         (a.get_text(strip=True), a['href'])
         for a in soup.find_all('a', href=True)
-        if 'loadedfiles.st' in a['href'] or 'loadedfiles.org' in a['href']
+        if any(k in a['href'] for k in ['loadedfiles.st', 'loadedfiles.org', 'loadedfiles.net'])
     ))
     if not lf_links:
         safe_print(render_message('no_episode_links'))
