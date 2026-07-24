@@ -55,11 +55,11 @@ def extract_dramarain(url, session, ctx=None):
         return
 
     # Method 1b: loadedfiles links (current dramakey.cc layout — same files/host
-    # as 9jaRocks). dramakey still links the dead loadedfiles.org host; the
-    # resolver rewrites .org -> the live .st host, so these resolve fine.
+    # as 9jaRocks). loadedfiles rotates TLDs; the resolver rewrites any TLD to
+    # the live .st host, so we match generically here.
     lf_links = list(dict.fromkeys(
         (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
-        if 'loadedfiles.st' in a['href'] or 'loadedfiles.org' in a['href']))
+        if re.search(r'loadedfiles\.[a-z0-9-]+', a['href'], re.I)))
     if lf_links:
         lf_links = _filter_by_episode_range(lf_links, ctx)
         if not lf_links:

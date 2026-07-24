@@ -211,33 +211,41 @@ class DownloadwellaResolver(BaseResolver):
             return None
 
 class LoadedfilesResolver(BaseResolver):
+    # loadedfiles keeps switching TLDs (.st / .org / .net / …) but every host
+    # serves the same file hashes, and only .st is reliably live. Match any
+    # loadedfiles.<tld> and rewrite it to .st everywhere instead of hardcoding
+    # each new domain as it appears.
+    _HOST = re.compile(r'loadedfiles\.[a-z0-9-]+', re.I)
+
+    @classmethod
+    def _to_st(cls, text: str) -> str:
+        return cls._HOST.sub('loadedfiles.st', text)
+
     @staticmethod
     def can_resolve(url: str) -> bool:
         netloc = urlparse(url).netloc.lower()
-        return netloc in ['loadedfiles.st', 'www.loadedfiles.st',
-                          'loadedfiles.org', 'www.loadedfiles.org',
-                          'loadedfiles.net', 'www.loadedfiles.net']
+        return re.match(r'(www\.)?loadedfiles\.[a-z0-9-]+$', netloc) is not None
 
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            # loadedfiles.org & loadedfiles.net link hashes map directly to live loadedfiles.st
-            url = url.replace('loadedfiles.org', 'loadedfiles.st').replace('loadedfiles.net', 'loadedfiles.st')
+            # Any loadedfiles.<tld> hash maps directly to the live loadedfiles.st.
+            url = LoadedfilesResolver._to_st(url)
             r1 = safe_get(session, url, referer='https://my9jarocks.bz/')
             if not r1:
                 return None
-            m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.(?:st|org|net)/[^']+)'", r1.text)
+            m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'", r1.text, re.I)
             if not m1:
                 return None
-            step1 = m1.group(1).replace('loadedfiles.org', 'loadedfiles.st').replace('loadedfiles.net', 'loadedfiles.st')
+            step1 = LoadedfilesResolver._to_st(m1.group(1))
             r2 = safe_get(session, step1, referer='https://loadedfiles.st/')
             if not r2:
                 return None
-            m2 = re.search(r"var downloadUrl = '(https://loadedfiles\.(?:st|org|net)/[^']+)'", r2.text)
+            m2 = re.search(r"var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'", r2.text, re.I)
             if not m2:
                 return None
             try:
-                step2 = m2.group(1).replace('loadedfiles.org', 'loadedfiles.st')
+                step2 = LoadedfilesResolver._to_st(m2.group(1))
                 r3 = session.get(step2, timeout=20, allow_redirects=False)
                 return r3.headers.get('location')
             except Exception as e:
@@ -689,6 +697,16 @@ class ResolverRegistry:
     ]
 
     @classmethod
+    def get(cls, name: str):
+        """Lookup resolver by name safely."""
+        name_lower = name.lower()
+        for r in cls.RESOLVERS:
+            r_name = getattr(r, '__name__', '').lower()
+            if name_lower in r_name:
+                return r.resolve
+        return None
+
+    @classmethod
     def resolve(cls, url: str, session, _depth=0) -> str:
         if _depth > 5:
             safe_print(f"      [!] Resolver depth limit reached — returning: {url[:60]}")
@@ -699,7 +717,7 @@ class ResolverRegistry:
         _path = urlparse(url).path.lower()
         if any(_path.endswith(ext) for ext in ['.mp4', '.mkv', '.m3u8', '.webm']):
             parsed = urlparse(url).netloc.lower()
-            resolver_domains = ['waffi.cloud', 'loadedfiles.st', 'loadedfiles.org', 'wildshare.net', 'vikingfile.com', 'lulacloud.com', 'pixeldrain.com', 'streamtape.com', 'watchadsontape.com', 'vidmoly.me', 'vidbasic.to']
+            resolver_domains = ['waffi.cloud', 'loadedfiles.', 'wildshare.net', 'vikingfile.com', 'lulacloud.com', 'pixeldrain.com', 'streamtape.com', 'watchadsontape.com', 'vidmoly.me', 'vidbasic.to']
             if not any(dom in parsed for dom in resolver_domains):
                 return url
 
