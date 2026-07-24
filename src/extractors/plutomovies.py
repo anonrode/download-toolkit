@@ -44,7 +44,7 @@ def extract_plutomovies(url, session, ctx=None):
     season_links = []
     for a in soup.find_all('a', href=True):
         href = a['href']
-        if re.search(r'/series/[^/]+/[^/]*season-\d+', href) and '#' not in href:
+        if '/series/' in href and 'season' in href.lower() and '#' not in href:
             full = urljoin(PLUTO_BASE, href)
             if full != url and full not in season_links:
                 season_links.append(full)
@@ -71,10 +71,9 @@ def extract_plutomovies(url, session, ctx=None):
         return dl_link, direct
 
     def _cdn_alive(cdn_url):
-        """Quick ranged GET to verify CDN token hasn't expired."""
+        """Quick HEAD check to verify CDN token hasn't expired."""
         try:
-            r = session.get(cdn_url, timeout=5, allow_redirects=True,
-                            headers={'Range': 'bytes=0-0'})
+            r = session.head(cdn_url, timeout=5, allow_redirects=True)
             return r.status_code in (200, 206)
         except Exception:
             return False
@@ -111,9 +110,7 @@ def extract_plutomovies(url, session, ctx=None):
                     continue
                 if not any(x in href.lower() for x in EP_KEYWORDS):
                     continue
-                ep_name = a.get_text(strip=True)
-                ep_name = re.sub(r'(?i)^(previous|next)\s+episode\b\s*', '', ep_name).strip()
-                ep_name = ep_name or safe_filename(href.rstrip('/').split('/')[-1])
+                ep_name = a.get_text(strip=True) or safe_filename(href.rstrip('/').split('/')[-1])
                 ep_items.append((full_url, safe_filename(ep_name)))
             # Deduplicate
             seen_u = set()
