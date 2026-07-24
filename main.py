@@ -1125,32 +1125,46 @@ def handle_resume_command(session, cfg):
     process_link_queue([url], session, ctx)
 
 # ─── GIT HELPERS ──────────────────────────────────────────────
-def _git_update(script_dir, announce=False, force=False):
-    """Single source of truth for the git fetch/merge/stamp dance shared by
+def _git_update(script_dir, announce=False, force=False, wipe_local=False):
+    """Single source of truth for the git fetch/sync/stamp dance shared by
     auto_update() and the manual `update` command. Never raises.
 
-    Safety kept from the originals: refuses to touch a dirty tree (tracked,
-    non-`??` changes), fast-forward only, every git call is non-interactive
-    (stdin=DEVNULL) with a timeout, so it is Windows + Termux safe.
+    Update policy (Windows + Termux safe; every git call is non-interactive
+    with a timeout). After fetching, the local checkout is classified:
 
-    force=True refreshes the 7-day auto-update stamp on a successful remote
-    check (both real callers pass force=True). Returns a dict:
+      * unpushed commits (HEAD ahead of origin/main) — only ever happens on
+        the dev box. Hard refuse: we must never throw away unpushed work, and
+        `wipe_local` does NOT override this. Reported via `unpushed`.
+      * tracked local changes (edited/deleted files, e.g. a stale `D run.sh`
+        on a friend's PC) — only matters when an update is actually available.
+        By default we refuse and hand the list back so the caller can offer a
+        choice; pass `wipe_local=True` to discard them and force-sync.
+      * clean / already on latest — normal fast-forward (with a hard-reset
+        fallback if origin/main was force-pushed).
+
+    `git reset --hard` preserves untracked files, so downloads/config/receipts
+    are always safe. force=True refreshes the 7-day auto-update stamp on a
+    successful remote check (both real callers pass force=True).
+
+    Returns a dict:
       reached_remote bool  – `git fetch` succeeded
-      was_dirty      bool  – tracked changes present; merge refused
-      dirty_lines    list  – porcelain lines behind was_dirty (for display)
-      before_commit  str   – full HEAD before the merge ('' if unknown)
-      after_commit   str   – full HEAD after the merge ('' if unknown)
-      updated        bool  – HEAD actually advanced (a real fast-forward)
+      unpushed       bool  – HEAD has commits not on origin/main (dev guard)
+      local_changes  list  – tracked dirty porcelain lines (wipeable)
+      was_dirty      bool  – unpushed OR local_changes present (back-compat)
+      dirty_lines    list  – lines to show for was_dirty (back-compat)
+      before_commit  str   – full HEAD before the sync ('' if unknown)
+      after_commit   str   – full HEAD after the sync ('' if unknown)
+      updated        bool  – HEAD actually advanced
       behind_count   int   – commits HEAD is behind origin/main (0 if unknown)
-      merge_ok       bool  – HEAD now matches origin/main (ff-forward OR,
-                             on a rewritten remote, a hard reset onto it)
-      rebuilt        bool  – ff-only failed so we hard-reset onto origin/main
-                             (remote history was force-pushed); tree was clean
-      merge_output   str   – merge stdout (for display)
+      merge_ok       bool  – HEAD now matches origin/main
+      rebuilt        bool  – snapped to origin/main via hard reset (force-push
+                             recovery, or a wipe_local force-pull)
+      merge_output   str   – sync stdout (for display)
       error          str   – first error text encountered ('' if none)
     """
     res = {
-        'reached_remote': False, 'was_dirty': False, 'dirty_lines': [],
+        'reached_remote': False, 'unpushed': False, 'local_changes': [],
+        'was_dirty': False, 'dirty_lines': [],
         'before_commit': '', 'after_commit': '', 'updated': False,
         'behind_count': 0, 'merge_ok': False, 'merge_output': '', 'error': '',
         'rebuilt': False,
@@ -1172,23 +1186,34 @@ def _git_update(script_dir, announce=False, force=False):
     try:
         res['before_commit'] = _commit()
 
-        # 1) Never wipe local work — refuse on tracked (non-??) changes.
-        status = _run(['git', 'status', '--porcelain'], 5)
-        res['dirty_lines'] = [
-            l for l in status.stdout.splitlines() if l and not l.startswith('??')
-        ]
-        if res['dirty_lines']:
-            res['was_dirty'] = True
-            return res
-
-        # 2) Reach the remote.
+        # 1) Reach the remote first — everything else compares against it.
         fetch = _run(['git', 'fetch', 'origin', '-q'], 30)
         if fetch.returncode != 0:
             res['error'] = (fetch.stderr or fetch.stdout or '').strip()
             return res
         res['reached_remote'] = True
 
-        # 3) How far behind origin/main (informational).
+        # 2) Dev guard — unpushed commits. Never wipeable, even with wipe_local.
+        try:
+            ahead = _run(['git', 'rev-list', '--count', 'origin/main..HEAD'], 10)
+            ahead_n = int(ahead.stdout.strip()) if (
+                ahead.returncode == 0 and ahead.stdout.strip().isdigit()
+            ) else 0
+        except Exception:
+            ahead_n = 0
+        if ahead_n > 0:
+            res['unpushed'] = res['was_dirty'] = True
+            try:
+                log = _run(
+                    ['git', 'log', '--oneline', '-n', '10', 'origin/main..HEAD'], 5)
+                res['dirty_lines'] = [l for l in log.stdout.splitlines() if l.strip()]
+            except Exception:
+                pass
+            if not res['dirty_lines']:
+                res['dirty_lines'] = [f'{ahead_n} unpushed commit(s)']
+            return res
+
+        # 3) How far behind origin/main.
         try:
             rc = _run(['git', 'rev-list', '--count', 'HEAD..origin/main'], 10)
             if rc.returncode == 0 and rc.stdout.strip().isdigit():
@@ -1196,24 +1221,51 @@ def _git_update(script_dir, announce=False, force=False):
         except Exception:
             pass
 
-        # 4) Fast-forward only — never a merge commit, never a rebase.
-        merge = _run(['git', 'merge', '--ff-only', 'origin/main', '-q'], 30)
-        res['merge_output'] = (merge.stdout or '').strip()
-        res['merge_ok'] = (merge.returncode == 0)
-        if not res['merge_ok']:
-            # Can't fast-forward. The tree is already known clean (step 1
-            # returns early on any tracked change), so the only reason ff
-            # fails is that local main diverged from origin/main — i.e. the
-            # remote history was rewritten (force-push). There is no local
-            # work to preserve, so snap to the remote. `reset --hard` keeps
-            # untracked files, so a stray download etc. is safe.
+        # Already on latest — nothing to pull, so local edits are irrelevant.
+        # Never nag about (or touch) them here.
+        if res['behind_count'] == 0:
+            res['merge_ok'] = True
+            res['after_commit'] = res['before_commit']
+            if force:
+                _stamp_auto_update()
+            return res
+
+        # 4) An update IS available. Look for tracked local changes.
+        status = _run(['git', 'status', '--porcelain'], 5)
+        res['local_changes'] = [
+            l for l in status.stdout.splitlines() if l and not l.startswith('??')
+        ]
+        if res['local_changes'] and not wipe_local:
+            # Hand the list back so the caller can offer force-pull vs cancel.
+            res['was_dirty'] = True
+            res['dirty_lines'] = res['local_changes']
+            return res
+
+        # 5) Sync. If we're wiping local changes, snap straight to origin/main;
+        # otherwise fast-forward (with a reset fallback for a force-pushed
+        # remote). `reset --hard` keeps untracked files.
+        if res['local_changes'] and wipe_local:
             reset = _run(['git', 'reset', '--hard', 'origin/main'], 30)
+            res['merge_output'] = (reset.stdout or '').strip()
             res['merge_ok'] = (reset.returncode == 0)
             if not res['merge_ok']:
-                res['error'] = (reset.stderr or reset.stdout
-                                or merge.stderr or merge.stdout or '').strip()
+                res['error'] = (reset.stderr or reset.stdout or '').strip()
                 return res
             res['rebuilt'] = True
+        else:
+            merge = _run(['git', 'merge', '--ff-only', 'origin/main', '-q'], 30)
+            res['merge_output'] = (merge.stdout or '').strip()
+            res['merge_ok'] = (merge.returncode == 0)
+            if not res['merge_ok']:
+                # Clean tree but ff failed → remote history was rewritten
+                # (force-push). No local work to preserve, so snap to it.
+                reset = _run(['git', 'reset', '--hard', 'origin/main'], 30)
+                res['merge_ok'] = (reset.returncode == 0)
+                if not res['merge_ok']:
+                    res['error'] = (reset.stderr or reset.stdout
+                                    or merge.stderr or merge.stdout or '').strip()
+                    return res
+                res['rebuilt'] = True
 
         res['after_commit'] = _commit()
         res['updated'] = bool(
@@ -1221,13 +1273,9 @@ def _git_update(script_dir, announce=False, force=False):
             and res['before_commit'] != res['after_commit']
         )
 
-        # 5) Refresh the auto-update stamp on a successful remote check.
+        # 6) Refresh the auto-update stamp on a successful remote check.
         if force:
-            try:
-                os.makedirs(os.path.dirname(AUTO_UPDATE_STATE_FILE), exist_ok=True)
-                open(AUTO_UPDATE_STATE_FILE, 'w').write(str(time.time()))
-            except Exception:
-                pass
+            _stamp_auto_update()
 
         if announce and res['updated']:
             ui_emit('toolkit_updated')
@@ -1235,6 +1283,15 @@ def _git_update(script_dir, announce=False, force=False):
         res['error'] = res['error'] or str(e)
 
     return res
+
+
+def _stamp_auto_update():
+    """Write the current time to the auto-update stamp. Best-effort."""
+    try:
+        os.makedirs(os.path.dirname(AUTO_UPDATE_STATE_FILE), exist_ok=True)
+        open(AUTO_UPDATE_STATE_FILE, 'w').write(str(time.time()))
+    except Exception:
+        pass
 
 
 def _git_status_info(script_dir):
@@ -2069,24 +2126,51 @@ def main():
             print("[*] Checking toolkit updates...")
             res = _git_update(script_dir, announce=False, force=True)
 
-            if res['was_dirty']:
+            def _finish_update(res):
+                """Render the terminal outcome of a completed sync. Restarts
+                the app in place on a real update; returns otherwise."""
+                if not res['reached_remote']:
+                    ui_emit('update_no_remote',
+                            debug=res['error'][:400] if res['error'] else None)
+                elif not res['merge_ok']:
+                    ui_emit('update_merge_failed',
+                            debug=res['error'][:400] if res['error'] else None)
+                elif res['updated']:
+                    old = (res['before_commit'] or '')[:8]
+                    new = (res['after_commit'] or '')[:8]
+                    ui_emit('update_applied', old=old, new=new)
+                    sys.stdout.flush()
+                    time.sleep(0.5)
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                else:
+                    head = (res['after_commit'] or res['before_commit'] or '')[:8]
+                    ui_emit('update_on_latest', head=head)
+
+            if res['unpushed']:
+                # Dev box only — never offer to wipe unpushed commits.
                 ui_emit('update_dirty')
                 for line in res['dirty_lines'][:8]:
                     print(f"      {line}")
-            elif not res['reached_remote']:
-                ui_emit('update_no_remote', debug=res['error'][:400] if res['error'] else None)
-            elif not res['merge_ok']:
-                ui_emit('update_merge_failed', debug=res['error'][:400] if res['error'] else None)
-            elif res['updated']:
-                old = (res['before_commit'] or '')[:8]
-                new = (res['after_commit'] or '')[:8]
-                ui_emit('update_applied', old=old, new=new)
-                sys.stdout.flush()
-                time.sleep(0.5)
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+            elif res['local_changes']:
+                # An update is waiting but local tracked files were changed.
+                # Let the user decide instead of silently wiping or refusing.
+                ui_emit('update_local_changes', count=res['behind_count'])
+                for line in res['local_changes'][:8]:
+                    print(f"      {line}")
+                try:
+                    choice = input("\n  Press 1 to force-pull (discard the above "
+                                   "and update), anything else to cancel: ").strip()
+                except EOFError:
+                    choice = ''
+                if choice == '1':
+                    print("[*] Force-pulling latest...")
+                    res = _git_update(script_dir, announce=False,
+                                      force=True, wipe_local=True)
+                    _finish_update(res)
+                else:
+                    ui_emit('update_cancelled')
             else:
-                head = (res['after_commit'] or res['before_commit'] or '')[:8]
-                ui_emit('update_on_latest', head=head)
+                _finish_update(res)
 
         elif lower in ('updateyt', 'update-yt', 'update ytdlp'):
             try:
