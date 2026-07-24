@@ -10,6 +10,18 @@ fail() { echo "[✗] $1"; }
 info() { echo "[*] $1"; }
 warn() { echo "[!] $1"; }
 
+# winget_install <package-id> — install a winget package non-interactively.
+# On a fresh machine winget prompts to accept its source/package agreements;
+# with stdin/stdout redirected that prompt blocks forever and looks like a
+# hang. --accept-*-agreements answers it, --disable-interactivity refuses any
+# other prompt instead of waiting, and </dev/null guarantees it can never sit
+# on stdin. Output stays visible so a slow download doesn't look frozen.
+winget_install() {
+    winget install --id "$1" -e \
+        --accept-source-agreements --accept-package-agreements \
+        --disable-interactivity </dev/null
+}
+
 IS_TERMUX=0
 if [ -d "/data/data/com.termux" ] || echo "${PREFIX:-}" | grep -q "com.termux"; then
     IS_TERMUX=1
@@ -37,7 +49,8 @@ if [ "$IS_TERMUX" -ne 1 ]; then
     if command -v ffmpeg >/dev/null 2>&1; then
         ok "ffmpeg already installed"
     elif command -v winget >/dev/null 2>&1; then
-        winget install --id Gyan.FFmpeg -e --silent >/dev/null 2>&1 \
+        info "  (winget download — this can take a couple of minutes)"
+        winget_install Gyan.FFmpeg \
           && ok "ffmpeg installed via winget" || warn "ffmpeg install failed — install manually from https://ffmpeg.org/download.html"
     else
         warn "ffmpeg not found — install from https://ffmpeg.org/download.html and add to PATH"
@@ -47,7 +60,8 @@ if [ "$IS_TERMUX" -ne 1 ]; then
     if command -v aria2c >/dev/null 2>&1; then
         ok "aria2c already installed"
     elif command -v winget >/dev/null 2>&1; then
-        winget install --id aria2.aria2 -e --silent >/dev/null 2>&1 \
+        info "  (winget download — this can take a minute)"
+        winget_install aria2.aria2 \
           && ok "aria2c installed via winget" || warn "aria2c install failed — torrents/fast downloads unavailable. Install from https://github.com/aria2/aria2/releases"
     else
         warn "aria2c not found — torrents and fast multi-connection downloads need it. Install from https://github.com/aria2/aria2/releases and add to PATH"
