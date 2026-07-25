@@ -41,10 +41,15 @@ def extract_9jarocks(url, session, ctx=None):
         if _stopped(ctx):
             break
         _wait(ctx)
-        # Extract from URL slug first (has real episode name), anchor text is always "DOWNLOAD"
-        slug_part = lf_url.rstrip('/').split('/')[-1]
-        # Strip extension from slug — will re-add with correct ext to avoid .mkv.mkv
-        base_fname = re.sub(r'\.(mkv|mp4|webm)$', '', safe_filename(slug_part))
+        # Anchor text is the episode code (e.g. S01E01) — use it when it's not generic
+        label_clean = label.strip() if label else ''
+        if label_clean and not re.fullmatch(r'download', label_clean, re.I):
+            base_fname = safe_filename(f"{name} - {label_clean}")
+        else:
+            slug_part = lf_url.rstrip('/').split('/')[-1]
+            base_fname = re.sub(r'\.(mkv|mp4|webm)$', '', safe_filename(slug_part))
+            if re.fullmatch(r'[0-9a-f]{8,}', base_fname, re.I):
+                base_fname = safe_filename(f"{name} - {i:02d}")
         safe_print(f"\n[{i}/{len(lf_links)}] {base_fname}")
         done, _ = already_downloaded(folder, base_fname + '.mp4', series_url=url)
         if not done:

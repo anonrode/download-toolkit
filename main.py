@@ -802,9 +802,10 @@ def handle_settings(parts, cfg):
             print("\n=== Search Cache ===")
             print("  1) Enable (Save results for 24h)")
             print("  2) Disable (Always search fresh)")
+            print("  3) Clear saved results now")
             print("  0) Back")
             try:
-                opt = input("Select option (0-2): ").strip()
+                opt = input("Select option (0-3): ").strip()
                 if opt == '1':
                     cfg['search_cache'] = True
                     save_config(cfg)
@@ -813,6 +814,9 @@ def handle_settings(parts, cfg):
                     cfg['search_cache'] = False
                     save_config(cfg)
                     print("[ok] Search Cache: Disabled")
+                elif opt == '3':
+                    from src.search import clear_search_cache
+                    clear_search_cache()
             except (KeyboardInterrupt, EOFError):
                 pass
 
@@ -2041,6 +2045,8 @@ def main():
             print(f"  clip                   - Download link copied to clipboard")
             print(f"  watch                  - Start clipboard watcher mode")
             print(f"  resume                 - Select a paused download to resume")
+            print(f"  resume clear [text]    - Clear resume list (all, or entries matching text)")
+            print(f"  cache clear            - Clear saved search results")
             print(f"  status                 - Show current download speed & status")
             print(f"  queue add <url>        - Add a link to download queue")
             print(f"  queue list/clear/run   - Manage download queue")
@@ -2074,6 +2080,22 @@ def main():
 
         elif lower in ('retry failed', 'retry'):
             handle_retry_failed(session, cfg)
+
+        elif lower == 'resume clear' or lower.startswith('resume clear '):
+            from src.downloader import clear_resume_state
+            pattern = raw[len('resume clear'):].strip() or None
+            if pattern:
+                removed = clear_resume_state(pattern)
+                if removed:
+                    print(f"[*] Cleared {removed} resume entr{'y' if removed == 1 else 'ies'} matching '{pattern}'")
+                else:
+                    print(f"[!] No resume entries matched '{pattern}'")
+            else:
+                removed = clear_resume_state()
+                if removed:
+                    print(f"[*] Cleared all {removed} resume entr{'y' if removed == 1 else 'ies'}")
+                else:
+                    print("[*] Resume list already empty")
 
         elif lower == 'resume':
             handle_resume_command(session, cfg)

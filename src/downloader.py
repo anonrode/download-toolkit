@@ -844,6 +844,34 @@ def show_resume_list():
     print(f"{'='*50}")
     return list(active.items())
 
+def clear_resume_state(pattern=None):
+    """Clear resume/paused-download entries.
+
+    pattern=None  -> wipe every entry.
+    pattern=str   -> only drop entries whose title or URL contains the
+                     (case-insensitive) substring.
+
+    Returns the number of entries removed.
+    """
+    with RESUME_LOCK:
+        state = _load_resume_state_unlocked()
+        if not state:
+            return 0
+        if pattern:
+            pat = pattern.strip().lower()
+            to_remove = [
+                url for url, inf in state.items()
+                if pat in (inf.get('name', '') or '').lower() or pat in url.lower()
+            ]
+            for url in to_remove:
+                del state[url]
+            removed = len(to_remove)
+        else:
+            removed = len(state)
+            state = {}
+        _save_resume_state_unlocked(state)
+        return removed
+
 # ─── DOWNLOAD SUMMARY ─────────────────────────────────────────
 class DownloadSummary:
     def __init__(self):
