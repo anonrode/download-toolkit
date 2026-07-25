@@ -15,9 +15,15 @@ def extract_naijaprey(url, session, ctx=None):
         return
     soup = BeautifulSoup(r.text, 'html.parser')
     if '/category/' in url:
+        _NON_POST = ('/category/', '/page/', '/tag/', '/author/', '/feed',
+                     '/contact', '/about', '/privacy', '/dmca', '/disclaimer',
+                     '/terms', '/wp-login', '/wp-admin', '/request', '#')
         post_links = list(dict.fromkeys(
             a['href'] for a in soup.find_all('a', href=True)
-            if NAIJAPREY_DOMAIN in a['href'] and '/category/' not in a['href'] and '/page/' not in a['href'] and '#' not in a['href']
+            if NAIJAPREY_DOMAIN in a['href']
+            and not any(bad in a['href'].lower() for bad in _NON_POST)
+            and a['href'].rstrip('/') != f'https://www.{NAIJAPREY_DOMAIN}'
+            and a['href'].rstrip('/') != f'https://{NAIJAPREY_DOMAIN}'
         ))
         if post_links:
             safe_print(f"[*] Category Hub Page detected. Processing {len(post_links)} post(s)...")

@@ -546,6 +546,57 @@ def _filter_by_relevance(query, scored_results):
     ranked.sort(key=lambda x: x[0], reverse=True)
     return [(site, url) for _, site, url in ranked]
 
+# ─── FRANCHISE ORDERING ───────────────────────────────────────
+# Franchise searches ("fast and furious") return parts jumbled (7 before 1) and
+# bury the one-pick "Collection" entry. We float collections to the very top,
+# then order the rest by detected part/season number so 1→N reads in sequence.
+# NOTE: "saga" is deliberately excluded — F9 is officially "The Fast Saga"
+# (a single film), and the Twilight films use "Saga" too. It's a title word,
+# not a reliable collection marker, so matching it caused false positives.
+_COLLECTION_RE = re.compile(
+    r'\b(collection|complete|all[\s-]*parts?|anthology|1[\s-]*[-–][\s-]*\d)\b', re.I)
+_YEAR_RANGE_RE = re.compile(r'\b(?:19|20)\d{2}\s*[-–]\s*(?:19|20)\d{2}\b')
+_ORDER_KW_RE   = re.compile(
+    r'\b(?:part|chapter|chap|vol|volume|season|episode|ep)\s*(\d{1,2})\b', re.I)
+
+def _result_title_text(site, url):
+    """Best available human title for a (site, url) result. Pluto carries the
+    real server title in its site label after ':'; everything else derives it
+    from the URL slug."""
+    if ':' in site:
+        return site.split(':', 1)[1].strip()
+    return url.rstrip('/').split('/')[-1].replace('-', ' ')
+
+def _order_number(text):
+    """Extract a franchise sequence number (part/season N) for sorting. Returns
+    9999 when none found so unnumbered items sort after numbered ones. Guards
+    against matching 4-digit years, id-hashes, and resolution tags (720p)."""
+    t = text.lower()
+    m = _ORDER_KW_RE.search(t)
+    if m:
+        return int(m.group(1))
+    # No keyword — try a bare small integer, but strip noise that looks numeric.
+    t = re.sub(r'\b(?:19|20)\d{2}\b', ' ', t)   # years
+    t = re.sub(r'\bid\d+\b', ' ', t)            # 9jaRocks id-hashes
+    t = re.sub(r'\b\d{1,4}p\b', ' ', t)         # 720p / 1080p
+    t = re.sub(r'\b\d{3,}\b', ' ', t)           # any 3+ digit run
+    nums = re.findall(r'\b(\d{1,2})\b', t)
+    return int(nums[0]) if nums else 9999
+
+def _order_results(results):
+    """Stable reorder of [(site, url)]: collections first, then ascending
+    part/season number, preserving original order within ties."""
+    def key(item):
+        site, url = item
+        text = _result_title_text(site, url)
+        # Check both the derived title AND the raw URL so collection keywords
+        # in the slug (e.g. /fast-and-furious-2001-2017-collection-id163674.html)
+        # are never missed.
+        combined = text + ' ' + url.lower()
+        is_collection = bool(_COLLECTION_RE.search(combined) or _YEAR_RANGE_RE.search(combined))
+        return (0 if is_collection else 1, _order_number(text))
+    return sorted(results, key=key)
+
 # ─── ASYNC ENGINE ─────────────────────────────────────────────
 # One aiohttp session, all sources probed concurrently, first slug-hit can
 # cancel the rest (fast mode). Search endpoints (RSS/JSON/HTML) run alongside
@@ -729,8 +780,8 @@ async def _arun(query, site_filter, fast, hint, timeout):
             tasks.append(('slug', _aprobe_slug(session, 'https://dramarain.com', dk_pat,
                           base, season_slug, year, 'DramaRain', cancel_event)))
 
-        # Search-only sources
-        if site_filter not in ('nkiri', 'dramakey'):
+        # Search-only sources — skipped in fast mode (slug-probe only)
+        if not fast and site_filter not in ('nkiri', 'dramakey'):
             tasks.append(('pluto', _asearch_pluto(session, query)))
             tasks.append(('search', _asearch_rss(
                 session, f"https://9jarocks.com/search/{quote(query)}/feed/rss2/",
@@ -787,7 +838,8 @@ async def _arun(query, site_filter, fast, hint, timeout):
             continue
         seen.add(key)
         final.append((site, url))
-    return final
+    # Collections to the top, then parts in 1→N order (was jumbled before).
+    return _order_results(final)
 
 def _ensure_async_imported():
     """Bind aiohttp/asyncio into module globals on first async search.

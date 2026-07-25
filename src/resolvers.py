@@ -231,14 +231,17 @@ class LoadedfilesResolver(BaseResolver):
         try:
             # Any loadedfiles.<tld> hash maps directly to the live loadedfiles.st.
             url = LoadedfilesResolver._to_st(url)
-            r1 = safe_get(session, url, referer='https://my9jarocks.bz/')
+            # Fast-fail: a dead loadedfiles link would otherwise burn ~5 min
+            # (safe_get's default 3x20s retries, called twice). Cap it hard —
+            # a live host answers in <10s; anything slower is effectively dead.
+            r1 = safe_get(session, url, referer='https://my9jarocks.bz/', timeout=10, retries=2)
             if not r1:
                 return None
             m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'", r1.text, re.I)
             if not m1:
                 return None
             step1 = LoadedfilesResolver._to_st(m1.group(1))
-            r2 = safe_get(session, step1, referer='https://loadedfiles.st/')
+            r2 = safe_get(session, step1, referer='https://loadedfiles.st/', timeout=10, retries=2)
             if not r2:
                 return None
             m2 = re.search(r"var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'", r2.text, re.I)
@@ -246,7 +249,7 @@ class LoadedfilesResolver(BaseResolver):
                 return None
             try:
                 step2 = LoadedfilesResolver._to_st(m2.group(1))
-                r3 = session.get(step2, timeout=20, allow_redirects=False)
+                r3 = session.get(step2, timeout=10, allow_redirects=False)
                 return r3.headers.get('location')
             except Exception as e:
                 safe_print(f"      [!] Loadedfiles redirect: {e}")
