@@ -212,14 +212,32 @@ class DownloadwellaResolver(BaseResolver):
 
 class LoadedfilesResolver(BaseResolver):
     # loadedfiles keeps switching TLDs (.st / .org / .net / …) but every host
-    # serves the same file hashes, and only .st is reliably live. Match any
-    # loadedfiles.<tld> and rewrite it to .st everywhere instead of hardcoding
-    # each new domain as it appears.
+    # serves the same file hashes. A fixed rewrite to one TLD breaks whenever
+    # that host goes offline (e.g. .st refusing connections while .net is live),
+    # so try the link's own TLD first and fall back through the other known
+    # hosts until one answers.
     _HOST = re.compile(r'loadedfiles\.[a-z0-9-]+', re.I)
+    _FALLBACK_TLDS = ('st', 'net', 'org', 'to', 'com')
 
     @classmethod
-    def _to_st(cls, text: str) -> str:
-        return cls._HOST.sub('loadedfiles.st', text)
+    def _rewrite(cls, text: str, host: str) -> str:
+        """Rewrite any loadedfiles.<tld> occurrence in text to the live host."""
+        return cls._HOST.sub(host, text)
+
+    @classmethod
+    def _to_st(cls, text: str) -> str:  # back-compat alias
+        return cls._rewrite(text, 'loadedfiles.st')
+
+    @classmethod
+    def _candidate_hosts(cls, url: str):
+        """Live-host candidates: the link's own TLD first, then known fallbacks."""
+        m = cls._HOST.search(url)
+        hosts = [m.group(0).lower()] if m else []
+        for tld in cls._FALLBACK_TLDS:
+            h = f'loadedfiles.{tld}'
+            if h not in hosts:
+                hosts.append(h)
+        return hosts
 
     @staticmethod
     def can_resolve(url: str) -> bool:
@@ -229,26 +247,29 @@ class LoadedfilesResolver(BaseResolver):
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            # Any loadedfiles.<tld> hash maps directly to the live loadedfiles.st.
-            url = LoadedfilesResolver._to_st(url)
-            # Fast-fail: a dead loadedfiles link would otherwise burn ~5 min
-            # (safe_get's default 3x20s retries, called twice). Cap it hard —
-            # a live host answers in <10s; anything slower is effectively dead.
-            r1 = safe_get(session, url, referer='https://my9jarocks.bz/', timeout=10, retries=2)
+            hosts = LoadedfilesResolver._candidate_hosts(url)
+            r1 = None
+            live_host = None
+            for host in hosts:
+                candidate = LoadedfilesResolver._rewrite(url, host)
+                r1 = safe_get(session, candidate, referer='https://my9jarocks.bz/', timeout=10, retries=1)
+                if r1:
+                    live_host = host
+                    break
             if not r1:
                 return None
             m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'", r1.text, re.I)
             if not m1:
                 return None
-            step1 = LoadedfilesResolver._to_st(m1.group(1))
-            r2 = safe_get(session, step1, referer='https://loadedfiles.st/', timeout=10, retries=2)
+            step1 = LoadedfilesResolver._rewrite(m1.group(1), live_host)
+            r2 = safe_get(session, step1, referer=f'https://{live_host}/', timeout=10, retries=2)
             if not r2:
                 return None
             m2 = re.search(r"var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'", r2.text, re.I)
             if not m2:
                 return None
             try:
-                step2 = LoadedfilesResolver._to_st(m2.group(1))
+                step2 = LoadedfilesResolver._rewrite(m2.group(1), live_host)
                 r3 = session.get(step2, timeout=10, allow_redirects=False)
                 return r3.headers.get('location')
             except Exception as e:
