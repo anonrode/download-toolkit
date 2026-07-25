@@ -53,7 +53,7 @@ def extract_naijaprey(url, session, ctx=None):
         if _stopped(ctx):
             break
         _wait(ctx)
-        ep_name = ep_url.rstrip('/').split('/')[-1]
+        ep_name = _hash_safe_name(ep_url.rstrip('/').split('/')[-1], i)
         safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
 
         # Early skip before hitting the intermediate page

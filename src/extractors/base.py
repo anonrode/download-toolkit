@@ -65,6 +65,16 @@ def _episode_label(url, link_text, fallback_index):
         return text
     return f"episode-{fallback_index}"
 
+def _hash_safe_name(ep_name, fallback_index):
+    """Guard against filename collisions when a host serves a bare-hash slug
+    (e.g. loadedfiles/downloadwella hashes) with no readable name. Without this,
+    every such episode collapses onto the same filename. Falls back to an
+    indexed name so downloads stay distinct and correctly ordered."""
+    stem = re.sub(r'\.(mkv|mp4|webm)$', '', (ep_name or '').strip(), flags=re.IGNORECASE)
+    if not stem or re.fullmatch(r'[0-9a-f]{8,}', stem, re.I):
+        return f"episode-{fallback_index}"
+    return ep_name
+
 EP_KEYWORDS = ['-e', 'episode', 's0', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9']
 
 SOCIAL_DOMAINS = [
@@ -344,6 +354,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
             ep_index += 1
             ep_name = ep_url.split('/')[-1].replace('.html', '')
             ep_name = re.sub(r'\.(mkv|mp4)$', '', ep_name, flags=re.IGNORECASE)
+            ep_name = _hash_safe_name(ep_name, ep_index)
             safe_print(f"\n[{ep_index}/{len(links)}] {ep_name}")
             done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
             if not done:
