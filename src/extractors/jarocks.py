@@ -19,6 +19,12 @@ def extract_9jarocks(url, session, ctx=None):
         for a in soup.find_all('a', href=True)
         if re.search(r'loadedfiles\.[a-z0-9-]+', a['href'], re.I)
     ))
+    # Skip links that are already error pages on the host
+    dead = [(label, href) for label, href in lf_links if 'error?e=' in href or 'errore=' in href]
+    lf_links = [(label, href) for label, href in lf_links if 'error?e=' not in href and 'errore=' not in href]
+    for _, href in dead:
+        msg = href.split('error?e=')[-1].replace('+', ' ').rstrip('.')
+        safe_print(f"  [!] File removed by host: {msg}")
     if not lf_links:
         safe_print(render_message('no_episode_links'))
         diagnose_page(soup, url, "loadedfiles links")

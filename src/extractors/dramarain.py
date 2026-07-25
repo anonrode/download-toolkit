@@ -60,6 +60,12 @@ def extract_dramarain(url, session, ctx=None):
     lf_links = list(dict.fromkeys(
         (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
         if re.search(r'loadedfiles\.[a-z0-9-]+', a['href'], re.I)))
+    # Skip links that are already error pages on the host
+    _dead = [(l, h) for l, h in lf_links if 'error?e=' in h or 'errore=' in h]
+    lf_links = [(l, h) for l, h in lf_links if 'error?e=' not in h and 'errore=' not in h]
+    for _, _h in _dead:
+        _msg = _h.split('error?e=')[-1].replace('+', ' ').rstrip('.')
+        safe_print(f"  [!] File removed by host: {_msg}")
     if lf_links:
         lf_links = _filter_by_episode_range(lf_links, ctx)
         if not lf_links:

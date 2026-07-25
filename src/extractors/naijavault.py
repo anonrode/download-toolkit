@@ -71,7 +71,16 @@ def extract_naijavault(url, session, ctx=None):
             format_a   = [(label, url)]
 
     if not format_a and not format_b and not format_c:
-        safe_print(render_message('no_episode_links'))
+        hints = []
+        if soup.find('iframe') or soup.find('embed'):
+            hints.append("page has video embeds (trailer/preview page?)")
+        body_text = soup.get_text(' ', strip=True).lower()
+        if 'coming soon' in body_text:
+            hints.append("page says 'coming soon'")
+        if hints:
+            safe_print(f"[!] No download links found — {'; '.join(hints)}")
+        else:
+            safe_print(render_message('no_episode_links'))
         diagnose_page(soup, url, "/dl-, lulacloud.com/d/ or pixeldrain.com/u/ links")
         return
 
