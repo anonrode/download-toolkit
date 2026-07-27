@@ -116,11 +116,29 @@ def extract_naijavault(url, session, ctx=None):
     # a link that's almost always dead by download time, forcing a synchronous
     # re-resolve every episode: wasted background data for zero speed gain. The
     # immediate resolve-then-download below is the correct model for this host.
-    def _resolve_and_download(ep_label, ep_name, direct):
-        """Download immediately after resolving — prevents token expiry."""
+    def _resolve_and_download(ep_label, ep_name, resolve_fn):
+        """Resolve (network-aware) then download immediately — prevents token expiry.
+
+        resolve_fn() re-runs the full resolution and returns (ep_name, direct).
+        A network drop returns (_, None); we wait for the connection to come
+        back (up to the 2-min ceiling) and retry the SAME episode instead of
+        failing it. Only a genuine miss while ONLINE is marked failed.
+        """
+        direct = None
+        while True:
+            new_name, direct = resolve_fn()
+            ep_name = new_name or ep_name
+            if direct:
+                break
+            if check_connection():
+                break                     # online but nothing resolved -> genuine miss
+            if _stopped(ctx):
+                return
+            if not wait_or_abort(ctx):    # offline: wait (may raise NetworkAbort); False if stopped
+                return
         if not direct:
-            safe_print(f"  [\u2717] All resolvers failed")
-            summary.add_failed(ep_label)
+            safe_print(f"  [✗] All resolvers failed")
+            record_episode_failure(url, name, safe_filename(f"{ep_label}.mp4"), summary, ep_label)
             return
         ext   = 'mkv' if '.mkv' in (direct + ep_name).lower() else 'mp4'
         fname = ep_name if '.' in ep_name else f"{ep_name}.{ext}"
@@ -146,10 +164,16 @@ def extract_naijavault(url, session, ctx=None):
             summary.add_skipped()
             continue
 
+        # Fetch the dl page — a dropped connection here waits for the network to
+        # return and retries rather than failing the episode outright.
         r2 = safe_get(session, dl_url, timeout=20, referer=url)
+        if not r2 and not check_connection():
+            if _stopped(ctx) or not wait_or_abort(ctx):
+                break
+            r2 = safe_get(session, dl_url, timeout=20, referer=url)
         if not r2:
-            safe_print(f"  [\u2717] Could not fetch dl page")
-            summary.add_failed(ep_label)
+            safe_print(f"  [✗] Could not fetch dl page")
+            record_episode_failure(url, name, safe_filename(f"{ep_label}.mp4"), summary, ep_label)
             continue
 
         ft_m    = re.search(r'var fileTitle\s*=\s*"([^"]+)"', r2.text)
@@ -174,47 +198,49 @@ def extract_naijavault(url, session, ctx=None):
                     break
             continue
 
-        direct = None
-        du_m   = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
-        if du_m:
-            cdn_url = du_m.group(1)
-            if 'vikingfile.com' in cdn_url:
-                direct = ResolverRegistry.resolve(cdn_url, session)
-                if not direct:
-                    lc = re.search(r'https?://(?:www\.)?lulacloud\.com/d/\S+', r2.text)
-                    if lc:
-                        direct = ResolverRegistry.resolve(lc.group(0).rstrip('.,;)\"\''), session)
-            elif 'lulacloud.com' in cdn_url:
-                direct = ResolverRegistry.resolve(cdn_url, session)
-                if not direct:
-                    vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
-                    if vf:
-                        direct = ResolverRegistry.resolve(vf.group(0).rstrip('.,;)\"\''), session)
-            else:
-                direct = cdn_url
+        # Resolver chain wrapped in a closure so _resolve_and_download can re-run
+        # it after waiting out a network drop. The page HTML (r2.text) is already
+        # cached; only the CDN token-minting step needs the network.
+        def _resolve_A(_text=r2.text, _ep_name=ep_name):
+            direct = None
+            du_m   = re.search(r'var downloadURL\s*=\s*"([^"]+)"', _text)
+            if du_m:
+                cdn_url = du_m.group(1)
+                if 'vikingfile.com' in cdn_url:
+                    direct = ResolverRegistry.resolve(cdn_url, session)
+                    if not direct:
+                        lc = re.search(r'https?://(?:www\.)?lulacloud\.com/d/\S+', _text)
+                        if lc:
+                            direct = ResolverRegistry.resolve(lc.group(0).rstrip('.,;)\"\''), session)
+                elif 'lulacloud.com' in cdn_url:
+                    direct = ResolverRegistry.resolve(cdn_url, session)
+                    if not direct:
+                        vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', _text)
+                        if vf:
+                            direct = ResolverRegistry.resolve(vf.group(0).rstrip('.,;)\"\''), session)
+                else:
+                    direct = cdn_url
+            if not direct:
+                vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', _text)
+                if vf:
+                    direct = ResolverRegistry.resolve(vf.group(0).rstrip('.,;)\"\''), session)
+            if not direct:
+                lc = re.search(r'https?://(?:www\.)?lulacloud\.com/d/\S+', _text)
+                if lc:
+                    direct = ResolverRegistry.resolve(lc.group(0).rstrip('.,;)\"\''), session)
+            if not direct:
+                nj_m = re.search(r"https?://[^ \t]+nj_download=[^ \t<>]+", _text)
+                if nj_m and 'naijavault.com' in _text:
+                    try:
+                        rr  = session.get(nj_m.group(0).rstrip('.,;)'), timeout=15, allow_redirects=False)
+                        cdn = rr.headers.get('location')
+                        if cdn and cdn.startswith('http'):
+                            direct = cdn
+                    except Exception as e:
+                        safe_print(f"  [!] nj_download failed: {e}")
+            return _ep_name, direct
 
-        if not direct:
-            vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
-            if vf:
-                direct = ResolverRegistry.resolve(vf.group(0).rstrip('.,;)\"\''), session)
-
-        if not direct:
-            lc = re.search(r'https?://(?:www\.)?lulacloud\.com/d/\S+', r2.text)
-            if lc:
-                direct = ResolverRegistry.resolve(lc.group(0).rstrip('.,;)\"\''), session)
-
-        if not direct:
-            nj_m = re.search(r"https?://[^ \t]+nj_download=[^ \t<>]+", r2.text)
-            if nj_m and 'naijavault.com' in r2.text:
-                try:
-                    rr  = session.get(nj_m.group(0).rstrip('.,;)'), timeout=15, allow_redirects=False)
-                    cdn = rr.headers.get('location')
-                    if cdn and cdn.startswith('http'):
-                        direct = cdn
-                except Exception as e:
-                    safe_print(f"  [!] nj_download failed: {e}")
-
-        _resolve_and_download(ep_label, ep_name, direct)
+        _resolve_and_download(ep_label, ep_name, _resolve_A)
 
     # ── Process Format B (lulacloud direct) — resolve & download immediately ──
     if not zip_hit:
@@ -241,29 +267,31 @@ def extract_naijavault(url, session, ctx=None):
                 summary.add_skipped()
                 continue
 
-            direct = ResolverRegistry.resolve(lc_url, session)
-            if not direct:
-                r2 = safe_get(session, lc_url, timeout=20)
-                if r2:
-                    du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
-                    if du_m:
-                        cdn = du_m.group(1)
-                        if 'vikingfile.com' in cdn:
-                            direct = ResolverRegistry.resolve(cdn, session)
-                        elif 'lulacloud.com' in cdn:
-                            direct = ResolverRegistry.resolve(cdn, session)
-                        else:
-                            direct = cdn
-                    if not direct:
-                        vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
-                        if vf:
-                            direct = ResolverRegistry.resolve(vf.group(0).rstrip('.,;)\"\''), session)
-                    if not direct:
-                        fv = re.search(r'https?://cdn\.filevault\.com\.ng/[^\s"\'<>]+', r2.text)
-                        if fv:
-                            direct = fv.group(0)
+            def _resolve_B(_lc_url=lc_url, _ep_name=ep_name):
+                direct = ResolverRegistry.resolve(_lc_url, session)
+                if not direct:
+                    r2 = safe_get(session, _lc_url, timeout=20)
+                    if r2:
+                        du_m = re.search(r'var downloadURL\s*=\s*"([^"]+)"', r2.text)
+                        if du_m:
+                            cdn = du_m.group(1)
+                            if 'vikingfile.com' in cdn:
+                                direct = ResolverRegistry.resolve(cdn, session)
+                            elif 'lulacloud.com' in cdn:
+                                direct = ResolverRegistry.resolve(cdn, session)
+                            else:
+                                direct = cdn
+                        if not direct:
+                            vf = re.search(r'https?://(?:www\.)?vikingfile\.com/\S+', r2.text)
+                            if vf:
+                                direct = ResolverRegistry.resolve(vf.group(0).rstrip('.,;)\"\''), session)
+                        if not direct:
+                            fv = re.search(r'https?://cdn\.filevault\.com\.ng/[^\s"\'<>]+', r2.text)
+                            if fv:
+                                direct = fv.group(0)
+                return _ep_name, direct
 
-            _resolve_and_download(ep_label, ep_name, direct)
+            _resolve_and_download(ep_label, ep_name, _resolve_B)
 
     # ── Process Format C (pixeldrain.com/u/ direct) ──
     if not zip_hit:
@@ -292,8 +320,10 @@ def extract_naijavault(url, session, ctx=None):
                 summary.add_skipped()
                 continue
 
-            direct = ResolverRegistry.resolve(pd_url, session)
-            _resolve_and_download(ep_label, ep_name, direct)
+            def _resolve_C(_pd_url=pd_url, _ep_name=ep_name):
+                return _ep_name, ResolverRegistry.resolve(_pd_url, session)
+
+            _resolve_and_download(ep_label, ep_name, _resolve_C)
 
 
     if summary.failed == 0 and not _stopped(ctx):

@@ -2041,7 +2041,18 @@ def download_with_aria2c(url, folder, filename, summary,
                 progress.fail()
                 ui_emit('download_failed', debug=f'aria2c failed (code {code})')
                 if attempt < retries - 1 and not _is_stopped(stop_flag):
-                    url = _try_reresolve(source_url, url, attempt)
+                    if not check_connection():
+                        # DNS/network down — wait for it to come back, then
+                        # retry the SAME url so aria2c resumes the partial file.
+                        # Re-resolving a fresh token while offline is pointless
+                        # and was the cause of 'errorCode=19 -> marked failed'.
+                        wait_for_network(stop_flag)
+                        if _is_stopped(stop_flag):
+                            _cleanup_session_file(session_file)
+                            summary.add_failed(filename)
+                            return False
+                    else:
+                        url = _try_reresolve(source_url, url, attempt)
                     time.sleep(3)
                     continue
                 _cleanup_session_file(session_file)

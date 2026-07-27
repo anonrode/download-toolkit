@@ -60,7 +60,11 @@ def extract_nkiri(url, session, ctx=None):
 
             if len(to_process) == 1 or batch_size == 1:
                 ep_url, ep_name = to_process[0]
-                direct = ResolverRegistry.resolve(ep_url, session)
+                # Network-aware resolve: a dropped connection waits (up to the
+                # 2-min ceiling) and retries the SAME link instead of failing it.
+                direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
+                if _stopped(ctx):
+                    break
                 if direct:
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
                     download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
@@ -71,7 +75,7 @@ def extract_nkiri(url, session, ctx=None):
                                   source_url=ep_url)
                 else:
                     safe_print(f"  [X] Could not extract link")
-                    summary.add_failed(ep_name)
+                    record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
             else:
                 from concurrent.futures import ThreadPoolExecutor, as_completed
                 safe_print(f"\n  [*] Resolving {len(to_process)} link(s)...")
@@ -92,12 +96,23 @@ def extract_nkiri(url, session, ctx=None):
 
                 items = []
                 for (ep_url, ep_name), direct in resolved.items():
+                    if not direct:
+                        # A None here may be a genuine dead link OR the whole
+                        # batch hit a network drop at once. Re-resolve with the
+                        # network-aware path: it waits for the connection to come
+                        # back and retries, so a transient outage never fails a
+                        # link that would resolve fine when online.
+                        direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
+                    if _stopped(ctx):
+                        break
                     if direct:
                         ext = 'mkv' if '.mkv' in direct else 'mp4'
                         items.append((direct, safe_filename(f"{ep_name}.{ext}"), ep_url))
                     else:
                         safe_print(f"  [X] Could not extract link: {ep_name}")
-                        summary.add_failed(ep_name)
+                        record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
+                if _stopped(ctx):
+                    break
 
                 if items:
                     per_thread_bw = (bw // len(items)) if bw else 0
@@ -136,7 +151,9 @@ def extract_nkiri(url, session, ctx=None):
                 if not ep_url:
                     retry_summary.add_failed(failed_fname)
                     continue
-                direct = ResolverRegistry.resolve(ep_url, session)
+                direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
+                if _stopped(ctx):
+                    break
                 if direct:
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
                     download_file(direct, folder, safe_filename(f"{stem}.{ext}"),

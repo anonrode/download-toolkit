@@ -130,11 +130,21 @@ def extract_naijaprey(url, session, ctx=None):
         if not direct or not _cdn_alive(direct):
             if direct:
                 safe_print(f"  [*] CDN link expired - re-resolving...")
-            ws2, direct = _resolve_ep(ep_url)
-            ws_url = ws2 or ws_url
+            # _resolve_ep returns (ws_url, direct); gate the network-aware retry
+            # on `direct` while capturing the paired ws_url via the holder.
+            _holder = {}
+            def _rf(u):
+                ws2, d = _resolve_ep(u)
+                if d:
+                    _holder['ws'] = ws2
+                return d
+            direct = resolve_with_retry(_rf, ep_url, ctx)
+            ws_url = _holder.get('ws') or ws_url
             if not direct:
+                if _stopped(ctx):
+                    break
                 safe_print(f"  [X] Could not resolve download link")
-                summary.add_failed(ep_name)
+                record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
                 continue
 
         ext = 'mkv' if '.mkv' in direct else 'mp4'

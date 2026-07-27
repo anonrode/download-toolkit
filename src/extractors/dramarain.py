@@ -83,10 +83,12 @@ def extract_dramarain(url, session, ctx=None):
             if not direct or not _cdn_alive(direct):
                 if direct:
                     safe_print(f"  [*] CDN link expired - re-resolving...")
-                direct = ResolverRegistry.resolve(ep_url, session)
+                direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
                 if not direct:
+                    if _stopped(ctx):
+                        break
                     safe_print(f"  [X] Could not resolve link")
-                    summary.add_failed(fbase)
+                    record_episode_failure(url, name, safe_filename(f"{fbase}.mp4"), summary, fbase)
                     continue
             ext = 'mkv' if '.mkv' in direct else 'mp4'
             download_file(direct, folder, safe_filename(f"{fbase}.{ext}"), summary,
