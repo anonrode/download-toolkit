@@ -164,16 +164,22 @@ def extract_naijavault(url, session, ctx=None):
             summary.add_skipped()
             continue
 
-        # Fetch the dl page — a dropped connection here waits for the network to
-        # return and retries rather than failing the episode outright.
-        r2 = safe_get(session, dl_url, timeout=20, referer=url)
-        if not r2 and not check_connection():
+        # Fetch the dl page — a dropped connection waits for the network to come
+        # back and retries the SAME page (up to the 2-min ceiling) instead of
+        # failing the episode. Only a failure while ONLINE (server down / dead
+        # page) is marked failed.
+        r2 = None
+        while True:
+            r2 = safe_get(session, dl_url, timeout=20, referer=url)
+            if r2:
+                break
+            if check_connection():
+                safe_print(f"  [✗] Could not fetch dl page")
+                record_episode_failure(url, name, safe_filename(f"{ep_label}.mp4"), summary, ep_label)
+                break
             if _stopped(ctx) or not wait_or_abort(ctx):
                 break
-            r2 = safe_get(session, dl_url, timeout=20, referer=url)
         if not r2:
-            safe_print(f"  [✗] Could not fetch dl page")
-            record_episode_failure(url, name, safe_filename(f"{ep_label}.mp4"), summary, ep_label)
             continue
 
         ft_m    = re.search(r'var fileTitle\s*=\s*"([^"]+)"', r2.text)
