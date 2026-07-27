@@ -107,10 +107,12 @@ def extract_9jarocks(url, session, ctx=None):
         if not direct or not _cdn_alive(direct):
             if direct:
                 safe_print(f"  [*] CDN link expired - re-resolving...")
-            direct = ResolverRegistry.resolve(lf_url, session)
+            direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), lf_url, ctx)
             if not direct:
+                if _stopped(ctx):
+                    break
                 safe_print(f"  [X] Could not extract: {base_fname}")
-                summary.add_failed(base_fname)
+                record_episode_failure(url, name, base_fname + '.mp4', summary, base_fname)
                 continue
 
         ext = 'mkv' if '.mkv' in direct else 'mp4'

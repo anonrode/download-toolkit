@@ -772,9 +772,40 @@ def mark_episode_failed(series_url, series_name, ep_filename):
         state[key]['current'] = None
         _save_resume_state_unlocked(state)
 
-def mark_series_waiting_for_network(series_url, series_name='Queued download'):
-    """Keep an unresolved series visible in `resume` until its link can be retried."""
-    mark_episode_current(series_url, series_name, 'Waiting for network')
+def _title_from_url(url):
+    """Best-effort readable series title from a URL, so a series that fails
+    before we ever scrape its real name still shows something meaningful in
+    `resume` (e.g. '.../series/303517/sleepy-hollow' -> 'Sleepy Hollow')
+    instead of a generic placeholder."""
+    try:
+        parts = url.split('#')[0].split('?')[0].rstrip('/').split('/')
+        seg = parts[-1] if parts else ''
+        if seg.isdigit() and len(parts) >= 2:   # trailing numeric id -> use the slug before it
+            seg = parts[-2]
+        seg = re.sub(r'[-_]+', ' ', seg).strip()
+        return seg.title() if seg else 'Download'
+    except Exception:
+        return 'Download'
+
+def mark_series_waiting_for_network(series_url, series_name=None):
+    """Register a series in resume state at the start of extraction so it stays
+    visible in `resume` even if it fails before a single episode is attempted.
+
+    This NEVER overwrites a real name already on the entry and NEVER plants a
+    fake 'current' episode. The old behaviour set current='Waiting for network'
+    with name='Queued download', which is exactly why a batch where every
+    resolve failed showed up in `resume` as a meaningless
+    '[1] Queued download / Waiting for network' placeholder instead of the real
+    series and its failed episodes. A flaky connection is a pause, not an
+    episode."""
+    with RESUME_LOCK:
+        state = _load_resume_state_unlocked()
+        if series_url not in state:
+            state[series_url] = {
+                'name': series_name or _title_from_url(series_url),
+                'done': [], 'failed': [], 'current': None,
+            }
+            _save_resume_state_unlocked(state)
 
 def mark_series_complete(series_url):
     with RESUME_LOCK:
@@ -820,10 +851,13 @@ def show_resume_list():
         ui_emit('no_paused_downloads')
         return False
 
-    # Filter out fully completed series -- those with no current episode and no failures
+    # Everything left in resume state is an unfinished series -- completed ones
+    # are deleted by mark_series_complete(). Show any entry that recorded real
+    # progress: episodes done, episodes failed, or one mid-download. (A bare
+    # stub with nothing recorded is hidden as noise.)
     active = {
         url: inf for url, inf in state.items()
-        if inf.get('current') or inf.get('failed')
+        if inf.get('done') or inf.get('failed') or inf.get('current')
     }
 
     if not active:
@@ -831,15 +865,20 @@ def show_resume_list():
         return False
 
     print(f"\n{'='*50}")
-    print(f"  PAUSED DOWNLOADS")
+    print(f"  PAUSED / UNFINISHED DOWNLOADS")
     print(f"{'='*50}")
     for i, (url, inf) in enumerate(active.items(), 1):
-        name    = inf.get('name', 'Unknown')
+        name    = inf.get('name') or 'Unknown'
         done    = len(inf.get('done', []))
+        failed  = len(inf.get('failed', []))
         current = inf.get('current', None)
-        status  = f'paused at: {current}' if current else f'{done} episode(s) done'
+        bits = [f'{done} done']
+        if failed:
+            bits.append(f'{failed} failed')
+        if current:
+            bits.append(f'downloading {current}')
         print(f"  [{i}] {name}")
-        print(f"       {status}")
+        print(f"       {' · '.join(bits)}")
         print(f"       {url[:60]}")
     print(f"{'='*50}")
     return list(active.items())

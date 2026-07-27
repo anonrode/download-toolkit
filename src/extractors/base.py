@@ -32,7 +32,7 @@ from ..downloader import (
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
     _notify_start, register_process, unregister_process, finish_process,
     update_status, _drain_futures_interruptible, make_session,
-    mark_episode_failed,
+    mark_episode_failed, check_connection, wait_for_network,
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────
@@ -43,7 +43,7 @@ DRAMARAIN_DOMAIN  = 'dramarain.com'
 DRAMAKEY_CC       = 'dramakey.cc'
 JAROCKS_DOMAIN    = 'my9jarocks.bz'  # migrated from dead 9jarocks.net (2026-07)
 NAIJAPREY_DOMAIN  = 'naijaprey.tv'
-MYASIANTV_DOMAIN  = 'myasiantv9.com'
+MYASIANTV_DOMAIN  = 'myasiantv9.com.ro'  # migrated from parked myasiantv9.com (2026-07)
 NAIJAVAULT_DOMAIN = 'naijavault.com'
 ANITAKU_DOMAIN    = 'anitaku.com.ro'
 PLUTO_DOMAIN      = 'plutomovies.com'
@@ -178,6 +178,86 @@ def _filter_by_episode_range(items, ctx):
     filtered = [item for idx, item in enumerate(items, 1) if idx in selected]
     safe_print(f"[*] Episode range selected: {len(filtered)} of {len(items)}")
     return filtered
+
+# How long a resolve will wait out a dead connection before giving up and
+# pausing the whole series. Tuned short on purpose: a flaky mobile link usually
+# recovers within seconds, so 2 min is plenty to ride out a blip while still
+# pausing promptly (and cleanly, everything resumable) on a real outage.
+NETWORK_ABORT_SECONDS = 120
+
+class NetworkAbort(Exception):
+    """Raised when the network stays down past NETWORK_ABORT_SECONDS during a
+    resolve. Propagates up to process_link_queue, which pauses the series
+    cleanly instead of letting the loop grind every remaining episode into a
+    failure over a connection that isn't coming back right now."""
+    pass
+
+def wait_or_abort(ctx):
+    """Block (interruptibly) until the network returns, polling every 3s.
+
+    Returns True once back online, False if the user pressed stop. Raises
+    NetworkAbort once NETWORK_ABORT_SECONDS elapse still offline, so the caller
+    can stop cleanly rather than hang forever."""
+    safe_print(f"  [~] Network down - waiting up to {NETWORK_ABORT_SECONDS // 60} min for it to come back...")
+    waited = 0
+    while waited < NETWORK_ABORT_SECONDS:
+        if _stopped(ctx):
+            return False
+        time.sleep(3)
+        waited += 3
+        if check_connection():
+            safe_print("  [~] Network back - resuming")
+            return True
+    raise NetworkAbort()
+
+def resolve_with_retry(resolve_fn, ep_url, ctx):
+    """Resolve one episode, riding out a flaky connection instead of failing it.
+
+    `resolve_fn(ep_url)` returns a direct url or None. A None is ambiguous: the
+    source may be genuinely gone, OR the device just lost signal mid-resolve
+    (safe_get swallows the network error and also returns None). We disambiguate
+    with a connectivity probe:
+
+      * link found          -> return it.
+      * None + network UP   -> a real miss. Return None so the caller records a
+                               permanent failure and advances.
+      * None + network DOWN -> a transient drop. Wait for the network (up to the
+                               NETWORK_ABORT_SECONDS ceiling), then retry the
+                               SAME episode. Nothing is marked failed -- one
+                               outage must never fail a whole batch.
+      * outage > ceiling    -> raise NetworkAbort so the WHOLE series pauses
+                               cleanly (caught in process_link_queue). Everything
+                               stays resumable; we don't grind the rest of the
+                               batch into failures over a dead connection.
+      * user pressed stop   -> return None (caller's stop check breaks the loop;
+                               the series stays resumable).
+
+    This is what turns 'network blipped -> 51 episodes failed' into 'waited,
+    then downloaded all 51' -- and 'network died -> paused cleanly, resume later'.
+    """
+    while True:
+        if _stopped(ctx):
+            return None
+        direct = resolve_fn(ep_url)
+        if direct:
+            return direct
+        if check_connection():
+            return None                    # online but no source -> genuine miss
+        if not wait_or_abort(ctx):         # offline: wait (may raise NetworkAbort); False if stopped
+            return None
+        # network came back -> loop and retry the same episode
+
+def record_episode_failure(series_url, series_name, ep_filename, summary, ep_label):
+    """Record a *permanent* episode failure in both the in-memory summary and
+    the persistent resume state, so it survives an app exit and shows up under
+    the series in `resume`.
+
+    Several extractors (plutomovies, naijaprey, dramarain, ...) previously only
+    called summary.add_failed(): those failures lived in memory and vanished on
+    exit, leaving `resume` with nothing but the start-of-run placeholder."""
+    summary.add_failed(ep_label)
+    if series_url:
+        mark_episode_failed(series_url, series_name, ep_filename)
 
 def diagnose_page(soup, url, expected_pattern=None):
     lines = [
@@ -370,7 +450,7 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
 
         if len(to_process) == 1 or batch_size == 1:
             ep_url, ep_name = to_process[0]
-            direct = ResolverRegistry.resolve(ep_url, session)
+            direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
             if direct:
                 ext   = 'mkv' if '.mkv' in direct else 'mp4'
                 fname = safe_filename(f"{ep_name}.{ext}")
@@ -380,10 +460,9 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
                               current_process=cur_proc,
                               stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
                               source_url=ep_url)
-            else:
+            elif not _stopped(ctx):
                 safe_print(render_message('no_download_link'))
-                summary.add_failed(ep_name)
-                mark_episode_failed(url, name, safe_filename(f"{ep_name}.mp4"))
+                record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -422,13 +501,18 @@ def _extract_downloadwella_site(url, session, ctx, site_label, name_cleaner):
 
             items = []
             for (ep_url, ep_name), direct in resolved.items():
+                if not direct and not _stopped(ctx):
+                    # A parallel worker's resolve can come back empty just
+                    # because the net blipped for that thread. Give it one
+                    # network-aware retry (waits out an outage / aborts cleanly
+                    # past the ceiling) before calling it a real failure.
+                    direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
                 if direct:
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
                     items.append((direct, safe_filename(f"{ep_name}.{ext}"), ep_name, ep_url))
-                else:
+                elif not _stopped(ctx):
                     safe_print(f"{render_message('no_download_link')} ({ep_name})")
-                    summary.add_failed(ep_name)
-                    mark_episode_failed(url, name, safe_filename(f"{ep_name}.mp4"))
+                    record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
 
             if items:
                 per_thread_bw = (bw // len(items)) if bw else 0

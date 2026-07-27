@@ -110,6 +110,10 @@ def process_link_queue(links, session, ctx=None):
                 outcomes.append({'url': url, 'status': 'success'})
             else:
                 outcomes.append({'url': url, 'status': 'failed'})
+        except NetworkAbort:
+            safe_print(f"\n[!] Network down for {NETWORK_ABORT_SECONDS // 60} min - pausing. Nothing lost. Type 'resume' when you're back.")
+            update_status(status='Paused', current=url[:80])
+            outcomes.append({'url': url, 'status': 'paused'})
         except Exception as e:
             safe_print(f"[!] Extractor Error: {e}")
             import traceback

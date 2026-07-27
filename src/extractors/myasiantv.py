@@ -53,7 +53,11 @@ def extract_myasiantv(url, session, ctx=None):
         if r is None:
             return None
         soup   = BeautifulSoup(r.text, 'html.parser')
-        iframe = soup.find('iframe', src=re.compile(r'vidbasic|vidmoly')) or soup.find('iframe', src=True)
+        # Prefer a known player host; the current .com.ro layout serves vidb.top
+        # (vidbasic) and kissasian9.ro embeds. Fall back to the first iframe so a
+        # new host still gets a resolve attempt rather than a hard failure.
+        iframe = (soup.find('iframe', src=re.compile(r'vidbasic|vidb\.|kissasian|vidmoly'))
+                  or soup.find('iframe', src=True))
         if not iframe:
             return None
         src = iframe.get('src', '')
@@ -125,10 +129,12 @@ def extract_myasiantv(url, session, ctx=None):
         if not direct or not _cdn_alive(direct, ep_url):
             if direct:
                 safe_print(f"  [*] Link expired - re-resolving...")
-            direct = _resolve_ep(ep_url)
+            direct = resolve_with_retry(_resolve_ep, ep_url, ctx)
             if not direct:
+                if _stopped(ctx):
+                    break
                 safe_print(f"  [X] Could not extract video")
-                summary.add_failed(ep_name)
+                record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
                 continue
 
         ext = 'mkv' if '.mkv' in direct.lower() else 'mp4'

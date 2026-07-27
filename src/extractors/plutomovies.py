@@ -188,22 +188,37 @@ def extract_plutomovies(url, session, ctx=None):
                 summary.add_skipped()
                 continue
 
-            if not dl_link:
-                safe_print(f"  [X] Could not fetch episode page")
-                summary.add_failed(ep_name)
-                continue
-            if not direct:
-                safe_print(f"  [X] Could not resolve download link")
-                summary.add_failed(ep_name)
-                continue
+            # If the prefetch came back empty, disambiguate a dead source from a
+            # dropped connection: on a network outage, wait and re-resolve the
+            # SAME episode instead of failing it -- one blip must not fail the
+            # whole batch. Only a genuine miss while online counts as failed.
+            if not dl_link or not direct:
+                while not _stopped(ctx):
+                    dl_link, direct = _resolve_ep(ep_url)
+                    if (dl_link and direct) or check_connection():
+                        break
+                    if not wait_or_abort(ctx):   # may raise NetworkAbort -> series pauses cleanly
+                        break
+                if _stopped(ctx):
+                    break
+                if not dl_link:
+                    safe_print(f"  [X] Could not fetch episode page")
+                    record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
+                    continue
+                if not direct:
+                    safe_print(f"  [X] Could not resolve download link")
+                    record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
+                    continue
 
             # HEAD check — re-resolve if token expired
             if not _cdn_alive(direct):
                 safe_print(f"  [*] CDN token expired - re-resolving...")
                 direct = ResolverRegistry.resolve(dl_link, session)
                 if not direct:
+                    if _stopped(ctx):
+                        break
                     safe_print(f"  [X] Re-resolve failed")
-                    summary.add_failed(ep_name)
+                    record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
                     continue
 
             ext = 'mkv' if 'mkv' in direct.lower() else 'mp4'
