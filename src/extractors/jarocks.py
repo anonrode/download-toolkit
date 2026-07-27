@@ -97,14 +97,16 @@ def extract_9jarocks(url, session, ctx=None):
         if i < len(work):
             prefetcher.prefetch(work[i][1])
 
-        if not direct:
-            safe_print(f"  [X] Could not extract: {base_fname}")
-            summary.add_failed(base_fname)
-            continue
-
-        # Token may have expired while the previous episode downloaded.
-        if not _cdn_alive(direct):
-            safe_print(f"  [*] CDN link expired - re-resolving...")
+        # Prefetch is an optimization, not the source of truth. If it came back
+        # empty (usually a transient network blip in the background thread — the
+        # resolver's own retry runs there but its result is discarded) or the
+        # token aged out during the previous download, resolve fresh here. This
+        # synchronous path runs the resolver's network-aware retry, so a dropped
+        # connection waits and recovers instead of failing every remaining
+        # episode at once — the regression that turned one blip into 59 fails.
+        if not direct or not _cdn_alive(direct):
+            if direct:
+                safe_print(f"  [*] CDN link expired - re-resolving...")
             direct = ResolverRegistry.resolve(lf_url, session)
             if not direct:
                 safe_print(f"  [X] Could not extract: {base_fname}")

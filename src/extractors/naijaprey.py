@@ -122,14 +122,14 @@ def extract_naijaprey(url, session, ctx=None):
         if i < len(work):
             prefetcher.prefetch(work[i][1])
 
-        if not direct:
-            safe_print(f"  [X] Could not resolve download link")
-            summary.add_failed(ep_name)
-            continue
-
-        # Token may have expired while the previous episode downloaded.
-        if not _cdn_alive(direct):
-            safe_print(f"  [*] CDN link expired - re-resolving...")
+        # Prefetch is an optimization, not the source of truth. If it came back
+        # empty (usually a transient network blip in the background thread) or
+        # the token aged out during the previous download, resolve fresh here so
+        # the resolver's network-aware retry can ride out a dropped connection
+        # instead of failing every remaining episode at once.
+        if not direct or not _cdn_alive(direct):
+            if direct:
+                safe_print(f"  [*] CDN link expired - re-resolving...")
             ws2, direct = _resolve_ep(ep_url)
             ws_url = ws2 or ws_url
             if not direct:

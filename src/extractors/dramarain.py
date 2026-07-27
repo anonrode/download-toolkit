@@ -74,12 +74,15 @@ def extract_dramarain(url, session, ctx=None):
             direct = prefetcher.get(timeout=30)
             if i < len(work):
                 prefetcher.prefetch(work[i][1])
-            if not direct:
-                safe_print(f"  [X] Could not resolve link")
-                summary.add_failed(fbase)
-                continue
-            if not _cdn_alive(direct):
-                safe_print(f"  [*] CDN link expired - re-resolving...")
+            # Prefetch is an optimization, not the source of truth. If it came
+            # back empty (usually a transient network blip in the background
+            # thread) or the token aged out during the previous download,
+            # resolve fresh here so the resolver's network-aware retry can ride
+            # out a dropped connection instead of failing every remaining
+            # episode at once.
+            if not direct or not _cdn_alive(direct):
+                if direct:
+                    safe_print(f"  [*] CDN link expired - re-resolving...")
                 direct = ResolverRegistry.resolve(ep_url, session)
                 if not direct:
                     safe_print(f"  [X] Could not resolve link")
