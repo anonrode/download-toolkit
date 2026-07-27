@@ -126,7 +126,7 @@ def extract_myasiantv(url, session, ctx=None):
         # the token aged out during the previous download, resolve fresh here so
         # the resolver's network-aware retry can ride out a dropped connection
         # instead of failing every remaining episode at once.
-        if not direct or not _cdn_alive(direct, ep_url):
+        if not direct or (not is_streaming_link(direct) and not _cdn_alive(direct, ep_url)):
             if direct:
                 safe_print(f"  [*] Link expired - re-resolving...")
             direct = resolve_with_retry(_resolve_ep, ep_url, ctx)
