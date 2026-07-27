@@ -1207,6 +1207,33 @@ def make_session():
         import requests
         s = requests.Session()
         s.headers['User-Agent'] = UA_DESKTOP
+        # Mount a urllib3 Retry adapter so transient socket-level failures
+        # (connection resets, DNS blips, 429/5xx) are retried with backoff
+        # BEFORE they surface as exceptions, and reuse pooled keep-alive
+        # connections across requests. Best-effort: skip if urllib3 layout
+        # differs on this platform.
+        try:
+            from requests.adapters import HTTPAdapter
+            try:
+                from urllib3.util.retry import Retry
+            except ImportError:
+                from urllib3.util import Retry
+            retry_kw = dict(
+                total=3, connect=3, read=3,
+                backoff_factor=0.5,
+                status_forcelist=(429, 500, 502, 503, 504),
+                raise_on_status=False,
+            )
+            try:
+                retry = Retry(allowed_methods=frozenset(['GET', 'HEAD']), **retry_kw)
+            except TypeError:
+                # urllib3 < 1.26 uses the older method_whitelist name.
+                retry = Retry(method_whitelist=frozenset(['GET', 'HEAD']), **retry_kw)
+            adapter = HTTPAdapter(max_retries=retry, pool_connections=15, pool_maxsize=15)
+            s.mount('http://', adapter)
+            s.mount('https://', adapter)
+        except Exception:
+            pass
         return s
 
 # ─── TOOL INSTALLERS ──────────────────────────────────────────

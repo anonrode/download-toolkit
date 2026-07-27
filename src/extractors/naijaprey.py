@@ -49,49 +49,101 @@ def extract_naijaprey(url, session, ctx=None):
     _notify_start(name, len(ep_links))
     summary = DownloadSummary()
 
-    for i, ep_url in enumerate(ep_links, 1):
-        if _stopped(ctx):
-            break
-        _wait(ctx)
-        ep_name = _hash_safe_name(ep_url.rstrip('/').split('/')[-1], i)
-        safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
+    def _resolve_ep(ep_url):
+        """Full resolve chain for one episode (runs in the prefetch thread):
+        fetch the intermediate page, follow the optional 2-hop 'Proceed to
+        Download' link, find the wildshare link and resolve it to a direct CDN
+        url. Returns (ws_url, direct) or (None, None)."""
+        try:
+            r2 = safe_get(session, ep_url, referer=f'https://www.{NAIJAPREY_DOMAIN}/')
+            if not r2:
+                return None, None
+            soup2  = BeautifulSoup(r2.text, 'html.parser')
+            ws_url = next((a['href'] for a in soup2.find_all('a', href=True)
+                           if 'wildshare.net' in a['href']), None)
+            # Two-hop: some pages show a "Proceed to Download Page" link
+            # to a /d/ path instead of a direct wildshare link.
+            if not ws_url:
+                hop2 = next((a['href'] for a in soup2.find_all('a', href=True)
+                             if 'np-downloader.com/d/' in a['href']), None)
+                if hop2:
+                    r3 = safe_get(session, hop2, referer=ep_url)
+                    if r3:
+                        soup3 = BeautifulSoup(r3.text, 'html.parser')
+                        ws_url = next((a['href'] for a in soup3.find_all('a', href=True)
+                                       if 'wildshare.net' in a['href']), None)
+            if not ws_url:
+                return None, None
+            return ws_url, ResolverRegistry.resolve(ws_url, session)
+        except Exception:
+            return None, None
 
-        # Early skip before hitting the intermediate page
+    def _cdn_alive(cdn_url):
+        """Ranged GET to confirm the resolved CDN link is still live before
+        download — the link was resolved one episode ago while the previous
+        file downloaded, so its token may have aged out."""
+        try:
+            r = session.get(cdn_url, timeout=5, allow_redirects=True,
+                            headers={'Range': 'bytes=0-0'})
+            return r.status_code in (200, 206)
+        except Exception:
+            return False
+
+    # Build the work-list first — skip checks are local (disk + resume state, no
+    # network), so the prefetcher never wastes a full 2-hop resolve chain on an
+    # episode we'd only skip.
+    work = []
+    for i, ep_url in enumerate(ep_links, 1):
+        ep_name = _hash_safe_name(ep_url.rstrip('/').split('/')[-1], i)
         done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
         if not done:
             done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
         if done:
+            safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
             safe_print(render_message('already_saved'))
             summary.add_skipped()
             continue
+        work.append((ep_name, ep_url))
 
-        try:
-            r2 = safe_get(session, ep_url, referer=f'https://www.{NAIJAPREY_DOMAIN}/')
-            if not r2:
+    # Prefetch each episode's resolve chain in the background while the current
+    # one downloads. get() runs for every item before any failure branch, so
+    # the prefetch queue stays aligned with the loop.
+    prefetcher = Prefetcher(_resolve_ep)
+    if work:
+        prefetcher.prefetch(work[0][1])
+
+    for i, (ep_name, ep_url) in enumerate(work, 1):
+        if _stopped(ctx):
+            break
+        _wait(ctx)
+        safe_print(f"\n[{i}/{len(work)}] {ep_name}")
+
+        ws_url, direct = prefetcher.get(timeout=30)
+        if i < len(work):
+            prefetcher.prefetch(work[i][1])
+
+        if not direct:
+            safe_print(f"  [X] Could not resolve download link")
+            summary.add_failed(ep_name)
+            continue
+
+        # Token may have expired while the previous episode downloaded.
+        if not _cdn_alive(direct):
+            safe_print(f"  [*] CDN link expired - re-resolving...")
+            ws2, direct = _resolve_ep(ep_url)
+            ws_url = ws2 or ws_url
+            if not direct:
+                safe_print(f"  [X] Could not resolve download link")
                 summary.add_failed(ep_name)
                 continue
-            soup2  = BeautifulSoup(r2.text, 'html.parser')
-            ws_url = next((a['href'] for a in soup2.find_all('a', href=True)
-                           if 'wildshare.net' in a['href']), None)
-            if ws_url:
-                direct = ResolverRegistry.resolve(ws_url, session)
-                if direct:
-                    ext = 'mkv' if '.mkv' in direct else 'mp4'
-                    download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
-                                  series_url=url, series_name=name,
-                                  bandwidth_limit=bw, quality=quality, current_process=cur_proc,
-                                  stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
-                                  source_url=ws_url)
-                else:
-                    safe_print(f"  [X] Wildshare failed")
-                    summary.add_failed(ep_name)
-            else:
-                safe_print(f"  [!] No wildshare link found")
-                summary.add_failed(ep_name)
-        except Exception as e:
-            safe_print(f"  [!] Error: {e}")
-            summary.add_failed(ep_name)
-        time.sleep(1)
+
+        ext = 'mkv' if '.mkv' in direct else 'mp4'
+        download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
+                      series_url=url, series_name=name,
+                      bandwidth_limit=bw, quality=quality, current_process=cur_proc,
+                      stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'),
+                      source_url=ws_url)
+
     if summary.failed == 0 and not _stopped(ctx):
         mark_series_complete(url)
     summary.report()

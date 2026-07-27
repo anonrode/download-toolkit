@@ -212,7 +212,6 @@ def extract_plutomovies(url, session, ctx=None):
                           bandwidth_limit=bw, quality=quality,
                           current_process=cur_proc,
                           stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
-            time.sleep(0.5)
 
     if not episodes_seen and not _stopped(ctx):
         # Every season scraped/filtered to zero — do NOT report success or

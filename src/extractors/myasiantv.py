@@ -39,30 +39,23 @@ def extract_myasiantv(url, session, ctx=None):
         safe_print(f"[*] Found {len(ep_links)} episode(s) - saving to: {folder}")
     _notify_start(name, len(ep_links))
 
-    for i, ep_url in enumerate(ep_links, 1):
-        if _stopped(ctx):
-            break
-        _wait(ctx)
-        ep_name = ep_url.rstrip('/').split('/')[-1]
-        safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
-        done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
-        if not done:
-            done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
-        if done:
-            safe_print(render_message('already_saved'))
-            summary.add_skipped()
-            continue
+    def _resolve_ep(ep_url):
+        """Fetch the episode page, find the player iframe and resolve it to a
+        direct video url. Runs in the prefetch thread so the (slow) embed
+        extraction overlaps the previous episode's download. Returns the direct
+        url or None.
+
+        The referer swap must happen in whichever thread does the resolve, so
+        it lives here. Only one prefetch thread runs at a time (get() joins the
+        previous before the next is queued), and download_file never touches the
+        session — so this mutation of session.headers is not racing anything."""
         r = safe_get(session, ep_url, referer=bd + '/', timeout=30)
         if r is None:
-            safe_print(f"  [X] Could not fetch episode page")
-            summary.add_failed(ep_name)
-            continue
+            return None
         soup   = BeautifulSoup(r.text, 'html.parser')
         iframe = soup.find('iframe', src=re.compile(r'vidbasic|vidmoly')) or soup.find('iframe', src=True)
         if not iframe:
-            safe_print(f"  [!] No iframe found")
-            summary.add_failed(ep_name)
-            continue
+            return None
         src = iframe.get('src', '')
         if src.startswith('//'):
             # protocol-relative: //host/path -> https://host/path
@@ -71,28 +64,78 @@ def extract_myasiantv(url, session, ctx=None):
             # root-relative (/embed/x) or relative: resolve against the episode URL.
             # 'https:' + '/embed/x' would produce the malformed 'https:/embed/x'.
             src = urljoin(ep_url, src)
-            
         # Megaplay/iframe players require the episode URL as referer to avoid "Embed Only" block
         old_referer = session.headers.get('Referer')
         session.headers['Referer'] = ep_url
         try:
-            direct = ResolverRegistry.resolve(src, session)
+            return ResolverRegistry.resolve(src, session)
         finally:
             if old_referer is not None:
                 session.headers['Referer'] = old_referer
             else:
                 session.headers.pop('Referer', None)
-        
-        if direct:
-            ext = 'mkv' if '.mkv' in direct.lower() else 'mp4'
-            download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
-                          series_url=url, series_name=name,
-                          bandwidth_limit=bw, quality=quality,
-                          current_process=cur_proc, stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
-        else:
+
+    def _cdn_alive(cdn_url, referer):
+        """Ranged GET to confirm the resolved link is still live before download.
+        The embed CDN keys off the episode referer, so pass it through — without
+        it a healthy link can 403 and trigger a needless re-resolve."""
+        try:
+            r = session.get(cdn_url, timeout=5, allow_redirects=True,
+                            headers={'Range': 'bytes=0-0', 'Referer': referer})
+            return r.status_code in (200, 206)
+        except Exception:
+            return False
+
+    # Build the work-list first — skip checks are local (no network) so the
+    # prefetcher never wastes an embed extraction on an episode we'd skip.
+    work = []
+    for i, ep_url in enumerate(ep_links, 1):
+        ep_name = ep_url.rstrip('/').split('/')[-1]
+        done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
+        if not done:
+            done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mkv"), series_url=url)
+        if done:
+            safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
+            safe_print(render_message('already_saved'))
+            summary.add_skipped()
+            continue
+        work.append((ep_name, ep_url))
+
+    # Prefetch the next episode's resolve while the current one downloads. get()
+    # runs for every item before any failure branch, keeping the queue aligned.
+    prefetcher = Prefetcher(_resolve_ep)
+    if work:
+        prefetcher.prefetch(work[0][1])
+
+    for i, (ep_name, ep_url) in enumerate(work, 1):
+        if _stopped(ctx):
+            break
+        _wait(ctx)
+        safe_print(f"\n[{i}/{len(work)}] {ep_name}")
+
+        direct = prefetcher.get(timeout=30)
+        if i < len(work):
+            prefetcher.prefetch(work[i][1])
+
+        if not direct:
             safe_print(f"  [X] Could not extract video")
             summary.add_failed(ep_name)
-        time.sleep(1)
+            continue
+
+        # Token may have expired while the previous episode downloaded.
+        if not _cdn_alive(direct, ep_url):
+            safe_print(f"  [*] Link expired - re-resolving...")
+            direct = _resolve_ep(ep_url)
+            if not direct:
+                safe_print(f"  [X] Could not extract video")
+                summary.add_failed(ep_name)
+                continue
+
+        ext = 'mkv' if '.mkv' in direct.lower() else 'mp4'
+        download_file(direct, folder, safe_filename(f"{ep_name}.{ext}"), summary,
+                      series_url=url, series_name=name,
+                      bandwidth_limit=bw, quality=quality,
+                      current_process=cur_proc, stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
     if summary.failed == 0 and not _stopped(ctx):
         mark_series_complete(url)
     summary.report()

@@ -218,6 +218,7 @@ class LoadedfilesResolver(BaseResolver):
     # hosts until one answers.
     _HOST = re.compile(r'loadedfiles\.[a-z0-9-]+', re.I)
     _FALLBACK_TLDS = ('st', 'net', 'org', 'to', 'com')
+    _LAST_WORKING_HOST = None
 
     @classmethod
     def _rewrite(cls, text: str, host: str) -> str:
@@ -230,9 +231,15 @@ class LoadedfilesResolver(BaseResolver):
 
     @classmethod
     def _candidate_hosts(cls, url: str):
-        """Live-host candidates: the link's own TLD first, then known fallbacks."""
+        """Live-host candidates: last known working host first, then the link's
+        own TLD, then known fallbacks."""
         m = cls._HOST.search(url)
-        hosts = [m.group(0).lower()] if m else []
+        url_host = m.group(0).lower() if m else None
+        hosts = []
+        if cls._LAST_WORKING_HOST:
+            hosts.append(cls._LAST_WORKING_HOST)
+        if url_host and url_host not in hosts:
+            hosts.append(url_host)
         for tld in cls._FALLBACK_TLDS:
             h = f'loadedfiles.{tld}'
             if h not in hosts:
@@ -255,6 +262,7 @@ class LoadedfilesResolver(BaseResolver):
                 r1 = safe_get(session, candidate, referer='https://my9jarocks.bz/', timeout=10, retries=1)
                 if r1:
                     live_host = host
+                    LoadedfilesResolver._LAST_WORKING_HOST = host
                     break
             if not r1:
                 return None

@@ -109,6 +109,13 @@ def extract_naijavault(url, session, ctx=None):
 
     zip_hit = False
 
+    # NOTE: deliberately NOT using the Prefetcher/resolve-ahead pattern here
+    # (unlike jarocks/naijaprey/myasiantv/dramarain). NaijaVault's CDN links
+    # (vikingfile / lulacloud / filevault) are short-lived signed URLs — see the
+    # "prevents token expiry" note below. Resolving one episode ahead would mint
+    # a link that's almost always dead by download time, forcing a synchronous
+    # re-resolve every episode: wasted background data for zero speed gain. The
+    # immediate resolve-then-download below is the correct model for this host.
     def _resolve_and_download(ep_label, ep_name, direct):
         """Download immediately after resolving — prevents token expiry."""
         if not direct:
@@ -208,7 +215,6 @@ def extract_naijavault(url, session, ctx=None):
                     safe_print(f"  [!] nj_download failed: {e}")
 
         _resolve_and_download(ep_label, ep_name, direct)
-        time.sleep(0.5)
 
     # ── Process Format B (lulacloud direct) — resolve & download immediately ──
     if not zip_hit:
@@ -258,7 +264,6 @@ def extract_naijavault(url, session, ctx=None):
                             direct = fv.group(0)
 
             _resolve_and_download(ep_label, ep_name, direct)
-            time.sleep(0.5)
 
     # ── Process Format C (pixeldrain.com/u/ direct) ──
     if not zip_hit:
@@ -289,7 +294,6 @@ def extract_naijavault(url, session, ctx=None):
 
             direct = ResolverRegistry.resolve(pd_url, session)
             _resolve_and_download(ep_label, ep_name, direct)
-            time.sleep(0.5)
 
 
     if summary.failed == 0 and not _stopped(ctx):
