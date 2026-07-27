@@ -1,7 +1,11 @@
 import re
 import sys
 import time
+import base64
+from html import unescape
 from urllib.parse import urljoin, urlparse
+
+from ._aes import aes_cbc_decrypt
 
 # Lazy `requests`/`urllib3`/`BeautifulSoup`: importing them (+ charset_normalizer)
 # costs ~900ms and nothing needs them to draw the banner or run the REPL — only
@@ -385,10 +389,51 @@ class VidmolyResolver(BaseResolver):
             safe_print(f"      [!] Vidmoly: Resolution error: {e}")
             return None
 
+# vidbasic's /3rdplayer.html scheme: the video URL is AES-256-CBC encrypted in
+# the `data-value` attribute of the crypto <script> tag and decrypted in-browser
+# by obfuscated JS. Key + IV are static UTF-8 constants baked into that JS —
+# recovered by running the real player under a CryptoJS interceptor (see
+# docs/vidbasic_crypto.md). If the site rotates them, decrypt yields non-URL
+# bytes and resolve() fails cleanly; re-recover with the documented harness.
+_VIDBASIC_KEY = b'94588293375053432799222445521289'
+_VIDBASIC_IV  = b'5259228356829423'
+
 class VidbasicResolver(BaseResolver):
+    # vidbasic.top / vidbasic.to / vidb.top serve the CryptoJS player directly;
+    # embedload.cfd is a thin wrapper that iframes one of them.
+    _HOSTS = ('vidbasic.', 'vidb.top', 'embedload.cfd')
+
     @staticmethod
     def can_resolve(url: str) -> bool:
-        return 'vidbasic.to' in urlparse(url).netloc.lower()
+        p = urlparse(url)
+        net = p.netloc.lower()
+        if not any(h in net for h in VidbasicResolver._HOSTS):
+            return False
+        # The decrypted output lives on stream.vidbasic.top/…​.m3u8 — that's a
+        # direct stream, not an embed. Don't let the registry's re-resolve loop
+        # feed it back here (it would fetch the manifest and find no payload).
+        if p.path.lower().endswith(('.m3u8', '.mp4', '.mkv', '.ts')):
+            return False
+        return True
+
+    @staticmethod
+    def _decrypt_payload(html_text: str):
+        """Find the crypto <script data-value="..."> payload and AES-decrypt it
+        to the direct stream URL. Returns None if the tag is absent or the key
+        no longer fits (decrypt produced non-URL bytes)."""
+        m = re.search(r'data-name=["\']crypto["\'][^>]*?data-value=["\']([^"\']+)["\']', html_text)
+        if not m:  # attribute order can vary
+            m = re.search(r'data-value=["\']([^"\']+)["\'][^>]*?data-name=["\']crypto["\']', html_text)
+        if not m:
+            return None
+        try:
+            ct = base64.b64decode(m.group(1))
+            pt = aes_cbc_decrypt(ct, _VIDBASIC_KEY, _VIDBASIC_IV).decode('utf-8', 'ignore').strip()
+        except Exception:
+            return None
+        if pt.startswith('http') and ('.m3u8' in pt or '.mp4' in pt or '.mkv' in pt):
+            return pt
+        return None
 
     @staticmethod
     def resolve(url: str, session) -> str:
@@ -396,7 +441,32 @@ class VidbasicResolver(BaseResolver):
             r = session.get(url, timeout=20)
             if not r or r.status_code != 200:
                 return None
-            return find_direct_video(r.text)
+            text = r.text
+
+            # 1) this page already carries the encrypted payload (3rdplayer.html)
+            direct = VidbasicResolver._decrypt_payload(text)
+            if direct:
+                return direct
+
+            # 2) embed page points at /3rdplayer.html?...&key=... — fetch and decrypt
+            mv = re.search(r'data-video=["\']([^"\']+)["\']', text)
+            if mv:
+                player_url = urljoin(url, unescape(mv.group(1)))
+                pr = session.get(player_url, timeout=20, headers={'Referer': url})
+                if pr is not None and pr.status_code == 200:
+                    direct = VidbasicResolver._decrypt_payload(pr.text)
+                    if direct:
+                        return direct
+
+            # 3) embedload.cfd wrapper iframes the real vidbasic host
+            mi = re.search(r'<iframe[^>]+src=["\']([^"\']*(?:vidbasic|vidb\.top)[^"\']*)["\']', text)
+            if mi:
+                inner = urljoin(url, mi.group(1))
+                if inner != url:
+                    return VidbasicResolver.resolve(inner, session)
+
+            # 4) legacy plaintext fallback (pre-CryptoJS scheme)
+            return find_direct_video(text)
         except requests.RequestException as e:
             if _is_network_error(e):
                 raise
@@ -404,6 +474,52 @@ class VidbasicResolver(BaseResolver):
             return None
         except Exception as e:
             safe_print(f"      [!] Vidbasic: Resolution error: {e}")
+            return None
+
+class KissasianResolver(BaseResolver):
+    # kissasian9.ro /kisskh/<id> player: inline JSON carries a /source API path
+    # that returns {"status":"ok","source":"<m3u8 url>","tracks":[...]} directly.
+    _HOSTS = ('kissasian9.ro',)
+
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        p = urlparse(url)
+        return (any(h in p.netloc.lower() for h in KissasianResolver._HOSTS)
+                and '/kisskh/' in p.path
+                and not p.path.lower().endswith(('.m3u8', '.mp4', '.mkv')))
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        try:
+            r = session.get(url, timeout=20, headers={
+                'Referer': url, 'Sec-Fetch-Dest': 'iframe',
+                'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'cross-site',
+            })
+            if not r or r.status_code != 200:
+                return None
+            m = re.search(r'"sourceUrl"\s*:\s*"([^"]+)"', r.text)
+            if not m:
+                return None
+            api = urljoin(url, m.group(1))
+            ar = session.get(api, timeout=20, headers={
+                'Referer': url, 'Accept': 'application/json',
+                'Sec-Fetch-Dest': 'empty', 'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+            })
+            if not ar or ar.status_code != 200:
+                return None
+            d = ar.json()
+            src = d.get('source') if isinstance(d, dict) else None
+            if src and src.startswith('http') and '.m3u8' in src:
+                return src
+            return None
+        except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
+            safe_print(f"      [!] Kissasian: Network request failed: {e}")
+            return None
+        except Exception as e:
+            safe_print(f"      [!] Kissasian: Resolution error: {e}")
             return None
 
 class EmbedResolver(BaseResolver):
@@ -719,6 +835,7 @@ class ResolverRegistry:
         StreamtapeResolver,
         VidmolyResolver,
         VidbasicResolver,
+        KissasianResolver,
         EmbedResolver,
         VikingFileResolver,
         LulaCloudResolver,
@@ -749,7 +866,7 @@ class ResolverRegistry:
         _path = urlparse(url).path.lower()
         if any(_path.endswith(ext) for ext in ['.mp4', '.mkv', '.m3u8', '.webm']):
             parsed = urlparse(url).netloc.lower()
-            resolver_domains = ['waffi.cloud', 'loadedfiles.', 'wildshare.net', 'vikingfile.com', 'lulacloud.com', 'pixeldrain.com', 'streamtape.com', 'watchadsontape.com', 'vidmoly.me', 'vidbasic.to']
+            resolver_domains = ['waffi.cloud', 'loadedfiles.', 'wildshare.net', 'vikingfile.com', 'lulacloud.com', 'pixeldrain.com', 'streamtape.com', 'watchadsontape.com', 'vidmoly.me']
             if not any(dom in parsed for dom in resolver_domains):
                 return url
 
