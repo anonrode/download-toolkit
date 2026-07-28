@@ -2377,6 +2377,13 @@ def download_with_ytdlp(url, folder, filename, summary,
     base        = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
     out_template = os.path.join(folder, base + '.%(ext)s')
     quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
+    # Always leave a bare `/best` at the end so HLS streams whose variants are
+    # muxed-only (no separate video+audio to merge) or don't report a height
+    # still download instead of erroring with "Requested format is not
+    # available". Without this, a height-filtered format string can match
+    # nothing and yt-dlp aborts.
+    if not quality_str.rstrip().endswith('best'):
+        quality_str += '/best'
 
     progress = LiveProgress(filename, parallel=parallel_mode)
     proc = None
