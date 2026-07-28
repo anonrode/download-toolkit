@@ -2593,6 +2593,12 @@ def download_with_ytdlp(url, folder, filename, summary,
         prog_tmpl = ('download:@@DLP@@ %(progress._percent_str)s|'
                      '%(progress._speed_str)s|%(progress._eta_str)s|'
                      '%(progress.fragment_index)s|%(progress.fragment_count)s')
+        # Pass the CDN's expected Referer/Origin/UA, same as the aria2c path.
+        # yt-dlp runs as a separate process and can't see the resolver's
+        # session.headers, so without this an HLS host with hotlink protection
+        # (e.g. kisskh.megaplay.su) 403s the m3u8 even though the resolver
+        # extracted it fine. Harmless for CDNs that don't check referer.
+        referer = get_referer_for_url(url)
         cmd = [
             'yt-dlp',
             '-f', quality_str,
@@ -2603,6 +2609,9 @@ def download_with_ytdlp(url, folder, filename, summary,
             '--fragment-retries', '3',
             '--retry-sleep', '10',
             '--concurrent-fragments', str(config.get('aria2c_connections', 16)),
+            '--user-agent', UA_DESKTOP,
+            '--referer', referer,
+            '--add-header', f'Origin: {base_domain(referer)}',
             '--no-warnings', '--newline',
             '--progress-template', prog_tmpl,
         ]
