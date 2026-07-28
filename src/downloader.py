@@ -7,6 +7,7 @@ import re
 import sys
 import json
 import time
+import socket
 import threading
 import signal
 import subprocess
@@ -112,11 +113,19 @@ def _is_paused(flag):
     return flag.is_set() if hasattr(flag, 'is_set') else flag[0]
 
 def check_connection() -> bool:
-    try:
-        r = requests.get("https://1.1.1.1", timeout=3, verify=False)
-        return r.status_code in (200, 204, 302)
-    except Exception:
-        return False
+    # A plain HTTPS GET to 1.1.1.1 was unreliable: Cloudflare frequently leaves
+    # the TLS read hanging, so the request timed out even on a perfectly good
+    # connection -- which made the whole downloader sit in "network down, waiting
+    # 2 min" while online. A raw TCP connect to a public DNS resolver (port 53)
+    # is what actually indicates connectivity, and it answers in milliseconds.
+    for host in ("1.1.1.1", "8.8.8.8", "9.9.9.9"):
+        try:
+            s = socket.create_connection((host, 53), timeout=3)
+            s.close()
+            return True
+        except Exception:
+            continue
+    return False
 
 def wait_for_network(stop_flag=None):
     if not check_connection():
