@@ -2583,8 +2583,13 @@ def download_with_ytdlp(url, folder, filename, summary,
     progress = LiveProgress(filename, parallel=parallel_mode)
     try:
         # Sentinel progress-template: the @@DLP@@ prefix lets the reader thread
-        # pick our progress lines out of yt-dlp's other output. --no-progress
-        # suppresses yt-dlp's own bar so only these structured lines carry pct.
+        # pick our progress lines out of yt-dlp's other output. --newline makes
+        # yt-dlp emit one templated line per tick (instead of \r-overwriting a
+        # single line), which the line-based reader consumes; the flood only
+        # reaches our capturing pipe (never the terminal), and LiveProgress
+        # throttles rendering to 0.5s. NOTE: do NOT use --no-progress here --
+        # it suppresses the progress readout that --progress-template drives,
+        # so the bar would stay blank for the whole download.
         prog_tmpl = ('download:@@DLP@@ %(progress._percent_str)s|'
                      '%(progress._speed_str)s|%(progress._eta_str)s|'
                      '%(progress.fragment_index)s|%(progress.fragment_count)s')
@@ -2598,7 +2603,7 @@ def download_with_ytdlp(url, folder, filename, summary,
             '--fragment-retries', '3',
             '--retry-sleep', '10',
             '--concurrent-fragments', str(config.get('aria2c_connections', 16)),
-            '--no-warnings', '--no-progress',
+            '--no-warnings', '--newline',
             '--progress-template', prog_tmpl,
         ]
         cmd += _ytdlp_subtitle_flags(config, url)
