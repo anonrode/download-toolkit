@@ -554,6 +554,87 @@ class KisskhMegaplayResolver(BaseResolver):
             safe_print(f"      [!] KisskhMegaplay: Resolution error: {e}")
             return None
 
+class LightDLResolver(BaseResolver):
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        if '/api/download/' in url:
+            return False
+        return 'lightdl.cc' in urlparse(url).netloc.lower()
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        try:
+            parsed = urlparse(url)
+            parts = [p for p in parsed.path.strip('/').split('/') if p]
+            code = parts[-1] if parts else None
+            if not code:
+                return None
+            headers = {
+                'User-Agent': UA_DESKTOP,
+                'Referer': url,
+                'Accept': 'application/json',
+            }
+
+            r1 = None
+            for attempt in range(2):
+                r1 = session.get(f'https://lightdl.cc/api/files/code/{code}', headers=headers, timeout=20)
+                if r1 and r1.status_code == 200:
+                    break
+                time.sleep(1)
+
+            if not r1 or r1.status_code != 200:
+                return None
+            data1 = r1.json() if isinstance(r1.json(), dict) else {}
+            file_info = data1.get('file')
+            if not file_info or not isinstance(file_info, dict):
+                return None
+            file_id = file_info.get('id')
+            if not file_id:
+                return None
+
+            r2 = None
+            for attempt in range(2):
+                r2 = session.post(f'https://lightdl.cc/api/files/{file_id}/download-token', headers=headers, timeout=20)
+                if r2 and r2.status_code == 200:
+                    break
+                time.sleep(1)
+
+            if not r2 or r2.status_code != 200:
+                return None
+            data2 = r2.json() if isinstance(r2.json(), dict) else {}
+            return data2.get('downloadUrl')
+        except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
+            safe_print(f"      [!] LightDL: Network request failed: {e}")
+            return None
+        except Exception as e:
+            safe_print(f"      [!] LightDL: Resolution error: {e}")
+            return None
+
+class FivePlayResolver(BaseResolver):
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        netloc = urlparse(url).netloc.lower()
+        return netloc in ('5play.cc', 'www.5play.cc')
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        try:
+            headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://dramakey.cc/'}
+            r = session.get(url, timeout=20, headers=headers)
+            if not r or r.status_code != 200:
+                return None
+            return find_direct_video(r.text)
+        except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
+            safe_print(f"      [!] 5play: Network request failed: {e}")
+            return None
+        except Exception as e:
+            safe_print(f"      [!] 5play: Resolution error: {e}")
+            return None
+
 class EmbedResolver(BaseResolver):
     KNOWN_EMBED_DOMAINS = [
         'megaplay.buzz', 'megaplay.cc',
@@ -869,6 +950,8 @@ class ResolverRegistry:
         VidbasicResolver,
         KissasianResolver,
         KisskhMegaplayResolver,
+        LightDLResolver,
+        FivePlayResolver,
         EmbedResolver,
         VikingFileResolver,
         LulaCloudResolver,
