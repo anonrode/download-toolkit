@@ -522,6 +522,38 @@ class KissasianResolver(BaseResolver):
             safe_print(f"      [!] Kissasian: Resolution error: {e}")
             return None
 
+class KisskhMegaplayResolver(BaseResolver):
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        netloc = urlparse(url).netloc.lower()
+        return 'kisskh.megaplay.' in netloc or ('megaplay.' in netloc and '/kisskh/' in url)
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        try:
+            headers = {
+                'User-Agent': UA_DESKTOP,
+                'Referer': session.headers.get('Referer', ''),
+                'Sec-Fetch-Dest': 'iframe',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'cross-site',
+            }
+            r = session.get(url, timeout=20, headers=headers)
+            if not r or r.status_code != 200:
+                return None
+            m = re.search(r'"source"\s*:\s*"([^"]+\.m3u8[^"]*)"', r.text)
+            if m:
+                return m.group(1)
+            return find_direct_video(r.text)
+        except requests.RequestException as e:
+            if _is_network_error(e):
+                raise
+            safe_print(f"      [!] KisskhMegaplay: Network request failed: {e}")
+            return None
+        except Exception as e:
+            safe_print(f"      [!] KisskhMegaplay: Resolution error: {e}")
+            return None
+
 class EmbedResolver(BaseResolver):
     KNOWN_EMBED_DOMAINS = [
         'megaplay.buzz', 'megaplay.cc',
@@ -836,6 +868,7 @@ class ResolverRegistry:
         VidmolyResolver,
         VidbasicResolver,
         KissasianResolver,
+        KisskhMegaplayResolver,
         EmbedResolver,
         VikingFileResolver,
         LulaCloudResolver,

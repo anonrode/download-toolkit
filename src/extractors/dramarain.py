@@ -1,5 +1,56 @@
 from .base import *
 
+# ─── dramakey.cc .episode-item layout helpers ─────────────────
+_DIRECT_CDN_HOSTS = ('nkiserv.com', 'waffi.cloud', 'fileditchfiles.')
+_INTERMEDIATE_HOSTS = ('downloadwella.com', 'wetafiles.com', 'loadedfiles.',
+                       'dramakey.cc', 'dramakey.com', 'dramarain.com')
+
+def _is_direct_cdn_url(url):
+    """True if the URL is a direct media file needing no resolver."""
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    host = parsed.netloc.lower()
+    if any(h in host for h in _DIRECT_CDN_HOSTS):
+        return True
+    if any(path.endswith(ext) for ext in ('.mp4', '.mkv', '.m3u8', '.webm')):
+        if not any(g in host for g in _INTERMEDIATE_HOSTS):
+            return True
+    return False
+
+def _parse_episode_items(soup):
+    """Parse .episode-item containers into [(label, href), ...].
+
+    Keys by episode number from the container, NOT by href.  Two episodes
+    sharing the same href produce two distinct rows with a warning.
+    """
+    items = []
+    seen_hrefs = {}
+    for el in soup.select('.episode-item'):
+        num_el = el.select_one('.episode-number')
+        btn    = el.select_one('a.download-btn')
+        if not btn or not btn.get('href'):
+            continue
+        href = btn['href'].strip()
+
+        # Episode label from container metadata
+        label = num_el.get_text(strip=True) if num_el else ''
+        if not label:
+            key_attr = el.get('key', '')
+            km = re.match(r'ep-(\d+)-(\d+)', key_attr)
+            if km:
+                label = f"Episode {km.group(2)}"
+
+        # Warn on duplicate href but keep both rows
+        display = label or '?'
+        if href in seen_hrefs:
+            safe_print(f"  [!] Warning: {display} shares download link with "
+                       f"{seen_hrefs[href]} (source-site mislabel)")
+        else:
+            seen_hrefs[href] = display
+
+        items.append((label, href))
+    return items
+
 def extract_dramarain(url, session, ctx=None):
     ctx  = ctx or {}
     stop, wait, bw, quality, parallel, cur_proc, pause = _ctx(ctx)
@@ -99,6 +150,75 @@ def extract_dramarain(url, session, ctx=None):
         if summary.failed == 0 and not _stopped(ctx):
             mark_series_complete(url)
         summary.report()
+
+    # ─── Method 0: dramakey.cc .episode-item layout ──────────────────
+    # Parses each episode from its own container so mixed hosts and
+    # mislabeled hrefs don't cause episodes to be dropped or merged.
+    # Falls through to the host-bucket methods below for pages
+    # (e.g. dramarain.com) that lack this layout.
+    ep_items = _parse_episode_items(soup)
+    if ep_items:
+        ep_items = _filter_by_episode_range(ep_items, ctx)
+        if not ep_items:
+            safe_print(render_message('no_episodes_in_range'))
+            return
+        safe_print(f"[*] Found {len(ep_items)} episode(s) - saving to: {folder}")
+        _notify_start(name, len(ep_items))
+
+        for i, (label, ep_url) in enumerate(ep_items, 1):
+            if _stopped(ctx):
+                break
+            _wait(ctx)
+            # The .episode-number container text is authoritative for this
+            # layout. The source site can point an episode's button at the
+            # wrong file (e.g. E04's button -> the E05 href), so trusting the
+            # URL's embedded SxxExx tag (as _episode_label does) would name
+            # E04 "S01E05", collide with the real E05, and drop it. Key off
+            # the container number instead; take the season from the URL if it
+            # carries one, else default S01.
+            lm = re.search(r'(\d+)', label or '')
+            sm = EPISODE_TAG_RE.search(ep_url)
+            if lm:
+                season = int(sm.group(1)) if sm else 1
+                ep_tag = f"S{season:02d}E{int(lm.group(1)):02d}"
+            else:
+                ep_tag = _episode_label(ep_url, label, i)
+            fbase = safe_filename(f"{name} {ep_tag}")
+            safe_print(f"\n[{i}/{len(ep_items)}] {fbase}")
+            done, _ = already_downloaded(folder, fbase + '.mp4', series_url=url)
+            if not done:
+                done, _ = already_downloaded(folder, fbase + '.mkv', series_url=url)
+            if done:
+                safe_print(render_message('already_saved'))
+                summary.add_skipped()
+                continue
+
+            if _is_direct_cdn_url(ep_url):
+                direct = _strip_preview_param(ep_url)
+            else:
+                direct = resolve_with_retry(
+                    lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
+                if not direct:
+                    if _stopped(ctx):
+                        break
+                    safe_print(f"  [X] Could not resolve link")
+                    record_episode_failure(url, name,
+                                           safe_filename(f"{fbase}.mp4"),
+                                           summary, fbase)
+                    continue
+
+            ext = 'mkv' if '.mkv' in direct else 'mp4'
+            download_file(direct, folder, safe_filename(f"{fbase}.{ext}"),
+                          summary, series_url=url, series_name=name,
+                          bandwidth_limit=bw, quality=quality,
+                          current_process=cur_proc,
+                          stop_flag=stop, pause_flag=pause,
+                          wait_fn=ctx.get('wait'), source_url=ep_url)
+
+        if summary.failed == 0 and not _stopped(ctx):
+            mark_series_complete(url)
+        summary.report()
+        return
 
     # Method 1: direct waffi.cloud links (CDN subdomain rotates — drip, japa, etc.)
     # Dedup by href: a page can expose the same episode under two anchors

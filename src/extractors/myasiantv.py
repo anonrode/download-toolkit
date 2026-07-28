@@ -56,7 +56,7 @@ def extract_myasiantv(url, session, ctx=None):
         # Prefer a known player host; the current .com.ro layout serves vidb.top
         # (vidbasic) and kissasian9.ro embeds. Fall back to the first iframe so a
         # new host still gets a resolve attempt rather than a hard failure.
-        iframe = (soup.find('iframe', src=re.compile(r'vidbasic|vidb\.|kissasian|vidmoly'))
+        iframe = (soup.find('iframe', src=re.compile(r'vidbasic|vidb\.|kissasian|vidmoly|megaplay|kisskh'))
                   or soup.find('iframe', src=True))
         if not iframe:
             return None
