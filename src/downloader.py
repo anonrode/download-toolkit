@@ -513,25 +513,30 @@ class LiveProgress:
         self._done     = False
         self._last_update = 0
 
-    def update(self, pct, spd_mbps=None, eta=None):
+    def update(self, pct, spd_mbps=None, eta=None, note=None):
         if self._done:
             return
 
         now = time.time()
-        if now - self._last_update < 0.5 and pct < 100.0:
+        # pct may be None when the total size is unknown (e.g. early HLS before
+        # the fragment count is known). Only the explicit 100% case bypasses the
+        # 0.5s throttle; an unknown pct is always throttled.
+        if now - self._last_update < 0.5 and (pct is None or pct < 100.0):
             return
         self._last_update = now
 
         self._started = True
-        update_status(status='Downloading', current=self._name, progress=f'{pct:0.1f}%')
-        pct_s = f'{pct:5.1f}%'
-        spd_s = f' - {spd_mbps:.1f} MB/s' if spd_mbps is not None else ''
-        eta_s = f' - ETA {eta}'            if eta          else ''
-        line  = f'  [↓] {self._name}  {pct_s}{spd_s}{eta_s}'
+        pct_s = f'{pct:5.1f}%' if pct is not None else '   --%'
+        update_status(status='Downloading', current=self._name,
+                      progress=(f'{pct:0.1f}%' if pct is not None else '--%'))
+        spd_s  = f' - {spd_mbps:.1f} MB/s' if spd_mbps is not None else ''
+        eta_s  = f' - ETA {eta}'           if eta          else ''
+        note_s = f' - {note}'              if note         else ''
+        line  = f'  [↓] {self._name}  {pct_s}{spd_s}{eta_s}{note_s}'
         try:
             with PRINT_LOCK:
                 if self._parallel:
-                    if int(pct) % 10 == 0:
+                    if pct is not None and int(pct) % 10 == 0:
                         sys.stdout.write(line + '\n')
                         sys.stdout.flush()
                 else:
@@ -2359,10 +2364,191 @@ def _ytdlp_subtitle_flags(config, url=None):
     ]
 
 
+def _print_ytdlp_tail(tail):
+    """On failure, echo the last few captured yt-dlp/ffmpeg lines so the cause
+    is visible even though --no-progress suppressed the live stream."""
+    if not tail:
+        return
+    lines = [ln for ln in tail if ln.strip()][-8:]
+    if not lines:
+        return
+    safe_print('  ── yt-dlp output ──')
+    for ln in lines:
+        safe_print('  ' + ln)
+
+
+def _ytdlp_parse_progress(payload):
+    """Parse the sentinel progress-template payload emitted by download_with_ytdlp:
+    'percent|speed|eta|frag_index|frag_count'. Returns (pct, spd_mbps, eta, note).
+
+    Any field yt-dlp can't fill renders as 'NA'/'Unknown'; those become None so
+    the caller can fall back (e.g. HLS with no declared size -> fragment ratio)."""
+    parts = payload.split('|')
+    while len(parts) < 5:
+        parts.append('')
+    pct_s, spd_s, eta_s, fi_s, fc_s = (p.strip() for p in parts[:5])
+
+    def _bad(v):
+        return (not v) or v.upper() in ('NA', 'UNKNOWN', 'UNKNOWN B/S', '-', 'NONE')
+
+    pct = None
+    if not _bad(pct_s):
+        try:
+            pct = float(pct_s.rstrip('%'))
+        except ValueError:
+            pct = None
+
+    fi = fc = None
+    if not _bad(fi_s):
+        try: fi = int(float(fi_s))
+        except ValueError: fi = None
+    if not _bad(fc_s):
+        try: fc = int(float(fc_s))
+        except ValueError: fc = None
+    # HLS often reports no total size -> derive percent from fragment progress.
+    if pct is None and fi is not None and fc:
+        pct = min(100.0, fi / fc * 100.0)
+    note = f'frag {fi}/{fc}' if (fi is not None and fc) else None
+
+    spd_mbps = None
+    if not _bad(spd_s):
+        m = re.match(r'([\d.]+)\s*([KMG]?i?B)/s', spd_s)
+        if m:
+            val    = float(m.group(1))
+            unit   = m.group(2).upper()
+            factor = {'B': 1 / 1048576, 'KB': 1 / 1024, 'KIB': 1 / 1024,
+                      'MB': 1, 'MIB': 1, 'GB': 1024, 'GIB': 1024}.get(unit, 1)
+            spd_mbps = val * factor
+
+    eta = None if _bad(eta_s) else eta_s
+    return pct, spd_mbps, eta, note
+
+
+def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None,
+                                  current_process=None, hard_timeout=6 * 60 * 60,
+                                  resume_cmd=None, on_pause=None, on_resume=None,
+                                  on_timeout=None):
+    """Launch yt-dlp with captured stdout and render progress via `progress`.
+
+    A daemon reader thread parses the sentinel `@@DLP@@` progress lines from our
+    --progress-template and calls progress.update(); every other line is kept in
+    a small ring buffer (ERROR/WARNING pass through live) so diagnostics survive.
+    The main loop keeps the original stop/pause/timeout polling untouched, so
+    Ctrl+C / pause behaviour is unchanged. Returns (exit_code, tail_lines)."""
+    import threading, collections
+    tail = collections.deque(maxlen=15)
+
+    def _reader(pipe):
+        try:
+            for raw in iter(pipe.readline, ''):
+                line = raw.rstrip('\r\n')
+                if not line:
+                    continue
+                idx = line.find('@@DLP@@')
+                if idx != -1:
+                    try:
+                        pct, spd, eta, note = _ytdlp_parse_progress(line[idx + 7:].strip())
+                        progress.update(pct, spd, eta, note=note)
+                    except Exception:
+                        pass
+                    continue
+                if ('[Merger]' in line or '[ExtractAudio]' in line or '[Fixup' in line
+                        or '[VideoConvertor]' in line or 'Merging formats' in line):
+                    try: progress.update(100.0, note='finalizing…')
+                    except Exception: pass
+                    tail.append(line); continue
+                if line.startswith('ERROR:') or line.startswith('WARNING:'):
+                    safe_print('  ' + line)
+                tail.append(line)
+        except Exception:
+            pass
+    # ── Launch + main poll loop ─────────────────────────────────
+    # The poll loop below is the SAME stop/pause/timeout loop the old inline
+    # implementation used; the only addition is a daemon reader thread draining
+    # the captured pipe. On pause we terminate the proc (yt-dlp/ffmpeg flush
+    # their partial fragments for -c resume); the reader ends when the pipe
+    # closes, and resume re-launches proc + a fresh reader.
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', errors='replace', bufsize=1,
+        creationflags=_POPEN_FLAGS,
+    )
+    register_process(proc)
+    if current_process is not None:
+        current_process.proc = proc
+    reader = threading.Thread(target=_reader, args=(proc.stdout,), daemon=True)
+    reader.start()
+
+    started = time.time()
+    while proc.poll() is None:
+        if _is_stopped(stop_flag):
+            _graceful_terminate(proc)
+            break
+        if _is_paused(pause_flag):
+            _graceful_terminate(proc)
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+            finally:
+                unregister_process(proc)
+            if current_process is not None:
+                current_process.proc = None
+            if on_pause:
+                on_pause()
+            while _is_paused(pause_flag):
+                if _is_stopped(stop_flag):
+                    break
+                time.sleep(0.2)
+            if _is_stopped(stop_flag):
+                return -1, list(tail)
+            if on_resume:
+                on_resume()
+            proc = subprocess.Popen(
+                (resume_cmd or cmd), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding='utf-8', errors='replace', bufsize=1,
+                creationflags=_POPEN_FLAGS,
+            )
+            register_process(proc)
+            if current_process is not None:
+                current_process.proc = proc
+            reader = threading.Thread(target=_reader, args=(proc.stdout,), daemon=True)
+            reader.start()
+            started = time.time()
+            continue
+        if time.time() - started > hard_timeout:
+            _graceful_terminate(proc)
+            if on_timeout:
+                on_timeout()
+            break
+        time.sleep(0.5)
+
+    finish_process(proc)
+    code = proc.returncode if proc.returncode is not None else -1
+    unregister_process(proc)
+    if current_process is not None:
+        current_process.proc = None
+    # Let the reader drain any final buffered lines, then move on regardless.
+    reader.join(timeout=2)
+    return code, list(tail)
+
+
 def download_with_ytdlp(url, folder, filename, summary,
-                        quality=None, current_process=None, stop_flag=None,
-                        pause_flag=None, parallel_mode=False,
-                        series_url=None, series_name=None):
+                        quality=None, current_process=None,
+                        stop_flag=None, pause_flag=None,
+                        parallel_mode=False, series_url=None,
+                        series_name=None):
+    """Download an HLS/DASH stream via yt-dlp, rendering the app's own clean
+    single-line progress bar (same look as the aria2c path) instead of dumping
+    yt-dlp's raw fragment flood.
+
+    HLS always fragments, so yt-dlp's native `--concurrent-fragments` matches
+    external-aria2c speed here while keeping `--progress-template` authoritative
+    (external downloaders don't emit it) -- that's why this path drops external
+    aria2c. The social/playlist yt-dlp paths are intentionally left on external
+    aria2c since those are often single-file progressive downloads."""
     if not _check_ytdlp_availability():
         ui_emit('ytdlp_unavailable')
         summary.add_failed(filename)
@@ -2395,8 +2581,13 @@ def download_with_ytdlp(url, folder, filename, summary,
         quality_str += '/best'
 
     progress = LiveProgress(filename, parallel=parallel_mode)
-    proc = None
     try:
+        # Sentinel progress-template: the @@DLP@@ prefix lets the reader thread
+        # pick our progress lines out of yt-dlp's other output. --no-progress
+        # suppresses yt-dlp's own bar so only these structured lines carry pct.
+        prog_tmpl = ('download:@@DLP@@ %(progress._percent_str)s|'
+                     '%(progress._speed_str)s|%(progress._eta_str)s|'
+                     '%(progress.fragment_index)s|%(progress.fragment_count)s')
         cmd = [
             'yt-dlp',
             '-f', quality_str,
@@ -2406,71 +2597,34 @@ def download_with_ytdlp(url, folder, filename, summary,
             '--retries', '3',
             '--fragment-retries', '3',
             '--retry-sleep', '10',
-            '--no-warnings', '--progress', '--newline',
+            '--concurrent-fragments', str(config.get('aria2c_connections', 16)),
+            '--no-warnings', '--no-progress',
+            '--progress-template', prog_tmpl,
         ]
         cmd += _ytdlp_subtitle_flags(config, url)
-        if _check_aria2c_availability():
-            cmd += [
-                '--external-downloader', 'aria2c',
-                '--external-downloader-args',
-                f"aria2c:-x {config.get('aria2c_connections', 16)} -s {config.get('aria2c_splits', 16)} "
-                f"-c --max-tries=3 --retry-wait=10 --timeout=120 --connect-timeout=60 "
-                f"--file-allocation=none --min-split-size={config.get('aria2c_min_split_size', '1M')}"
-            ]
         cmd.append(url)
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, creationflags=_POPEN_FLAGS)
-        register_process(proc)
-        if current_process is not None:
-            current_process.proc = proc
 
-        started = time.time()
-        hard_timeout = 6 * 60 * 60
-        while proc.poll() is None:
-            if _is_stopped(stop_flag):
-                _graceful_terminate(proc)
-                break
-            # ── Pause/Resume support ───────────────────────────────
-            if _is_paused(pause_flag):
-                # Gracefully terminate so aria2c saves .aria2 state for resume
-                _graceful_terminate(proc)
-                try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    proc.kill()
-                finally:
-                    unregister_process(proc)
-                if current_process is not None:
-                    current_process.proc = None
-                ui_emit('download_paused_ctrlp')
-                # Block here until unpaused or stopped
-                while _is_paused(pause_flag):
-                    if _is_stopped(stop_flag):
-                        break
-                    time.sleep(0.2)
-                if _is_stopped(stop_flag):
-                    _ytdlp_record_paused(series_url, series_name, folder, filename)
-                    return False
-                # Re-launch with -c (continue/resume) flag
-                ui_emit('download_resuming')
-                # Add -c (continue) flag for aria2c
-                resume_cmd = cmd[:]  # cmd already has -c in aria2c args above
-                proc = subprocess.Popen(resume_cmd, stdin=subprocess.DEVNULL, creationflags=_POPEN_FLAGS)
-                register_process(proc)
-                if current_process is not None:
-                    current_process.proc = proc
-                started = time.time()
-                continue
-            # ──────────────────────────────────────────────────────
-            if time.time() - started > hard_timeout:
-                _graceful_terminate(proc)
-                ui_emit('ytdlp_timeout_moving_on')
-                break
-            time.sleep(0.5)
-        finish_process(proc)
-        code = proc.returncode if proc.returncode is not None else -1
-        unregister_process(proc)
-        if current_process is not None:
-            current_process.proc = None
+        def _on_pause():
+            ui_emit('download_paused_ctrlp')
+
+        def _on_resume():
+            ui_emit('download_resuming')
+
+        def _on_timeout():
+            ui_emit('ytdlp_timeout_moving_on')
+
+        code, tail = _run_ytdlp_with_live_progress(
+            cmd, progress,
+            stop_flag=stop_flag, pause_flag=pause_flag,
+            current_process=current_process,
+            on_pause=_on_pause, on_resume=_on_resume, on_timeout=_on_timeout,
+        )
+
+        if _is_stopped(stop_flag):
+            progress.stopped_for_resume()
+            ui_emit('ytdlp_stopped')
+            _ytdlp_record_paused(series_url, series_name, folder, filename)
+            return False
 
         if code == 0:
             for ext in ['mp4', 'mkv', 'webm']:
@@ -2486,21 +2640,20 @@ def download_with_ytdlp(url, folder, filename, summary,
                     return True
             # yt-dlp exited 0 but no output file -- likely failed
             progress.fail()
+            _print_ytdlp_tail(tail)
             ui_emit('ytdlp_no_output')
             summary.add_failed(filename)
             return False
         else:
-            if _is_stopped(stop_flag):
-                progress.stopped_for_resume()
-                ui_emit('ytdlp_stopped')
-                _ytdlp_record_paused(series_url, series_name, folder, filename)
-            else:
-                progress.fail()
-                ui_emit('ytdlp_failed')
-                summary.add_failed(filename)
+            # Real failure: surface the captured output tail so the reason
+            # (expired m3u8, format gone, etc.) survives instead of being
+            # swallowed by the suppressed progress stream.
+            progress.fail()
+            _print_ytdlp_tail(tail)
+            ui_emit('ytdlp_failed')
+            summary.add_failed(filename)
             return False
     except Exception as e:
-        unregister_process(proc)
         if current_process is not None:
             current_process.proc = None
         progress.fail()
