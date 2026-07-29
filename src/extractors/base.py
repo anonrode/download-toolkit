@@ -96,20 +96,32 @@ def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
             headers = {'Referer': referer} if referer else {}
             r = session.get(url, timeout=timeout, headers=headers)
 
-            m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text)
-            if m:
-                redirect_url = m.group(1)
-                if not redirect_url.startswith('http'):
-                    redirect_url = urljoin(url, redirect_url)
-                safe_print(f"  [*] Following JS redirect: {redirect_url[:60]}...")
-                return safe_get(session, redirect_url, referer=referer, retries=max(1, retries - 1), _seen=_seen)
-
             if not r.ok:
                 safe_print(f"  [!] HTTP {r.status_code}: {url[:60]}")
                 if attempt < retries - 1:
                     time.sleep(2)
                     continue
                 return None
+
+            # Only follow a JS redirect out of a SUCCESSFUL page. This check used
+            # to run before the r.ok test above, and dead intermediate links
+            # routinely answer 404/410 with a "bounce to the homepage" script --
+            # so safe_get followed it and handed the HOMEPAGE back as a success.
+            # Callers then parsed the wrong document, which is worse than a clean
+            # failure: a find_direct_video() fallback will happily return
+            # whatever unrelated video is on the homepage.
+            m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text)
+            if m:
+                redirect_url = m.group(1)
+                if not redirect_url.startswith('http'):
+                    redirect_url = urljoin(url, redirect_url)
+                safe_print(f"  [*] Following JS redirect: {redirect_url[:60]}...")
+                # Forward the caller's timeout -- dropping it silently reverted
+                # to the 20s default, so a deliberately short liveness probe
+                # (timeout=10) cost double that per candidate host.
+                return safe_get(session, redirect_url, timeout=timeout, referer=referer,
+                                retries=max(1, retries - 1), _seen=_seen)
+
             return r
         except Exception as e:
             safe_print(f"  [!] Attempt {attempt+1}/{retries} failed: {e}")
@@ -170,6 +182,27 @@ def _wait(ctx):
     fn = ctx.get('wait')
     if fn:
         fn()
+
+def _dedup_by_href(pairs):
+    """Dedup (label, href) anchor pairs on the HREF ALONE, keeping the first
+    label seen for each href.
+
+    `dict.fromkeys((label, href) for ...)` keys on the whole TUPLE, so two
+    anchors pointing at the same file under different link text -- which is the
+    normal shape of a quality-variant page ("Download 720p" / "Download 1080p"
+    on one episode) -- both survive. Consequences: the episode is downloaded
+    twice under two names, the reported `len(links)` count is inflated, and
+    because _filter_by_episode_range() below selects by *index*, every episode
+    after the first duplicate is off by one, so `--episodes 3-5` silently
+    returns the wrong episodes.
+    """
+    seen = {}
+    for pair in pairs:
+        label, href = pair
+        if href not in seen:
+            seen[href] = (label, href)
+    return list(seen.values())
+
 
 def _filter_by_episode_range(items, ctx):
     selected = ctx.get('episode_filter') if ctx else None

@@ -223,9 +223,9 @@ def extract_dramarain(url, session, ctx=None):
     # Method 1: direct waffi.cloud links (CDN subdomain rotates — drip, japa, etc.)
     # Dedup by href: a page can expose the same episode under two anchors
     # (e.g. quality variants), which would double-count and skew episode indexing.
-    waffi_links = list(dict.fromkeys(
+    waffi_links = _dedup_by_href(
         (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
-        if WAFFI_CLOUD_RE.search(a['href'])))
+        if WAFFI_CLOUD_RE.search(a['href']))
     if waffi_links:
         waffi_links = _filter_by_episode_range(waffi_links, ctx)
         if not waffi_links:
@@ -258,9 +258,9 @@ def extract_dramarain(url, session, ctx=None):
     # Method 1b: loadedfiles links (current dramakey.cc layout — same files/host
     # as 9jaRocks). loadedfiles rotates TLDs; the resolver rewrites any TLD to
     # the live .st host, so we match generically here.
-    lf_links = list(dict.fromkeys(
+    lf_links = _dedup_by_href(
         (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
-        if re.search(r'loadedfiles\.[a-z0-9-]+', a['href'], re.I)))
+        if re.search(r'loadedfiles\.[a-z0-9-]+', a['href'], re.I))
     # Skip links that are already error pages on the host
     _dead = [(l, h) for l, h in lf_links if 'error?e=' in h or 'errore=' in h]
     lf_links = [(l, h) for l, h in lf_links if 'error?e=' not in h and 'errore=' not in h]
@@ -273,9 +273,9 @@ def extract_dramarain(url, session, ctx=None):
 
     # Method 1c: nkiserv.com direct CDN links (current dramakey.cc layout —
     # same files as NKiri). These are direct download URLs, no resolver needed.
-    nk_links = list(dict.fromkeys(
+    nk_links = _dedup_by_href(
         (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
-        if 'nkiserv.com' in a['href']))
+        if 'nkiserv.com' in a['href'])
     if nk_links:
         nk_links = _filter_by_episode_range(nk_links, ctx)
         if not nk_links:
@@ -305,18 +305,18 @@ def extract_dramarain(url, session, ctx=None):
         return
 
     # Method 2: downloadwella.com / wetafiles.com intermediate links
-    dw_links = list(dict.fromkeys(
+    dw_links = _dedup_by_href(
         (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
-        if 'downloadwella.com' in a['href'] or 'wetafiles.com' in a['href']))
+        if 'downloadwella.com' in a['href'] or 'wetafiles.com' in a['href'])
     if dw_links:
         _run_prefetch_loop(dw_links, 'downloadwella')
         return
 
     # Method 3: /download intermediate pages (legacy layout fallback)
-    dl_links = list(dict.fromkeys(
+    dl_links = _dedup_by_href(
         (a.text.strip(), a['href']) for a in soup.find_all('a', href=True)
         if any(x in a['href'] for x in
-               [f'{DRAMARAIN_DOMAIN}/download', f'{DRAMAKEY_CC}/download'])))
+               [f'{DRAMARAIN_DOMAIN}/download', f'{DRAMAKEY_CC}/download']))
     if dl_links:
         _run_prefetch_loop(dl_links, 'episode')
         return

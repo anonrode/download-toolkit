@@ -172,8 +172,13 @@ def extract_plutomovies(url, session, ctx=None):
             _wait(ctx)
             safe_print(f"\n  [{i}/{len(all_eps)}] {ep_name}")
 
-            # Get prefetched result first — keeps queue aligned regardless of skip/fail
-            dl_link, direct = prefetcher.get(timeout=30)
+            # Get prefetched result first — keeps queue aligned regardless of skip/fail.
+            # get() returns None on timeout, and a bare `a, b = get()` would raise
+            # TypeError straight out of this loop into process_link_queue's generic
+            # handler -- abandoning every remaining episode with nothing recorded
+            # as failed. The `not dl_link or not direct` path below re-resolves.
+            _pf = prefetcher.get(timeout=30)
+            dl_link, direct = _pf if _pf else (None, None)
 
             # Kick off prefetch for next ep immediately while we process current
             if i < len(all_eps):

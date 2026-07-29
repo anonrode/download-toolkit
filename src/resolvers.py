@@ -64,18 +64,77 @@ def _exc_chain(exc):
     return seen
 
 
+_NET_EXC_CACHE = None
+_TRANSIENT_EXC_CACHE = None
+
+
+def _http_exc_bases():
+    """Broad HTTP exception bases across BOTH stacks, for `except` clauses.
+
+    Both stacks are live at once: make_session() (downloader.py) returns a
+    `curl_cffi.requests.session.Session` whenever curl_cffi imports -- it is in
+    requirements.txt and installed -- while a few call sites still use plain
+    `requests`. curl_cffi's exception tree is DISJOINT from requests':
+    `issubclass(curl_cffi...ConnectionError, requests.RequestException)` is
+    False. So a bare `except requests.RequestException` clause never fires for
+    anything a resolver's `session.get()` raises; every dropped connection fell
+    through to the `except Exception: return None` below it and was reported as
+    "link is gone" -- a permanent episode failure for one lost packet, which is
+    exactly what the wait-for-network retry machinery exists to prevent.
+    """
+    global _NET_EXC_CACHE
+    if _NET_EXC_CACHE is None:
+        bases = [requests.RequestException]
+        try:
+            from curl_cffi.requests import exceptions as _cfx
+            bases.append(_cfx.RequestException)
+        except Exception:
+            pass
+        _NET_EXC_CACHE = tuple(bases)
+    return _NET_EXC_CACHE
+
+
+def _transient_exc_types():
+    """Connectivity-failure classes from both stacks, for isinstance checks."""
+    global _TRANSIENT_EXC_CACHE
+    if _TRANSIENT_EXC_CACHE is None:
+        types = []
+        for mod in ('requests', 'curl_cffi'):
+            try:
+                if mod == 'requests':
+                    _e = requests.exceptions
+                else:
+                    from curl_cffi.requests import exceptions as _e
+                types += [_e.ConnectionError, _e.Timeout]
+            except Exception:
+                pass
+        _TRANSIENT_EXC_CACHE = tuple(types)
+    return _TRANSIENT_EXC_CACHE
+
+
 def _is_network_error(exc):
     """True if the exception is a transient connectivity failure (DNS drop,
     connection refused/reset, timeout) rather than a real 'not found'.
 
     These deserve a wait-for-network retry — the target link almost certainly
     still exists; the device just lost signal for a moment.
+
+    isinstance first, name-matching second. Name-matching alone missed
+    curl_cffi's `DNSError`: it subclasses curl_cffi's ConnectionError but its
+    name is in no marker set, so the single most common mobile failure -- the
+    radio dropping mid-resolve -- was classified as "genuinely gone" and failed
+    the episode permanently. The name set is still consulted because urllib3's
+    inner causes (NameResolutionError, gaierror) are not in either tree.
     """
-    names = {type(e).__name__ for e in _exc_chain(exc)}
+    chain = _exc_chain(exc)
+    transient = _transient_exc_types()
+    if transient and any(isinstance(e, transient) for e in chain):
+        return True
+    names = {type(e).__name__ for e in chain}
     net_markers = {
         'ConnectionError', 'ConnectTimeout', 'ReadTimeout', 'Timeout',
         'NewConnectionError', 'MaxRetryError', 'NameResolutionError',
-        'ConnectTimeoutError', 'gaierror',
+        'ConnectTimeoutError', 'gaierror', 'DNSError', 'ConnectionResetError',
     }
     return bool(names & net_markers)
 
@@ -122,20 +181,33 @@ def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
             headers = {'Referer': referer} if referer else {}
             r = session.get(url, timeout=timeout, headers=headers)
 
-            m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text)
-            if m:
-                redirect_url = m.group(1)
-                if not redirect_url.startswith('http'):
-                    redirect_url = urljoin(url, redirect_url)
-                safe_print(f"      [*] Following JS redirect: {redirect_url[:60]}...")
-                return safe_get(session, redirect_url, referer=referer, retries=max(1, retries - 1), _seen=_seen)
-
             if not r.ok:
                 safe_print(f"      [!] HTTP {r.status_code}: {url[:60]}")
                 if attempt < retries - 1:
                     time.sleep(2)
                     continue
                 return None
+
+            # Only follow a JS redirect out of a SUCCESSFUL page. This check used
+            # to run before the r.ok test above, and dead intermediate links
+            # routinely answer 404/410 with a "bounce to the homepage" script --
+            # so safe_get followed it and handed the HOMEPAGE back as a success.
+            # LoadedfilesResolver then returned None for what was really a dead
+            # link, and StreamtapeResolver's find_direct_video(r.text) fallback
+            # would return whatever unrelated video sat on that homepage: a
+            # wrong-file download instead of a clean failure.
+            m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text)
+            if m:
+                redirect_url = m.group(1)
+                if not redirect_url.startswith('http'):
+                    redirect_url = urljoin(url, redirect_url)
+                safe_print(f"      [*] Following JS redirect: {redirect_url[:60]}...")
+                # Forward the caller's timeout -- dropping it silently reverted to
+                # the 20s default, so LoadedfilesResolver's deliberate timeout=10
+                # per-candidate-host liveness probe cost 20s per TLD instead.
+                return safe_get(session, redirect_url, timeout=timeout, referer=referer,
+                                retries=max(1, retries - 1), _seen=_seen)
+
             return r
         except Exception as e:
             safe_print(f"      [!] Attempt {attempt+1}/{retries} failed: {e}")
@@ -205,7 +277,7 @@ class DownloadwellaResolver(BaseResolver):
                 return None
 
             return find_direct_video(r2.text)
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] Downloadwella: Network request failed: {e}")
@@ -380,7 +452,7 @@ class VidmolyResolver(BaseResolver):
             if m:
                 return m.group(1)
             return None
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise  # let the registry wait-and-retry
             safe_print(f"      [!] Vidmoly: Network request failed: {e}")
@@ -467,7 +539,7 @@ class VidbasicResolver(BaseResolver):
 
             # 4) legacy plaintext fallback (pre-CryptoJS scheme)
             return find_direct_video(text)
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] Vidbasic: Network request failed: {e}")
@@ -513,7 +585,7 @@ class KissasianResolver(BaseResolver):
             if src and src.startswith('http') and '.m3u8' in src:
                 return src
             return None
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] Kissasian: Network request failed: {e}")
@@ -545,7 +617,7 @@ class KisskhMegaplayResolver(BaseResolver):
             if m:
                 return m.group(1)
             return find_direct_video(r.text)
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] KisskhMegaplay: Network request failed: {e}")
@@ -603,7 +675,7 @@ class LightDLResolver(BaseResolver):
                 return None
             data2 = r2.json() if isinstance(r2.json(), dict) else {}
             return data2.get('downloadUrl')
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] LightDL: Network request failed: {e}")
@@ -626,7 +698,7 @@ class FivePlayResolver(BaseResolver):
             if not r or r.status_code != 200:
                 return None
             return find_direct_video(r.text)
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] 5play: Network request failed: {e}")
@@ -657,7 +729,7 @@ class EmbedResolver(BaseResolver):
             if not r or r.status_code != 200:
                 return None
             return find_direct_video(r.text)
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] Embed: Network request failed: {e}")
@@ -809,7 +881,7 @@ class DramaGatewayResolver(BaseResolver):
             if m:
                 return m.group(1)
             return None
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] DramaGateway: Network request failed: {e}")
@@ -874,7 +946,7 @@ class NaijaVaultGatewayResolver(BaseResolver):
                 if any(x in href.lower() for x in ['vikingfile.com', 'lulacloud.com']):
                     return href
             return None
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] NaijaVaultGateway: Network request failed: {e}")
@@ -928,7 +1000,7 @@ class PlutoMoviesResolver(BaseResolver):
             if m:
                 return m.group(1)
             return None
-        except requests.RequestException as e:
+        except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
             safe_print(f"      [!] PlutoMovies: Network request failed: {e}")

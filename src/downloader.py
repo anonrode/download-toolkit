@@ -1035,6 +1035,17 @@ def fetch_expected_size(url, session=None):
             s.headers['User-Agent'] = UA_DESKTOP
             owns_session = True
         r = s.head(url, timeout=10, allow_redirects=True)
+        # Only trust Content-Length from a SUCCESSFUL response. Several of these
+        # CDNs answer HEAD with 403/404 plus a short challenge or error body, and
+        # that body's Content-Length (a few hundred bytes) would otherwise be
+        # recorded as the episode's expected size. save_episode_size() only
+        # writes when the key is absent, so the bad value is never corrected --
+        # and from then on already_downloaded()'s `actual >= expected * 0.99`
+        # test declares a kilobyte of junk a finished episode, so the series
+        # gets marked complete having downloaded nothing. Returning None just
+        # means "size unknown", which every caller already handles.
+        if r.status_code not in (200, 206):
+            return None
         cl = r.headers.get('Content-Length') or r.headers.get('content-length')
         if cl and str(cl).isdigit():
             return int(cl)
@@ -1206,7 +1217,44 @@ def get_referer_for_url(url):
     return base_domain(url) + '/'
 
 def is_streaming_link(url):
-    return '.m3u8' in url or 'manifest' in url.lower()
+    """True if the URL is an adaptive-streaming manifest (HLS/DASH) that must be
+    handed to yt-dlp instead of aria2c.
+
+    Both directions of a wrong answer are silently destructive:
+
+      - A MISSED manifest goes to aria2c, which cheerfully downloads the few-KB
+        playlist *text* and saves it as `Episode 1.mp4`. fetch_expected_size
+        reports that same small size so the completeness check agrees, aria2c
+        exits 0, and download_file writes a *complete* receipt and marks the
+        episode done -- permanently recorded as downloaded with a text file as
+        the payload. `.M3U8` (legal; some hosts uppercase it) and
+        `?format=m3u8` both slipped through the old `'.m3u8' in url` test.
+
+      - A FALSE POSITIVE sends a progressive MP4 to yt-dlp, where
+        --concurrent-fragments buys nothing and download_file skips
+        fetch_expected_size/save_episode_size, losing the reference size that
+        the resume completeness check needs. The old bare `'manifest' in
+        url.lower()` did exactly this to any path like `/manifest/ep1.mp4`.
+    """
+    low  = (url or '').lower()
+    path = low.split('?', 1)[0].split('#', 1)[0]
+    # m3u8 is distinctive enough to accept anywhere -- path or query string.
+    if 'm3u8' in low:
+        return True
+    if path.endswith(('.mpd', '.m3u', '.ism', '.f4m')):
+        return True
+    # 'mpd'/'dash'/'hls' are too short to match as bare substrings (they collide
+    # with ordinary path text), so require a whole query value: ?format=mpd
+    if re.search(r'[?&][^=&]*=(?:mpd|dash|hls)(?:&|$)', low):
+        return True
+    # Keep the legacy 'manifest' catch -- some hosts serve HLS from a manifest
+    # path with no usable extension -- but never let it override a URL whose
+    # path is plainly a progressive media file.
+    if path.endswith(('.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.m4v', '.ts')):
+        return False
+    # 'manifest' must be in the PATH -- a query parameter merely *named*
+    # manifestId (`/v?manifestId=99&f=mp4`) is not a manifest URL.
+    return 'manifest' in path
 
 def check_url_alive(url, session):
     """
@@ -1227,21 +1275,66 @@ def check_url_alive(url, session):
     except Exception:
         return 'unknown'
 
+_WIN_RESERVED_NAMES = frozenset(
+    ['CON', 'PRN', 'AUX', 'NUL']
+    + [f'COM{i}' for i in range(1, 10)]
+    + [f'LPT{i}' for i in range(1, 10)]
+)
+
+
 def safe_filename(name):
-    name = re.sub(r'[<>:"/\\|?*]', '', name)
-    name = re.sub(r'\s+', ' ', name)
-    name = name.strip().lstrip('.').rstrip('.')
-    if not name:
-        return 'file'
-    # Truncate to stay within filesystem limits (255 bytes max on most FS)
+    """Make `name` safe to use as a single path component on Windows and POSIX.
+
+    Three traps this has to avoid, all of which caused real data loss:
+
+    1. The extension must be split off BEFORE dots are stripped. Sanitising the
+       whole string first turns '***.mp4' into '.mp4', and the old
+       `lstrip('.')` then ate the extension and returned the bare word 'mp4'.
+
+    2. A stem that sanitises away to nothing must not become a CONSTANT, or
+       every such episode collapses onto one filename, they overwrite each
+       other, and already_downloaded() skips the rest as "already saved". The
+       short content hash keeps distinct titles distinct.
+
+    3. Windows reserved device names must be escaped. 'NUL.mp4' is the null
+       device: writes appear to succeed, the file stays 0 bytes forever, so the
+       episode is re-downloaded on every run and never completes. 'CON.mp4' and
+       'COM1.mp4' behave similarly. A leading '_' defuses them.
+
+    Output for ordinary names is byte-identical to the previous implementation
+    -- including the truncation arithmetic -- because these strings are receipt
+    and resume-state keys, so gratuitous changes would orphan existing entries.
+    """
+    original = name or ''
+    name = re.sub(r'[<>:"/\\|?*]', '', original)
+    name = re.sub(r'[\x00-\x1f\x7f]', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+
     stem, dot, ext = name.rpartition('.')
-    if dot and len(ext) <= 10:
-        max_stem = 240 - len(ext)
+    # Only treat the tail as an extension if it actually looks like one;
+    # otherwise the whole string is the stem (e.g. 'Episode 1', 'Ep 1.').
+    if not dot or len(ext) > 10 or not re.fullmatch(r'[A-Za-z0-9]+', ext):
+        stem, ext = name, ''
+    stem = stem.strip().strip('.').strip()
+    if not stem:
+        src = original.strip()
+        if not src:
+            stem = 'file'
+        else:
+            import hashlib
+            stem = 'file-' + hashlib.sha1(
+                src.encode('utf-8', 'replace')).hexdigest()[:8]
+    if stem.upper() in _WIN_RESERVED_NAMES:
+        stem = '_' + stem
+
+    # Truncate to stay within filesystem limits (255 bytes max on most FS),
+    # always preserving the extension. `240 - len(ext)` matches the original.
+    if ext:
+        max_stem = max(1, 240 - len(ext))
         if len(stem) > max_stem:
-            name = stem[:max_stem].rstrip() + '.' + ext
-    elif len(name) > 240:
-        name = name[:240].rstrip()
-    return name
+            stem = stem[:max_stem].rstrip() or 'file'
+        return f"{stem}.{ext}"
+    return stem[:240].rstrip() or 'file'
 
 def find_direct_video(text):
     for ext in [r'\.m3u8', r'\.mp4', r'\.mkv']:
@@ -2725,8 +2818,24 @@ def download_with_ytdlp(url, folder, filename, summary,
             return False
 
         if code == 0:
-            for ext in ['mp4', 'mkv', 'webm']:
-                p = os.path.join(folder, f"{base}.{ext}")
+            # The extension list has to cover more than the merge target:
+            # --merge-output-format only applies when a merge actually HAPPENS,
+            # and the mandatory `/best` tail on quality_str can select a single
+            # muxed HLS variant that lands as .ts, or an audio-only format that
+            # lands as .m4a. Both siblings (download_social_ytdlp, download_file)
+            # already list m4a; this path did not, so a download that fully
+            # SUCCEEDED was reported as a failure and written a failed receipt.
+            # The glob is a last-resort net for anything else yt-dlp chose,
+            # including a format-id suffix like `<base>.f137.mp4`.
+            _MEDIA_EXTS = ('mp4', 'mkv', 'webm', 'm4a', 'ts', 'mov', 'flv')
+            cands = [os.path.join(folder, f"{base}.{ext}") for ext in _MEDIA_EXTS]
+            if not any(os.path.exists(p) for p in cands):
+                import glob as _glob
+                cands += sorted(
+                    p for p in _glob.glob(os.path.join(folder, _glob.escape(base) + '.*'))
+                    if os.path.splitext(p)[1].lower().lstrip('.') in _MEDIA_EXTS
+                )
+            for p in cands:
                 if os.path.exists(p):
                     size_mb = os.path.getsize(p) / (1024 * 1024)
                     progress.done(size_mb)
@@ -3205,23 +3314,56 @@ def download_file(url, folder, filename, summary,
 
 # ─── PREFETCHER ───────────────────────────────────────────────
 class Prefetcher:
-    """Pre-fetches next episode link while current one downloads."""
+    """Pre-fetches next episode link while current one downloads.
+
+    Every access to (_gen, _result, _ready) is serialized under _lock, and each
+    prefetch() carries a generation token. This is not defensive
+    over-engineering -- without the token a slow background thread silently
+    hands one episode's link to the *next* episode:
+
+      1. get() times out after `timeout` and breaks out of its wait loop while
+         the fetch thread for episode N is still running.
+      2. The caller carries on and calls prefetch(episode N+1), which resets
+         _result to None.
+      3. The thread from step 1 finally finishes and publishes episode N's link.
+      4. get() for episode N+1 sees _ready already set and returns *episode N's*
+         URL.
+
+    Nothing downstream can catch that: the link is live, so `_cdn_alive()`
+    passes, and episode N's video is written under episode N+1's filename,
+    marked done, and mark_series_complete() then clears the resume state -- so
+    the real episode N+1 is never fetched and no failure is ever recorded. A
+    superseded thread must therefore neither publish its result nor signal
+    _ready; the caller gets None and falls back to a fresh resolve.
+    """
     def __init__(self, fetch_fn):
         self.fetch_fn = fetch_fn
         self._result  = None
         self._thread  = None
         self._ready   = threading.Event()
+        self._lock    = threading.Lock()
+        self._gen     = 0
 
     def prefetch(self, *args, **kwargs):
-        self._ready.clear()
-        self._result = None
+        with self._lock:
+            self._gen += 1
+            gen = self._gen
+            self._result = None
+            self._ready.clear()
         def _run():
             try:
-                self._result = self.fetch_fn(*args, **kwargs)
+                res = self.fetch_fn(*args, **kwargs)
             except Exception as e:
-                self._result = None
+                res = None
                 safe_print("  " + render_message('prefetch_error', error=e))
-            self._ready.set()
+            with self._lock:
+                # Superseded while we were working -- the caller has already
+                # moved on to a later episode. Drop the result on the floor
+                # rather than mislabelling that episode with this link.
+                if gen != self._gen:
+                    return
+                self._result = res
+                self._ready.set()
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
 
@@ -3237,7 +3379,12 @@ class Prefetcher:
                 break
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
-        return self._result
+        with self._lock:
+            # Gate on _ready: on timeout the in-flight thread is still the
+            # current generation, so it may publish at any moment. Returning
+            # None here (rather than whatever _result happens to hold) keeps
+            # "timed out" and "resolved" from ever being confused.
+            return self._result if self._ready.is_set() else None
 
 # ─── BATCH DOWNLOADER ─────────────────────────────────────────
 def _unpack_item(item):

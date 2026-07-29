@@ -14,11 +14,11 @@ def extract_9jarocks(url, session, ctx=None):
     if r is None:
         return
     soup = BeautifulSoup(r.text, 'html.parser')
-    lf_links = list(dict.fromkeys(
+    lf_links = _dedup_by_href(
         (a.get_text(strip=True), a['href'])
         for a in soup.find_all('a', href=True)
         if re.search(r'loadedfiles\.[a-z0-9-]+', a['href'], re.I)
-    ))
+    )
     # Skip links that are already error pages on the host
     dead = [(label, href) for label, href in lf_links if 'error?e=' in href or 'errore=' in href]
     lf_links = [(label, href) for label, href in lf_links if 'error?e=' not in href and 'errore=' not in href]

@@ -118,7 +118,13 @@ def extract_naijaprey(url, session, ctx=None):
         _wait(ctx)
         safe_print(f"\n[{i}/{len(work)}] {ep_name}")
 
-        ws_url, direct = prefetcher.get(timeout=30)
+        # get() returns None on timeout (the background resolve outlived its
+        # window), so unpack defensively -- a bare `a, b = get()` raises
+        # TypeError, which escapes past this loop into process_link_queue's
+        # generic handler and abandons every remaining episode without
+        # recording a single failure. The empty-result path below re-resolves.
+        _pf = prefetcher.get(timeout=30)
+        ws_url, direct = _pf if _pf else (None, None)
         if i < len(work):
             prefetcher.prefetch(work[i][1])
 
