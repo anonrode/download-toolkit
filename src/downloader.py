@@ -2424,10 +2424,55 @@ def _ytdlp_parse_progress(payload):
     return pct, spd_mbps, eta, note
 
 
+def _purge_stale_fragments(out_dir, base):
+    """Delete leftover per-fragment temp files before relaunching an HLS download.
+
+    Removes the trigger for `HTTP Error 416: Range Not Satisfiable` on Ctrl+P
+    resume. When a partial `<out>.part-FragN(.part)` is on disk, yt-dlp resumes
+    that *individual fragment* with a byte-range request: `continuedl` is on by
+    default, so FragmentFD sets `frag_resume_len` from the leftover file's size
+    (downloader/fragment.py:119-122) and HttpFD turns it into `Range: bytes=N-`
+    (downloader/http.py:59-64, 116). HLS segment CDNs routinely reject `Range:`
+    on a media segment, and with `--concurrent-fragments` a whole batch of
+    fragments is in flight when we terminate, so several hit it at once.
+
+    yt-dlp does try to recover from a 416 by reopening without the Range header
+    (http.py:149-183), but that path is fragile in exactly our situation: it
+    re-raises if the un-ranged retry answers any non-5xx error (http.py:156-158)
+    -- a very live risk on token-signed segment URLs that 403 by the time we
+    resume -- and it never engages at all when the CDN aborts the connection
+    instead of returning a clean 416, which is the other symptom seen here.
+    Retrying doesn't help either: 416 is deterministic, so the same stale file
+    and the same Range header just produce the same 416 again.
+
+    Deleting only the `-Frag*` files is the surgical fix. Every fragment that
+    finished has already been appended to the main `.part` and its temp file
+    removed (fragment.py:154), and the `.ytdl` sidecar still holds the fragment
+    index -- so the relaunch picks up where it left off and we lose at most the
+    few seconds that were mid-flight. The blunt alternative (`--no-continue`)
+    resets the fragment index to 0 and restarts a 40-minute episode from
+    scratch on every pause."""
+    if not out_dir or not base:
+        return 0
+    removed = 0
+    try:
+        import glob as _glob
+        pattern = os.path.join(out_dir, _glob.escape(base) + '*-Frag*')
+        for p in _glob.glob(pattern):
+            try:
+                os.remove(p)
+                removed += 1
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return removed
+
+
 def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None,
                                   current_process=None, hard_timeout=6 * 60 * 60,
                                   resume_cmd=None, on_pause=None, on_resume=None,
-                                  on_timeout=None):
+                                  on_timeout=None, frag_dir=None, frag_base=None):
     """Launch yt-dlp with captured stdout and render progress via `progress`.
 
     A daemon reader thread parses the sentinel `@@DLP@@` progress lines from our
@@ -2465,9 +2510,13 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
     # ── Launch + main poll loop ─────────────────────────────────
     # The poll loop below is the SAME stop/pause/timeout loop the old inline
     # implementation used; the only addition is a daemon reader thread draining
-    # the captured pipe. On pause we terminate the proc (yt-dlp/ffmpeg flush
-    # their partial fragments for -c resume); the reader ends when the pipe
+    # the captured pipe. On pause we terminate the proc; the completed fragments
+    # are already appended to the main `.part` and the `.ytdl` sidecar holds the
+    # fragment index, so `-c` picks up from there. The reader ends when the pipe
     # closes, and resume re-launches proc + a fresh reader.
+    # Purge before the FIRST launch too: a Ctrl+C'd episode picked back up by the
+    # `resume` command has the same stale `-Frag*` files waiting to trigger a 416.
+    _purge_stale_fragments(frag_dir, frag_base)
     proc = subprocess.Popen(
         cmd, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -2505,6 +2554,9 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
                 return -1, list(tail)
             if on_resume:
                 on_resume()
+            # Drop the fragments that were mid-flight when we terminated, or
+            # yt-dlp resumes them with a Range request the HLS CDN answers 416.
+            _purge_stale_fragments(frag_dir, frag_base)
             proc = subprocess.Popen(
                 (resume_cmd or cmd), stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -2605,9 +2657,21 @@ def download_with_ytdlp(url, folder, filename, summary,
             '--merge-output-format', 'mp4',
             '-o', out_template,
             '--no-playlist',
-            '--retries', '3',
-            '--fragment-retries', '3',
+            # Socket aborts on HLS CDNs are common; retry hard rather than
+            # failing the episode. NOTE on --retry-sleep: a bare EXPR applies to
+            # the `http` retry type ONLY (yt-dlp's default_key), so the fragment
+            # retries above would get no backoff at all without an explicit
+            # `fragment:` entry -- they'd just hammer a dead socket ten times.
+            '--retries', '10',
+            '--fragment-retries', '10',
             '--retry-sleep', '10',
+            '--retry-sleep', 'fragment:exp=1:20',
+            # yt-dlp SKIPS unavailable fragments by default
+            # (skip_unavailable_fragments defaults to True), which silently
+            # yields a shorter file with a gap in it. We would rather fail the
+            # episode loudly and let the retry/resume machinery have another go
+            # than hand the user a video that's quietly missing chunks.
+            '--abort-on-unavailable-fragments',
             '--concurrent-fragments', str(config.get('aria2c_connections', 16)),
             '--user-agent', UA_DESKTOP,
             '--referer', referer,
@@ -2632,6 +2696,7 @@ def download_with_ytdlp(url, folder, filename, summary,
             stop_flag=stop_flag, pause_flag=pause_flag,
             current_process=current_process,
             on_pause=_on_pause, on_resume=_on_resume, on_timeout=_on_timeout,
+            frag_dir=folder, frag_base=base,
         )
 
         if _is_stopped(stop_flag):
