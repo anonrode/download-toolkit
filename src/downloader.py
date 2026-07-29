@@ -2451,14 +2451,33 @@ def _purge_stale_fragments(out_dir, base):
     index -- so the relaunch picks up where it left off and we lose at most the
     few seconds that were mid-flight. The blunt alternative (`--no-continue`)
     resets the fragment index to 0 and restarts a 40-minute episode from
-    scratch on every pause."""
+    scratch on every pause.
+
+    The name match must be anchored, not a loose prefix. Episode names are not
+    zero-padded (`base.py` hands out `episode-1`, and sites hand out plain
+    "Episode 1"), and `base.py`'s parallel path runs up to 8 `download_file`
+    workers into the *same* folder, so a bare `base + '*-Frag*'` glob would let
+    episode 1 delete `Episode 12.mp4.part-Frag7` out from under a *live* sibling
+    download. yt-dlp's `FragmentFD._read_fragment` only tolerates a missing
+    fragment on live streams, so that sibling would die with FileNotFoundError
+    and be recorded failed. Requiring a literal `.` after the base plus an
+    ext/format-id shape rules the neighbour out: after `Episode 1` the
+    neighbour has `2`, not `.`."""
     if not out_dir or not base:
         return 0
     removed = 0
     try:
         import glob as _glob
-        pattern = os.path.join(out_dir, _glob.escape(base) + '*-Frag*')
+        # `base.` prefix keeps `Episode 12` out of `Episode 1`'s sweep; the regex
+        # then confirms the middle really is `[.fFMT].EXT[.part]` so an episode
+        # legitimately named "Episode 1.5" isn't caught either.
+        pattern = os.path.join(out_dir, _glob.escape(base) + '.*-Frag*')
+        frag_re = re.compile(
+            r'^' + re.escape(base) + r'\.(?:f[\w.-]+\.)?[A-Za-z0-9]{2,5}'
+            r'(?:\.part)?-Frag\d+', re.IGNORECASE)
         for p in _glob.glob(pattern):
+            if not frag_re.match(os.path.basename(p)):
+                continue
             try:
                 os.remove(p)
                 removed += 1
