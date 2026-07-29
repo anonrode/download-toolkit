@@ -2636,13 +2636,14 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
         creationflags=_POPEN_FLAGS,
     )
     register_process(proc)
-    if current_process is not None:
-        current_process.proc = proc
-    reader = threading.Thread(target=_reader, args=(proc.stdout,), daemon=True)
-    reader.start()
-
     started = time.time()
-    while proc.poll() is None:
+    try:
+      if current_process is not None:
+        current_process.proc = proc
+      reader = threading.Thread(target=_reader, args=(proc.stdout,), daemon=True)
+      reader.start()
+
+      while proc.poll() is None:
         if _is_stopped(stop_flag):
             _graceful_terminate(proc)
             break
@@ -2656,6 +2657,15 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
                 unregister_process(proc)
             if current_process is not None:
                 current_process.proc = None
+            # The old reader is blocked on readline() against the pipe of the
+            # process we just killed. Joining it here means exactly one reader
+            # is ever calling progress.update(), so a dying reader can't
+            # interleave stale percentages with the resumed download's -- and
+            # the thread object we overwrite below is already finished.
+            try:
+                reader.join(timeout=2)
+            except Exception:
+                pass
             if on_pause:
                 on_pause()
             while _is_paused(pause_flag):
@@ -2689,11 +2699,17 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
             break
         time.sleep(0.5)
 
-    finish_process(proc)
-    code = proc.returncode if proc.returncode is not None else -1
-    unregister_process(proc)
-    if current_process is not None:
-        current_process.proc = None
+      finish_process(proc)
+      code = proc.returncode if proc.returncode is not None else -1
+    finally:
+        # Reached on the normal path AND when the poll loop raises (or the
+        # caller's thread is killed): without this, an exception between the
+        # Popen above and the old unregister left `proc` in the global process
+        # registry forever, so the shutdown handler would later try to signal a
+        # long-dead PID -- and on Windows that PID may have been recycled.
+        unregister_process(proc)
+        if current_process is not None:
+            current_process.proc = None
     # Let the reader drain any final buffered lines, then move on regardless.
     reader.join(timeout=2)
     return code, list(tail)
@@ -2703,7 +2719,7 @@ def download_with_ytdlp(url, folder, filename, summary,
                         quality=None, current_process=None,
                         stop_flag=None, pause_flag=None,
                         parallel_mode=False, series_url=None,
-                        series_name=None):
+                        series_name=None, bandwidth_limit=0):
     """Download an HLS/DASH stream via yt-dlp, rendering the app's own clean
     single-line progress bar (same look as the aria2c path) instead of dumping
     yt-dlp's raw fragment flood.
@@ -2763,8 +2779,28 @@ def download_with_ytdlp(url, folder, filename, summary,
         # (e.g. kisskh.megaplay.su) 403s the m3u8 even though the resolver
         # extracted it fine. Harmless for CDNs that don't check referer.
         referer = get_referer_for_url(url)
+        frag_conc = max(1, int(config.get('aria2c_connections', 16) or 16))
+        # The user's bandwidth cap has to be honoured on this path too -- it
+        # replaced external aria2c (which took --max-download-limit), so without
+        # this an HLS episode ignores the limit completely and saturates the line.
+        # yt-dlp applies --limit-rate PER fragment downloader, so the real ceiling
+        # is frag_conc x the value. Rather than raise the per-fragment share to
+        # some minimum (which would overshoot the cap the user asked for), drop
+        # the concurrency until an integer share fits underneath it: 100 KB/s
+        # becomes 12 fragments x 8K, not 16 x 8K = 128 KB/s.
+        frag_limit_kb = 0
+        if bandwidth_limit and int(bandwidth_limit) > 0:
+            bw = int(bandwidth_limit)
+            frag_conc = max(1, min(frag_conc, bw // 8))
+            frag_limit_kb = max(1, bw // frag_conc)
         cmd = [
             'yt-dlp',
+            # A user-level ~/.config/yt-dlp/config (or a stray yt-dlp.conf next to
+            # the binary) can inject -o, -f, --downloader or --no-progress and
+            # silently break the output path, the format choice or the
+            # --progress-template our reader thread depends on. Everything this
+            # path needs is already on the command line, so refuse outside config.
+            '--ignore-config',
             '-f', quality_str,
             '--merge-output-format', 'mp4',
             '-o', out_template,
@@ -2784,13 +2820,15 @@ def download_with_ytdlp(url, folder, filename, summary,
             # episode loudly and let the retry/resume machinery have another go
             # than hand the user a video that's quietly missing chunks.
             '--abort-on-unavailable-fragments',
-            '--concurrent-fragments', str(config.get('aria2c_connections', 16)),
+            '--concurrent-fragments', str(frag_conc),
             '--user-agent', UA_DESKTOP,
             '--referer', referer,
             '--add-header', f'Origin: {base_domain(referer)}',
             '--no-warnings', '--newline',
             '--progress-template', prog_tmpl,
         ]
+        if frag_limit_kb:
+            cmd += ['--limit-rate', f'{frag_limit_kb}K']
         cmd += _ytdlp_subtitle_flags(config, url)
         cmd.append(url)
 
@@ -3262,7 +3300,8 @@ def download_file(url, folder, filename, summary,
                                      pause_flag=pause_flag,
                                      parallel_mode=parallel_mode,
                                      series_url=series_url,
-                                     series_name=series_name)
+                                     series_name=series_name,
+                                     bandwidth_limit=bandwidth_limit)
     else:
         result = download_with_aria2c(url, folder, filename, summary,
                                       bandwidth_limit=bandwidth_limit,
