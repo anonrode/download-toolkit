@@ -508,7 +508,7 @@ class VidbasicResolver(BaseResolver):
         return None
 
     @staticmethod
-    def resolve(url: str, session) -> str:
+    def resolve(url: str, session, _depth: int = 0) -> str:
         try:
             r = session.get(url, timeout=20)
             if not r or r.status_code != 200:
@@ -530,12 +530,15 @@ class VidbasicResolver(BaseResolver):
                     if direct:
                         return direct
 
-            # 3) embedload.cfd wrapper iframes the real vidbasic host
+            # 3) embedload.cfd wrapper iframes the real vidbasic host.
+            # This recursion is our own, so the registry's _depth > 5 limit never
+            # sees it: A can iframe B which iframes A again, and `inner != url`
+            # only catches a page iframing itself. Carry our own counter.
             mi = re.search(r'<iframe[^>]+src=["\']([^"\']*(?:vidbasic|vidb\.top)[^"\']*)["\']', text)
-            if mi:
+            if mi and _depth < 3:
                 inner = urljoin(url, mi.group(1))
                 if inner != url:
-                    return VidbasicResolver.resolve(inner, session)
+                    return VidbasicResolver.resolve(inner, session, _depth=_depth + 1)
 
             # 4) legacy plaintext fallback (pre-CryptoJS scheme)
             return find_direct_video(text)
@@ -722,10 +725,21 @@ class EmbedResolver(BaseResolver):
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
+            # The impersonating session goes FIRST. A bare requests.get carries no
+            # UA, no cookies and no curl_cffi TLS fingerprint, so these hosts serve
+            # it a challenge page or a 403 — and a ConnectionError in that call
+            # re-raises out of here before any fallback can run. Plain requests is
+            # only useful as a second opinion when the session itself is refused.
             headers = {'Referer': session.headers.get('Referer', '')}
-            r = requests.get(url, timeout=20, headers=headers)
-            if not r or r.status_code != 200:
+            r = None
+            try:
                 r = session.get(url, timeout=20)
+            except Exception as e:
+                if _is_network_error(e):
+                    raise
+                r = None
+            if r is None or r.status_code != 200:
+                r = requests.get(url, timeout=20, headers=headers)
             if not r or r.status_code != 200:
                 return None
             return find_direct_video(r.text)
@@ -741,7 +755,63 @@ class EmbedResolver(BaseResolver):
 class VikingFileResolver(BaseResolver):
     @staticmethod
     def can_resolve(url: str) -> bool:
-        return 'vikingfile.com' in urlparse(url).netloc.lower()
+        p = urlparse(url)
+        if 'vikingfile.com' not in p.netloc.lower():
+            return False
+        # The resolved CDN link is usually ANOTHER vikingfile.com host, and
+        # 'vikingfile.com' is listed in the registry's resolver_domains — so the
+        # registry's `.mp4` fast-path deliberately does NOT short-circuit it, and
+        # cls.resolve() re-enters here with the direct file URL we just returned.
+        # That second pass finds no download page, returns None, and throws away
+        # a perfectly good resolve (after GETting the movie body to look for HTML
+        # in it). Refuse media paths outright, same as VidbasicResolver.
+        if p.path.lower().endswith(('.mp4', '.mkv', '.webm', '.ts', '.m3u8')):
+            return False
+        return True
+
+    @staticmethod
+    def _page_text(session, url, headers, allow_redirects=True, max_bytes=2_000_000):
+        """GET a candidate URL, but only read the body if it IS a page.
+
+        The URL handed to us can redirect straight to the video. Reading `.text`
+        on that pulls the whole movie into memory (twice — the raw buffer plus
+        the decoded str) just to regex it for HTML, which on a phone is an OOM.
+        So stream it, look at Content-Type first, and read at most `max_bytes`
+        of markup even when the type says page (some hosts lie).
+
+        Returns (text_or_None, final_url, response). text is None when the body
+        is media — in that case final_url is the thing worth downloading."""
+        r = session.get(url, timeout=15, allow_redirects=allow_redirects,
+                        headers=headers, stream=True)
+        final = getattr(r, 'url', None) or url
+        ctype = (r.headers.get('Content-Type') or '').lower()
+        # An absent Content-Type is treated as a page: the read is bounded
+        # anyway, so guessing wrong costs at most max_bytes, not a whole movie.
+        if ctype and not any(t in ctype for t in ('html', 'text', 'json', 'javascript')):
+            try:
+                r.close()
+            except Exception:
+                pass
+            return None, final, r
+        buf = b''
+        try:
+            for chunk in r.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                buf += chunk
+                if len(buf) >= max_bytes:
+                    break
+        finally:
+            try:
+                r.close()
+            except Exception:
+                pass
+        enc = getattr(r, 'encoding', None) or 'utf-8'
+        try:
+            text = buf.decode(enc, errors='replace')
+        except (LookupError, TypeError):
+            text = buf.decode('utf-8', errors='replace')
+        return text, final, r
 
     @staticmethod
     def resolve(url: str, session) -> str:
@@ -778,15 +848,25 @@ class VikingFileResolver(BaseResolver):
                     return loc2
                 if any(x in loc1 for x in ['.mp4', '.mkv', 'cdn', 'download']):
                     return loc1
-                cdn = find_direct_video(r2.text)
+                # r2 was fetched with allow_redirects=False and has no location,
+                # so it is the body of loc1 itself — stream it rather than
+                # touching .text, which would buffer a movie if loc1 was media.
+                text2, _final2, _r = VikingFileResolver._page_text(
+                    session, loc1, headers, allow_redirects=False)
+                if text2 is None:
+                    return loc1
+                cdn = find_direct_video(text2)
                 return cdn if cdn else loc1
 
             if r1.status_code == 200:
-                r1b = session.get(url, timeout=15, allow_redirects=True, headers=headers)
-                final_url = r1b.url
+                text1, final_url, _r = VikingFileResolver._page_text(session, url, headers)
                 if final_url != url and any(x in final_url for x in ['.mp4', '.mkv', 'cdn', 'download']):
                     return final_url
-                cdn = find_direct_video(r1b.text)
+                if text1 is None:
+                    # Followed the redirects into a media body: that final URL
+                    # IS the answer even if it doesn't carry a tell-tale token.
+                    return final_url if final_url != url else None
+                cdn = find_direct_video(text1)
                 if cdn:
                     return cdn
                 for pattern in [
@@ -794,7 +874,7 @@ class VikingFileResolver(BaseResolver):
                     r'https?://[^\s"\'<>]+\.(?:mp4|mkv)\b',
                     r'"(https?://[^\s"\'<>]+(?:download|file)[^\s"\'<>]*)"',
                 ]:
-                    m = re.search(pattern, r1b.text, re.IGNORECASE)
+                    m = re.search(pattern, text1, re.IGNORECASE)
                     if m:
                         return m.group(0).strip('"')
             safe_print(f"      [!] VikingFile: could not resolve {url[:60]}")
