@@ -61,9 +61,9 @@ def _episode_label(url, link_text, fallback_index):
     if m:
         return f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}"
     text = (link_text or '').strip()
-    if text and text.lower() not in ('download', 'click here', 'link', 'watch'):
+    if text and not re.search(r'^\s*\[?\s*(?:download\s*)?server\s*\d*\s*\]?\s*$', text, re.I) and not re.search(r'^\s*download\s*$', text, re.I) and text.lower() not in ('download', 'click here', 'link', 'watch', 'server 1', 'server 2'):
         return text
-    return f"episode-{fallback_index}"
+    return f"episode-{fallback_index:02d}"
 
 def _hash_safe_name(ep_name, fallback_index):
     """Guard against filename collisions when a host serves a bare-hash slug

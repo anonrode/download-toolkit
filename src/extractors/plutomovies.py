@@ -113,7 +113,8 @@ def extract_plutomovies(url, session, ctx=None):
                     continue
                 ep_name = a.get_text(strip=True)
                 ep_name = re.sub(r'(?i)^(previous|next)\s+episode\b\s*', '', ep_name).strip()
-                ep_name = ep_name or safe_filename(href.rstrip('/').split('/')[-1])
+                if not ep_name or re.search(r'^\s*\[?\s*(?:download\s*)?server\s*\d*\s*\]?\s*$', ep_name, re.I) or ep_name.lower() in ('download', 'click here', 'link', 'watch', 'server 1', 'server 2'):
+                    ep_name = safe_filename(href.rstrip('/').split('/')[-1])
                 ep_items.append((full_url, safe_filename(ep_name)))
             # Deduplicate
             seen_u = set()
