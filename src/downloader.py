@@ -637,7 +637,9 @@ class LiveProgress:
         first row is stranded on screen and every subsequent tick strands
         another, which is the runaway wall of half-drawn bars seen on mobile.
       * parallel -- several workers share stdout, so a live line is meaningless;
-        emit a plain line when the decile changes.
+        emit a plain sampled line instead. Sampling triggers on a decile change,
+        on a fragment-counter change (rate-limited), or on a heartbeat, so a
+        download whose percentage is pinned still shows movement.
       * not a TTY (web UI, ngrok, redirect to a file) -- same as parallel. ANSI
         would be literal bytes here.
 
@@ -653,6 +655,13 @@ class LiveProgress:
     # double-width. Budgeting for that is cheaper than a wrapped line.
     _CHROME = len(_PREFIX) + 2 + 2
 
+    # Static-mode sampling. A note change (frag N/M stepping) is the only proof
+    # of life on a stalled HLS download, but it fires per fragment, so it gets
+    # its own floor to keep 223 fragments from becoming 223 lines. The heartbeat
+    # is the backstop: no line for this long means the display looks hung.
+    _STATIC_MIN_GAP    = 5.0
+    _STATIC_HEARTBEAT  = 20.0
+
     def __init__(self, filename, parallel=False):
         self._full_name = filename
         self._name     = filename[:50] if len(filename) > 50 else filename
@@ -661,6 +670,8 @@ class LiveProgress:
         self._done     = False
         self._last_update = 0
         self._last_decile = None
+        self._last_static  = 0.0    # when static mode last emitted a line
+        self._last_note    = None
 
     @staticmethod
     def _elide(name, budget):
@@ -691,9 +702,12 @@ class LiveProgress:
         fields = []
         if note is not None:
             fields.append((3, f' - {note}'))
-        if spd_mbps is not None:
+        # A zero rate is what yt-dlp reports before the first fragment lands, and
+        # `ETA --:--` is what a stalling CDN reports for minutes on end. Both are
+        # filler that costs the filename columns it needs, so neither is drawn.
+        if spd_mbps:
             fields.append((2, f' - {spd_mbps:.1f} MB/s'))
-        if eta:
+        if eta and not set(str(eta)) <= set('-:0 '):
             fields.append((1, f' - ETA {eta}'))
         while fields:
             tail = ''.join(t for _, t in fields)
@@ -731,16 +745,27 @@ class LiveProgress:
 
         static = self._parallel or not _is_tty()
         if static:
-            # Gate on the decile CHANGING, not `int(pct) % 10 == 0`: combined
-            # with the 0.5s throttle that test is sampling-dependent, so a fast
-            # download can step over every decile and print nothing at all,
-            # while a slow one reprints the same decile again and again.
-            if pct is None:
-                return
-            decile = int(pct // 10)
-            if decile == self._last_decile:
+            # Static mode can't repaint a line, so it samples instead. Three
+            # independent triggers, because any one of them alone goes blind:
+            #   * decile change   - normal progress on a healthy download.
+            #   * note change     - 'frag 12/223' -> 'frag 13/223' proves life
+            #                       even while pct is pinned (HLS stalls at
+            #                       0.4% for minutes when a fragment CDN
+            #                       misbehaves; the decile never moves).
+            #   * heartbeat       - nothing changed at all, but silence for
+            #                       _STATIC_HEARTBEAT seconds is
+            #                       indistinguishable from a hung script.
+            # pct is None (unknown total size) must NOT suppress output -
+            # _compose renders it as '  --%' and the note still carries info.
+            decile = int(pct // 10) if pct is not None else None
+            gap    = now - self._last_static
+            if not (decile != self._last_decile
+                    or (note != self._last_note and gap >= self._STATIC_MIN_GAP)
+                    or gap >= self._STATIC_HEARTBEAT):
                 return
             self._last_decile = decile
+            self._last_note   = note
+            self._last_static = now
             line = self._compose(pct, spd_mbps, eta, note, _term_width() - 1)
             SURFACE.print_above(lambda: print(line))
             return
