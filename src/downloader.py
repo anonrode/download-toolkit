@@ -217,6 +217,30 @@ def _visible_len(s):
     return len(_ANSI_RE.sub('', s))
 
 
+def _stdout_can_encode(probe):
+    """Can stdout carry `probe` without raising? Termux/adb shells sometimes come
+    up with an ASCII or latin-1 stdout, and a single unencodable glyph turns the
+    whole write into a UnicodeEncodeError -- which used to be swallowed silently,
+    leaving a blank row where the progress line should be."""
+    enc = getattr(sys.stdout, 'encoding', None)
+    if not enc:
+        return False
+    try:
+        probe.encode(enc)
+        return True
+    except Exception:
+        return False
+
+
+_UNICODE_OK = _stdout_can_encode('↓…')
+_ARROW      = '↓' if _UNICODE_OK else '>'
+_ELLIPSIS   = '…' if _UNICODE_OK else '...'
+
+
+def _ascii_safe(text):
+    return text.encode('ascii', 'replace').decode('ascii')
+
+
 def _is_tty():
     try:
         return bool(sys.stdout.isatty())
@@ -293,8 +317,20 @@ class TerminalSurface:
                 sys.stdout.write('\r\x1b[2K' + text)
                 sys.stdout.flush()
                 self._live = text
+            except UnicodeEncodeError:
+                # A glyph stdout cannot encode must not cost us the whole line.
+                # Retry in ASCII rather than leaving the row blank.
+                try:
+                    safe = _ascii_safe(text)
+                    sys.stdout.write('\r\x1b[2K' + safe)
+                    sys.stdout.flush()
+                    self._live = safe
+                except Exception:
+                    self._live = None
             except Exception:
-                pass
+                # The row state is now unknown; forget it so the next
+                # print_above does not try to redraw a line that never landed.
+                self._live = None
 
     def finish_live(self, text):
         """Retire the live line, replacing it with a permanent one."""
@@ -649,7 +685,7 @@ class LiveProgress:
     identical for all 26, so the user cannot tell which one is running.
     """
 
-    _PREFIX = '  [↓] '
+    _PREFIX = f'  [{_ARROW}] '
     # len(_PREFIX) + the two spaces before the percentage, plus 2 columns of slack:
     # '↓' and '…' are East-Asian-ambiguous, and some phone terminals render them
     # double-width. Budgeting for that is cheaper than a wrapped line.
@@ -672,6 +708,7 @@ class LiveProgress:
         self._last_decile = None
         self._last_static  = 0.0    # when static mode last emitted a line
         self._last_note    = None
+        self._dbg_dumped   = False  # one-shot DLT_PROGRESS_DEBUG dump latch
 
     @staticmethod
     def _elide(name, budget):
@@ -681,9 +718,11 @@ class LiveProgress:
             return name
         if budget <= 3:
             return name[:budget]
-        keep = budget - 1                      # one column for the ellipsis
+        if budget <= len(_ELLIPSIS):
+            return name[:budget]
+        keep = budget - len(_ELLIPSIS)         # columns left for the name itself
         head = (keep + 1) // 2                 # bias to the head on odd budgets
-        return name[:head] + '…' + name[len(name) - (keep - head):]
+        return name[:head] + _ELLIPSIS + name[len(name) - (keep - head):]
 
     def _compose(self, pct, spd_mbps, eta, note, width):
         """Build the live line, dropping optional fields until it fits `width`.
@@ -742,6 +781,18 @@ class LiveProgress:
         self._started = True
         update_status(status='Downloading', current=self._name,
                       progress=(f'{pct:0.1f}%' if pct is not None else '--%'))
+
+        # One-shot terminal-state dump. The blank line has survived two content
+        # fixes precisely because the failing path prints nothing; this makes the
+        # invisible visible on the phone WITHOUT needing --debug or a piped run.
+        # Set DLT_PROGRESS_DEBUG=1 in the environment before a download to arm it.
+        if not self._dbg_dumped and os.environ.get('DLT_PROGRESS_DEBUG'):
+            self._dbg_dumped = True
+            _preview = self._compose(pct, spd_mbps, eta, note, _term_width() - 1)
+            safe_print(
+                f'  [progress-dbg] tty={_is_tty()} width={_term_width()} '
+                f'parallel={self._parallel} enc={sys.stdout.encoding!r} '
+                f'len={_visible_len(_preview)} line={_preview!r}')
 
         static = self._parallel or not _is_tty()
         if static:
@@ -2806,6 +2857,11 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
     Ctrl+C / pause behaviour is unchanged. Returns (exit_code, tail_lines)."""
     import threading, collections
     tail = collections.deque(maxlen=15)
+    # One loud line per download when the display first breaks, then quiet:
+    # the reader calls update() ~10x/s, so an unconditional print would bury
+    # the terminal. Per-download (not module) so a transient failure on one
+    # episode doesn't gag the diagnostic for the next.
+    _progress_broken = [False]
 
     def _reader(pipe):
         try:
@@ -2818,19 +2874,32 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
                     try:
                         pct, spd, eta, note = _ytdlp_parse_progress(line[idx + 7:].strip())
                         progress.update(pct, spd, eta, note=note)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # Never silent: a throw here is exactly what produced a
+                        # blank progress row with no explanation. debug_print is
+                        # gated on --debug, which is no help to a user who is
+                        # already staring at a blank line, so the FIRST failure
+                        # always prints. Repeats are throttled to debug because
+                        # this runs once per progress line (~10/s).
+                        if not _progress_broken[0]:
+                            _progress_broken[0] = True
+                            safe_print(f'  [progress] display failed: {e!r}')
+                        else:
+                            debug_print(f'  [progress] update failed: {e!r}')
                     continue
                 if ('[Merger]' in line or '[ExtractAudio]' in line or '[Fixup' in line
                         or '[VideoConvertor]' in line or 'Merging formats' in line):
-                    try: progress.update(100.0, note='finalizing…')
+                    try: progress.update(100.0, note='finalizing' + _ELLIPSIS)
                     except Exception: pass
                     tail.append(line); continue
                 if line.startswith('ERROR:') or line.startswith('WARNING:'):
                     safe_print('  ' + line)
                 tail.append(line)
-        except Exception:
-            pass
+        except Exception as e:
+            # The reader dying takes the whole progress display with it, so say
+            # so instead of leaving the row frozen or blank. This one is always
+            # loud -- it happens at most once per download, not per line.
+            safe_print(f'  [progress] reader thread stopped: {e!r}')
     # ── Launch + main poll loop ─────────────────────────────────
     # The poll loop below is the SAME stop/pause/timeout loop the old inline
     # implementation used; the only addition is a daemon reader thread draining
