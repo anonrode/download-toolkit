@@ -14,8 +14,21 @@ def extract_9jarocks(url, session, ctx=None):
     if r is None:
         return
     soup = BeautifulSoup(r.text, 'html.parser')
+    def _extract_label(a):
+        text = a.get_text(strip=True)
+        if text and not re.search(r'^\s*\[?\s*server\s*\d*\s*\]?\s*$', text, re.I) and not re.search(r'^\s*download\s*$', text, re.I):
+            return text
+        p = a.parent
+        if p:
+            p_text = p.get_text(strip=True)
+            cleaned = re.sub(r'\[?\s*server\s*\d*\s*\]?', '', p_text, flags=re.I)
+            cleaned = re.sub(r'\bdownload\b', '', cleaned, flags=re.I).strip()
+            if cleaned:
+                return cleaned
+        return text
+
     lf_links = _dedup_by_href(
-        (a.get_text(strip=True), a['href'])
+        (_extract_label(a), a['href'])
         for a in soup.find_all('a', href=True)
         if re.search(r'loadedfiles\.[a-z0-9-]+', a['href'], re.I)
     )
@@ -62,7 +75,7 @@ def extract_9jarocks(url, session, ctx=None):
     for i, (label, lf_url) in enumerate(lf_links, 1):
         # Anchor text is the episode code (e.g. S01E01) — use it when it's not generic
         label_clean = label.strip() if label else ''
-        if label_clean and not re.fullmatch(r'download', label_clean, re.I):
+        if label_clean and not re.search(r'^\s*\[?\s*server\s*\d*\s*\]?\s*$', label_clean, re.I) and not re.search(r'^\s*download\s*$', label_clean, re.I):
             base_fname = safe_filename(f"{name} - {label_clean}")
         else:
             slug_part = lf_url.rstrip('/').split('/')[-1]

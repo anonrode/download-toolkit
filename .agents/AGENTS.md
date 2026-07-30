@@ -56,7 +56,12 @@ Signature is fixed: `def extract_<site>(url, session, ctx=None):`. Study `src/ex
 9. **Honor stop/pause every iteration:** `if _stopped(ctx): break` at the top of the loop, `_wait(ctx)` right after.
 10. **Close out:** `if summary.failed == 0 and not _stopped(ctx): mark_series_complete(url)` then `summary.report()`.
 
-**Episode numbering is a real, recurring bug source.** The source site can point episode N's button at episode M's file. If a page carries authoritative per-episode numbers (e.g. dramakey.cc's `.episode-item` → `.episode-number`), key the filename off *that*, not off the `SxxExx` embedded in the URL — trusting the URL tag renames E04 to "S01E05", collides with the real E05, and drops one. `_episode_label(url, text, i)` is the fallback ladder (URL SxxExx → link text → `episode-N`); use the authoritative source when the page gives you one, `_episode_label` otherwise. When two episodes share an href, warn — don't silently merge.
+**Episode numbering & label collision prevention:** The source site can point episode N's button at episode M's file, or use generic anchor text like `[SERVER 1]`, `Download`, or `Server 1` for every link.
+- Extractors MUST NEVER generate identical `base_fname` values for multiple links in the same batch.
+- If anchor text is generic (`[SERVER 1]`, `Download`, `Server 1`, etc.), extractors MUST check parent/surrounding elements (e.g. `<p>`, `<td>`, `<span>`) for `EPISODE N` or `SxxExx` text.
+- If labels remain generic or collide, extractors MUST fall back to unique sequential episode titles (e.g. `Show Name - Episode 01`, `Show Name - Episode 02`).
+- Never allow filename collisions — identical filenames cause `already_downloaded()` to return `True` for subsequent episodes and silently skip the entire rest of the series.
+- When a page carries authoritative per-episode numbers (e.g. dramakey.cc's `.episode-item` → `.episode-number`), key the filename off *that*, not off the `SxxExx` embedded in the URL — trusting the URL tag renames E04 to "S01E05", collides with the real E05, and drops one. `_episode_label(url, text, i)` is the fallback ladder (URL SxxExx → link text → `episode-N`); use the authoritative source when the page gives you one, `_episode_label` otherwise. When two episodes share an href, warn — don't silently merge.
 
 **Multi-layout extractors** (dramarain is the model) try methods in order and `return` on the first that yields links. When you add a new layout, add it as a new method block *before* the generic fallback and after the more specific ones — same ordering discipline as resolvers (§3). Don't reorder existing method blocks without understanding which pages each catches.
 
