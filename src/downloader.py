@@ -68,7 +68,10 @@ PROGRESS_LOG = os.path.join(CONFIG_DIR, '.download.log')  # NEW: Download progre
 
 UA_DESKTOP   = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-PRINT_LOCK   = threading.Lock()
+# Re-entrant: TerminalSurface.print_above() holds this while invoking a callback
+# that is itself a locked printer (safe_print, ui_screen). With a plain Lock that
+# self-deadlocks the download thread on the first WARNING line.
+PRINT_LOCK   = threading.RLock()
 STATE_LOCK   = threading.RLock()
 PROCESS_LOCK = threading.Lock()
 ACTIVE_PROCESSES = set()
@@ -206,15 +209,131 @@ def _is_noisy_line(text):
     )
     return t.startswith(noisy_starts) or any(x in t for x in noisy_contains)
 
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+
+
+def _visible_len(s):
+    """Width of `s` on screen -- ANSI colour codes occupy no columns."""
+    return len(_ANSI_RE.sub('', s))
+
+
+def _is_tty():
+    try:
+        return bool(sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _term_width(default=80):
+    try:
+        import shutil as _sh
+        w = _sh.get_terminal_size((default, 24)).columns
+    except Exception:
+        return default
+    # A phone terminal mid-rotate (and some ngrok/web ptys) reports 0 or a
+    # nonsense width for a tick; treat anything implausible as the default
+    # rather than clamping the line down to nothing.
+    return w if w and w >= 20 else default
+
+
+class TerminalSurface:
+    """Single owner of stdout, so a live \\r line and ordinary prints coexist.
+
+    Every writer goes through here. `set_live` keeps at most ONE line on the
+    cursor's row; `print_above` erases that line, emits the message, then
+    redraws it underneath. Without the handshake, a WARNING forwarded by
+    yt-dlp's reader thread lands on top of the progress line -- PRINT_LOCK stops
+    the two writes from interleaving, but it cannot stop the second overwriting
+    the first, which is why a 416 storm shredded the display.
+
+    Erasing uses \\x1b[2K rather than trailing spaces. Padding only clears as
+    many columns as the PREVIOUS frame was long, so a frame that loses a field
+    (yt-dlp drops the ETA intermittently) leaves the tail of the old one on
+    screen -- `frag 13/223` printed over `frag 12/223 - ETA 09:04` reads as
+    `frag 13/223 - ETA 09:04`, a stale ETA that looks live.
+
+    When stdout is not a TTY -- the web UI, an ngrok pipe, a redirect to a log
+    -- `\\r` and `\\x1b[2K` are literal bytes rather than cursor motion, so the
+    "single line" degenerates into every frame concatenated. There we emit
+    nothing here and let the caller decide when a change is worth a plain line.
+    """
+
+    def __init__(self):
+        self._live = None   # plain text of the line currently on the cursor row
+
+    def _erase_locked(self):
+        if self._live is not None:
+            sys.stdout.write('\r\x1b[2K')
+            self._live = None
+
+    def print_above(self, emit):
+        """Run `emit` (which prints) with the live line temporarily removed."""
+        with PRINT_LOCK:
+            live = self._live
+            try:
+                if _is_tty():
+                    self._erase_locked()
+                    sys.stdout.flush()
+            except Exception:
+                pass
+            try:
+                emit()
+            finally:
+                # Redraw even if `emit` raised, otherwise the progress line is
+                # silently gone for the rest of the download.
+                if live is not None and _is_tty():
+                    self.set_live(live)
+
+    def set_live(self, text):
+        """Replace the live line. `text` must already be width-clamped."""
+        if not _is_tty():
+            return
+        with PRINT_LOCK:
+            try:
+                sys.stdout.write('\r\x1b[2K' + text)
+                sys.stdout.flush()
+                self._live = text
+            except Exception:
+                pass
+
+    def finish_live(self, text):
+        """Retire the live line, replacing it with a permanent one."""
+        with PRINT_LOCK:
+            try:
+                if _is_tty():
+                    self._erase_locked()
+                sys.stdout.write(text + '\n')
+                sys.stdout.flush()
+            except Exception:
+                pass
+            self._live = None
+
+    def clear_live(self):
+        with PRINT_LOCK:
+            try:
+                if _is_tty():
+                    self._erase_locked()
+                    sys.stdout.flush()
+            except Exception:
+                pass
+            self._live = None
+
+
+SURFACE = TerminalSurface()
+
+
 def safe_print(*args, **kwargs):
     text = ' '.join(str(a) for a in args)
     if not is_debug() and _is_noisy_line(text):
         return
-    with PRINT_LOCK:
+
+    def _emit():
         try:
             print(*args, **kwargs)
         except UnicodeEncodeError:
             print(text.encode('ascii', 'replace').decode('ascii'), **kwargs)
+
+    SURFACE.print_above(_emit)
 
 def debug_print(*args, **kwargs):
     if is_debug():
@@ -240,8 +359,11 @@ def get_status():
 def ui_screen(title, rows=None, footer=None):
     """Compact normal-mode status block. In debug mode it still prints cleanly."""
     rows = rows or []
-    width = 50
-    with PRINT_LOCK:
+    # Never draw the rule wider than the terminal: on a phone a hardcoded 50
+    # wraps to a second row of dashes under every heading.
+    width = min(50, max(20, _term_width() - 1))
+
+    def _emit():
         print()
         print(paint("ANONRODE", "bcyan", "bold"))
         print(paint(title, "bold"))
@@ -254,6 +376,8 @@ def ui_screen(title, rows=None, footer=None):
         if footer:
             print()
             print(footer)
+
+    SURFACE.print_above(_emit)
 
 def register_process(proc):
     """Track subprocesses so Ctrl+C can stop parallel downloads too.
@@ -502,16 +626,92 @@ class DownloadReceipt:
 
 
 class LiveProgress:
+    """Progress display that adapts to the surface it is drawing on.
+
+    Three modes, chosen at render time rather than construction time so a
+    terminal resize (or a rotate on a phone) is picked up on the next tick:
+
+      * interactive TTY -- one live line owned by SURFACE, clamped to the
+        terminal width so it can never wrap. A wrapped line is unfixable by
+        `\\r`, which returns to the start of the LAST physical row only: the
+        first row is stranded on screen and every subsequent tick strands
+        another, which is the runaway wall of half-drawn bars seen on mobile.
+      * parallel -- several workers share stdout, so a live line is meaningless;
+        emit a plain line when the decile changes.
+      * not a TTY (web UI, ngrok, redirect to a file) -- same as parallel. ANSI
+        would be literal bytes here.
+
+    The filename absorbs the width pressure: fixed fields are budgeted first and
+    the name gets whatever is left, middle-elided. Truncating the tail instead
+    would leave `cases-between-us-2026-epis` for every episode in a series --
+    identical for all 26, so the user cannot tell which one is running.
     """
-    Single-line \r progress display.
-    parallel=True switches to static newline output to avoid garbling.
-    """
+
+    _PREFIX = '  [↓] '
+    # len(_PREFIX) + the two spaces before the percentage, plus 2 columns of slack:
+    # '↓' and '…' are East-Asian-ambiguous, and some phone terminals render them
+    # double-width. Budgeting for that is cheaper than a wrapped line.
+    _CHROME = len(_PREFIX) + 2 + 2
+
     def __init__(self, filename, parallel=False):
+        self._full_name = filename
         self._name     = filename[:50] if len(filename) > 50 else filename
         self._parallel = parallel
         self._started  = False
         self._done     = False
         self._last_update = 0
+        self._last_decile = None
+
+    @staticmethod
+    def _elide(name, budget):
+        if budget <= 0:
+            return ''
+        if len(name) <= budget:
+            return name
+        if budget <= 3:
+            return name[:budget]
+        keep = budget - 1                      # one column for the ellipsis
+        head = (keep + 1) // 2                 # bias to the head on odd budgets
+        return name[:head] + '…' + name[len(name) - (keep - head):]
+
+    def _compose(self, pct, spd_mbps, eta, note, width):
+        """Build the live line, dropping optional fields until it fits `width`.
+
+        Order matters: ETA goes before speed because a stalled CDN reports
+        `ETA --:--` while the speed still carries information, and the fragment
+        note goes last because on HLS it is the only field that shows progress
+        at all when the percentage is pinned near zero.
+        """
+        pct_s = f'{pct:5.1f}%' if pct is not None else '   --%'
+        # (rank, text) -- the LOWEST rank is dropped first. Fields are listed in
+        # display order, which is also descending value: the fragment note stays
+        # longest because on HLS it is the only field that still moves while the
+        # percentage is pinned near zero, and ETA goes first because a stalled CDN
+        # reports `--:--` and tells the user nothing.
+        fields = []
+        if note is not None:
+            fields.append((3, f' - {note}'))
+        if spd_mbps is not None:
+            fields.append((2, f' - {spd_mbps:.1f} MB/s'))
+        if eta:
+            fields.append((1, f' - ETA {eta}'))
+        while fields:
+            tail = ''.join(t for _, t in fields)
+            budget = width - self._CHROME - len(pct_s) - len(tail)
+            # Stop once the name has a usable budget, or once one field is left --
+            # below that the name matters more than any of these numbers.
+            if budget >= 12 or len(fields) == 1:
+                break
+            fields.remove(min(fields, key=lambda f: f[0]))
+        tail = ''.join(t for _, t in fields)
+        budget = max(0, width - self._CHROME - len(pct_s) - len(tail))
+        name = self._elide(self._full_name, budget)
+        line = f'{self._PREFIX}{name}  {pct_s}{tail}'
+        # Final hard clamp: a pathological width (or a name we could not elide
+        # far enough) must still not wrap.
+        if _visible_len(line) > width:
+            line = line[:width]
+        return line
 
     def update(self, pct, spd_mbps=None, eta=None, note=None):
         if self._done:
@@ -526,24 +726,40 @@ class LiveProgress:
         self._last_update = now
 
         self._started = True
-        pct_s = f'{pct:5.1f}%' if pct is not None else '   --%'
         update_status(status='Downloading', current=self._name,
                       progress=(f'{pct:0.1f}%' if pct is not None else '--%'))
-        spd_s  = f' - {spd_mbps:.1f} MB/s' if spd_mbps is not None else ''
-        eta_s  = f' - ETA {eta}'           if eta          else ''
-        note_s = f' - {note}'              if note         else ''
-        line  = f'  [↓] {self._name}  {pct_s}{spd_s}{eta_s}{note_s}'
-        try:
-            with PRINT_LOCK:
-                if self._parallel:
-                    if pct is not None and int(pct) % 10 == 0:
-                        sys.stdout.write(line + '\n')
-                        sys.stdout.flush()
-                else:
-                    sys.stdout.write('\r' + line + '   ')
-                    sys.stdout.flush()
-        except Exception:
-            pass
+
+        static = self._parallel or not _is_tty()
+        if static:
+            # Gate on the decile CHANGING, not `int(pct) % 10 == 0`: combined
+            # with the 0.5s throttle that test is sampling-dependent, so a fast
+            # download can step over every decile and print nothing at all,
+            # while a slow one reprints the same decile again and again.
+            if pct is None:
+                return
+            decile = int(pct // 10)
+            if decile == self._last_decile:
+                return
+            self._last_decile = decile
+            line = self._compose(pct, spd_mbps, eta, note, _term_width() - 1)
+            SURFACE.print_above(lambda: print(line))
+            return
+
+        SURFACE.set_live(self._compose(pct, spd_mbps, eta, note, _term_width() - 1))
+
+    def _terminal(self, line):
+        """Emit the final line for this download and retire the live line.
+
+        `paint` wraps text in ANSI, so the width clamp has to measure visible
+        columns -- len() would count the escape bytes and over-elide.
+        """
+        width = _term_width() - 1
+        if _visible_len(line) > width:
+            # Only the name is variable here; re-elide it against what's left.
+            over = _visible_len(line) - width
+            short = self._elide(self._full_name, max(0, len(self._full_name) - over - 1))
+            line = line.replace(self._full_name, short, 1)
+        SURFACE.finish_live(line)
 
     def done(self, size_mb=None):
         if self._done:
@@ -551,32 +767,14 @@ class LiveProgress:
         self._done = True
         update_status(status='Complete', current=self._name, progress='100%')
         size_s = f' ({size_mb:.1f} MB)' if size_mb is not None else ''
-        line   = f'  {paint("[OK]", "bgreen")} Done: {self._name}{size_s}'
-        try:
-            with PRINT_LOCK:
-                if self._parallel or not self._started:
-                    sys.stdout.write(line + '\n')
-                else:
-                    sys.stdout.write('\r' + line + ' ' * 20 + '\n')
-                sys.stdout.flush()
-        except Exception:
-            pass
+        self._terminal(f'  {paint("[OK]", "bgreen")} Done: {self._full_name}{size_s}')
 
     def fail(self):
         if self._done:
             return
         self._done = True
         update_status(status='Failed', current=self._name)
-        line = f'  {paint("[X]", "bred", "bold")} Failed: {self._name}'
-        try:
-            with PRINT_LOCK:
-                if self._parallel or not self._started:
-                    sys.stdout.write(line + '\n')
-                else:
-                    sys.stdout.write('\r' + line + ' ' * 20 + '\n')
-                sys.stdout.flush()
-        except Exception:
-            pass
+        self._terminal(f'  {paint("[X]", "bred", "bold")} Failed: {self._full_name}')
 
     def stopped_for_resume(self):
         # Clean user stop (Ctrl+C) -- the partial file is saved for resume, so
@@ -586,16 +784,8 @@ class LiveProgress:
             return
         self._done = True
         update_status(status='Stopped', current=self._name)
-        line = f'  {paint("[stop]", "byellow")} Stopped: {self._name} {paint("(saved for resume)", "gray")}'
-        try:
-            with PRINT_LOCK:
-                if self._parallel or not self._started:
-                    sys.stdout.write(line + '\n')
-                else:
-                    sys.stdout.write('\r' + line + ' ' * 20 + '\n')
-                sys.stdout.flush()
-        except Exception:
-            pass
+        self._terminal(f'  {paint("[stop]", "byellow")} Stopped: {self._full_name} '
+                       f'{paint("(saved for resume)", "gray")}')
 
 # ─── DISK SPACE ───────────────────────────────────────────────
 def get_free_space_gb():
@@ -1729,15 +1919,9 @@ _TORRENT_LINE_LEN = [0]
 
 
 def _clear_line():
-    """Erase the current \\r progress line so following output isn't garbled."""
-    try:
-        with PRINT_LOCK:
-            if _TORRENT_LINE_LEN[0] > 0:
-                sys.stdout.write('\r' + ' ' * _TORRENT_LINE_LEN[0] + '\r')
-                sys.stdout.flush()
-                _TORRENT_LINE_LEN[0] = 0
-    except Exception:
-        pass
+    """Erase the live torrent line so following output isn't garbled."""
+    SURFACE.clear_live()
+    _TORRENT_LINE_LEN[0] = 0
 
 
 def _make_bar(pct, width=20):
@@ -1757,26 +1941,29 @@ def _render_torrent_bar(pct, done, total, speed, peers, seeds, eta):
 
     update_status(status='Downloading', current=f'torrent {pct}%', progress=f'{pct}%')
 
-    bar = _make_bar(pct)
+    width = _term_width() - 1
+    # Shrink the bar before dropping fields: 20 cells of bar plus the stats runs
+    # ~68 columns, which wraps on a phone. Below ~46 columns the bar is dropped
+    # entirely -- the numbers carry the information, the bar is decoration.
+    bar_w = 20 if width >= 68 else (10 if width >= 46 else 0)
+    bar = _make_bar(pct, bar_w) if bar_w else ''
     # Normalize "GiB" -> "GB" etc. for cleaner display
     done_s = done.replace('i', '')
     total_s = total.replace('i', '')
     speed_s = speed.replace('i', '')
 
-    plain = (f'  {bar} {pct:>3}%  {done_s}/{total_s}  '
+    stats = (f'{pct:>3}%  {done_s}/{total_s}  '
              f'{speed_s}/s  {peers}p/{seeds}s  ETA {eta}')
+    plain = f'  {bar} {stats}' if bar else f'  {stats}'
+    if len(plain) > width:
+        plain = f'  {pct:>3}%  {done_s}/{total_s}  {speed_s}/s'[:width]
+        bar = ''
 
-    # Colorize just the bar (pad first, then paint -- ANSI breaks width math)
-    colored = plain.replace(bar, paint(bar, 'bgreen' if pct >= 100 else 'bcyan'))
+    # Colorize just the bar (measure first, then paint -- ANSI breaks width math)
+    colored = plain.replace(bar, paint(bar, 'bgreen' if pct >= 100 else 'bcyan')) if bar else plain
 
-    try:
-        with PRINT_LOCK:
-            pad = max(0, _TORRENT_LINE_LEN[0] - len(plain))
-            sys.stdout.write('\r' + colored + ' ' * pad)
-            sys.stdout.flush()
-            _TORRENT_LINE_LEN[0] = len(plain)
-    except Exception:
-        pass
+    SURFACE.set_live(colored)
+    _TORRENT_LINE_LEN[0] = len(plain)
 
 
 def _scan_folder_size(folder):
@@ -3407,17 +3594,17 @@ class Prefetcher:
         self._thread.start()
 
     def get(self, timeout=30):
-        import sys
         spinner = ['|', '/', '-', '\\']
         i = 0
         while not self._ready.wait(timeout=0.15):
-            sys.stdout.write(f"\r  [{spinner[i % 4]}] Preparing next episode...")
-            sys.stdout.flush()
+            # Through the surface, so this is a no-op on a pipe/web UI instead of
+            # spraying literal \r escapes, and so a concurrent warning erases it
+            # cleanly rather than overwriting half the text.
+            SURFACE.set_live(f"  [{spinner[i % 4]}] Preparing next episode...")
             i += 1
             if i * 0.15 > timeout:
                 break
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+        SURFACE.clear_live()
         with self._lock:
             # Gate on _ready: on timeout the in-flight thread is still the
             # current generation, so it may publish at any moment. Returning
