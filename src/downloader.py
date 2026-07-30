@@ -1480,6 +1480,15 @@ def get_referer_for_url(url):
         return 'https://plutomovies.com/'
     if 'kwik.cx' in url or 'animepahe' in url:
         return 'https://anitaku.com.ro/'
+    # Vidbasic (vidb.top embed -> hls.vidbasic.top manifest -> jisooido.top byte-
+    # range segments). The segment host allowlists the *player* origin as Referer
+    # and serves a 559-byte HTML decoy to everything else -- including the manifest
+    # host itself and the source-site episode URL. Handed the manifest's own
+    # domain (the base_domain fallback), every fragment 416s forever on a decoy
+    # and the download produces an unplayable file. The player origin is what a
+    # real browser sends, so pin it here.
+    if 'vidbasic' in url or 'jisooido' in url:
+        return 'https://vidb.top/'
     return base_domain(url) + '/'
 
 def is_streaming_link(url):
@@ -2862,6 +2871,9 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
     # the terminal. Per-download (not module) so a transient failure on one
     # episode doesn't gag the diagnostic for the next.
     _progress_broken = [False]
+    # Last real progress frame, so retry/heartbeat repaints keep the true pct
+    # instead of blanking the row to '--%'. Written only by the reader thread.
+    _last = {'pct': None, 'spd': None, 'eta': None, 'note': None, 't': time.time()}
 
     def _reader(pipe):
         try:
@@ -2873,6 +2885,7 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
                 if idx != -1:
                     try:
                         pct, spd, eta, note = _ytdlp_parse_progress(line[idx + 7:].strip())
+                        _last.update(pct=pct, spd=spd, eta=eta, note=note, t=time.time())
                         progress.update(pct, spd, eta, note=note)
                     except Exception as e:
                         # Never silent: a throw here is exactly what produced a
@@ -2894,12 +2907,52 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
                     tail.append(line); continue
                 if line.startswith('ERROR:') or line.startswith('WARNING:'):
                     safe_print('  ' + line)
+                # A stalling CDN emits 'Got error: HTTP Error 416 ... Retrying
+                # fragment N (k/K)' for every fragment and NO new progress frame,
+                # so the live row would otherwise freeze at 'frag 0/296' and look
+                # dead (the reported blank line). These lines don't start with
+                # ERROR:/WARNING:, so surface them onto the row as a note against
+                # the last real pct -- proof of life without spamming the scroll.
+                elif 'Retrying' in line and ('fragment' in line or 'Got error' in line):
+                    m = re.search(r'Retrying fragment (\d+) \((\d+)/(\d+)\)', line)
+                    note = (f'retry frag {m.group(1)} ({m.group(2)}/{m.group(3)})'
+                            if m else 'retrying' + _ELLIPSIS)
+                    try:
+                        progress.update(_last['pct'], _last['spd'], _last['eta'], note=note)
+                    except Exception:
+                        pass
                 tail.append(line)
         except Exception as e:
             # The reader dying takes the whole progress display with it, so say
             # so instead of leaving the row frozen or blank. This one is always
             # loud -- it happens at most once per download, not per line.
             safe_print(f'  [progress] reader thread stopped: {e!r}')
+
+    _hb_stop = threading.Event()
+
+    def _heartbeat():
+        # The live row only repaints when a new progress frame arrives. A CDN
+        # that 416s every fragment emits NO frames, so the row would freeze at
+        # 'frag 0/296' and read as dead -- the reported blank line. Repaint every
+        # few seconds with a staleness marker whenever the reader has gone quiet,
+        # so a stalled download is visibly stalled. The `age >= tick` guard means
+        # this only fires when the reader is idle, so the two threads never race
+        # to call update() at once (terminal writes are PRINT_LOCK-serialised
+        # anyway). Static/parallel rows have their own heartbeat; skip them.
+        tick = 4.0
+        while not _hb_stop.wait(tick):
+            if progress._done or progress._parallel or not _is_tty():
+                continue
+            age = time.time() - _last['t']
+            if age < tick:
+                continue
+            base = _last['note'] or ''
+            note = f'{base} - stalled {int(age)}s' if base else f'stalled {int(age)}s'
+            try:
+                progress.update(_last['pct'], _last['spd'], _last['eta'], note=note)
+            except Exception:
+                pass
+
     # ── Launch + main poll loop ─────────────────────────────────
     # The poll loop below is the SAME stop/pause/timeout loop the old inline
     # implementation used; the only addition is a daemon reader thread draining
@@ -2923,6 +2976,8 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
         current_process.proc = proc
       reader = threading.Thread(target=_reader, args=(proc.stdout,), daemon=True)
       reader.start()
+      hb = threading.Thread(target=_heartbeat, name='progress-heartbeat', daemon=True)
+      hb.start()
 
       while proc.poll() is None:
         if _is_stopped(stop_flag):
@@ -2983,6 +3038,9 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
       finish_process(proc)
       code = proc.returncode if proc.returncode is not None else -1
     finally:
+        # Stop the heartbeat first so it can't repaint the row after we've
+        # retired the live line below.
+        _hb_stop.set()
         # Reached on the normal path AND when the poll loop raises (or the
         # caller's thread is killed): without this, an exception between the
         # Popen above and the old unregister left `proc` in the global process
