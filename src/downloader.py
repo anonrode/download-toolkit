@@ -724,7 +724,7 @@ class LiveProgress:
         head = (keep + 1) // 2                 # bias to the head on odd budgets
         return name[:head] + _ELLIPSIS + name[len(name) - (keep - head):]
 
-    def _compose(self, pct, spd_mbps, eta, note, width):
+    def _compose(self, pct, spd_mbps, eta, note, width, size=None):
         """Build the live line, dropping optional fields until it fits `width`.
 
         Order matters: ETA goes before speed because a stalled CDN reports
@@ -740,7 +740,13 @@ class LiveProgress:
         # reports `--:--` and tells the user nothing.
         fields = []
         if note is not None:
-            fields.append((3, f' - {note}'))
+            fields.append((4, f' - {note}'))
+        # Size ('45.2MiB / 512MiB', or just downloaded when the total is unknown)
+        # ranks above speed/ETA: it survives a narrowing line longer because on a
+        # size-reporting HLS stream the growing byte count is proof of life the
+        # same way the fragment note is, and it's what the user asked to see.
+        if size:
+            fields.append((3, f' - {size}'))
         # A zero rate is what yt-dlp reports before the first fragment lands, and
         # `ETA --:--` is what a stalling CDN reports for minutes on end. Both are
         # filler that costs the filename columns it needs, so neither is drawn.
@@ -766,7 +772,7 @@ class LiveProgress:
             line = line[:width]
         return line
 
-    def update(self, pct, spd_mbps=None, eta=None, note=None):
+    def update(self, pct, spd_mbps=None, eta=None, note=None, size=None):
         if self._done:
             return
 
@@ -788,7 +794,7 @@ class LiveProgress:
         # Set DLT_PROGRESS_DEBUG=1 in the environment before a download to arm it.
         if not self._dbg_dumped and os.environ.get('DLT_PROGRESS_DEBUG'):
             self._dbg_dumped = True
-            _preview = self._compose(pct, spd_mbps, eta, note, _term_width() - 1)
+            _preview = self._compose(pct, spd_mbps, eta, note, _term_width() - 1, size=size)
             safe_print(
                 f'  [progress-dbg] tty={_is_tty()} width={_term_width()} '
                 f'parallel={self._parallel} enc={sys.stdout.encoding!r} '
@@ -817,11 +823,11 @@ class LiveProgress:
             self._last_decile = decile
             self._last_note   = note
             self._last_static = now
-            line = self._compose(pct, spd_mbps, eta, note, _term_width() - 1)
+            line = self._compose(pct, spd_mbps, eta, note, _term_width() - 1, size=size)
             SURFACE.print_above(lambda: print(line))
             return
 
-        SURFACE.set_live(self._compose(pct, spd_mbps, eta, note, _term_width() - 1))
+        SURFACE.set_live(self._compose(pct, spd_mbps, eta, note, _term_width() - 1, size=size))
 
     def _terminal(self, line):
         """Emit the final line for this download and retire the live line.
@@ -2590,7 +2596,10 @@ def _download_with_requests_impl(s, url, folder, filename, summary, stop_flag=No
                                 spd = bytes_per_second / 1024 / 1024
                                 eta_s = int((total - downloaded) / bytes_per_second) if bytes_per_second > 0 else 0
                                 eta = f'{eta_s // 60}:{eta_s % 60:02d}'
-                                progress.update(pct, spd, eta)
+                                _dl_h = _human_size(downloaded)
+                                _tot_h = _human_size(total)
+                                _sz = f'{_dl_h} / {_tot_h}' if (_dl_h and _tot_h) else _dl_h
+                                progress.update(pct, spd, eta, size=_sz)
                 if should_restart:
                     continue
                 # Completed chunk loop successfully
@@ -2742,16 +2751,38 @@ def _print_ytdlp_tail(tail):
         safe_print('  ' + ln)
 
 
+def _human_size(n):
+    """Bytes -> compact human string ('45.2MB'). Matches yt-dlp's style closely
+    enough to sit next to it. Returns None for a non-positive/unknown count so
+    the caller can omit the field entirely."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if n < 1024 or unit == 'TB':
+            return (f'{n:.0f}{unit}' if unit == 'B' else f'{n:.1f}{unit}')
+        n /= 1024
+
+
 def _ytdlp_parse_progress(payload):
     """Parse the sentinel progress-template payload emitted by download_with_ytdlp:
-    'percent|speed|eta|frag_index|frag_count'. Returns (pct, spd_mbps, eta, note).
+    'percent|speed|eta|frag_index|frag_count|downloaded|total|total_estimate'.
+    Returns (pct, spd_mbps, eta, note, size).
 
     Any field yt-dlp can't fill renders as 'NA'/'Unknown'; those become None so
-    the caller can fall back (e.g. HLS with no declared size -> fragment ratio)."""
+    the caller can fall back (e.g. HLS with no declared size -> fragment ratio).
+    `size` is a ready-to-render string: 'downloaded / total' when the total is
+    known, else just 'downloaded' (HLS often can't report a total until every
+    segment is in), or None when yt-dlp reports neither. The total_estimate is
+    yt-dlp's extrapolated size on fragmented streams -- used only when the exact
+    total is missing so an HLS line can still show a target."""
     parts = payload.split('|')
-    while len(parts) < 5:
+    while len(parts) < 8:
         parts.append('')
-    pct_s, spd_s, eta_s, fi_s, fc_s = (p.strip() for p in parts[:5])
+    pct_s, spd_s, eta_s, fi_s, fc_s, dl_s, tot_s, est_s = (p.strip() for p in parts[:8])
 
     def _bad(v):
         return (not v) or v.upper() in ('NA', 'UNKNOWN', 'UNKNOWN B/S', '-', 'NONE')
@@ -2786,7 +2817,22 @@ def _ytdlp_parse_progress(payload):
             spd_mbps = val * factor
 
     eta = None if _bad(eta_s) else eta_s
-    return pct, spd_mbps, eta, note
+
+    # Size string. yt-dlp's _*_bytes_str come pre-formatted ('45.20MiB'); we just
+    # clean the tombstone values and pair them. A known total gives 'dl / total';
+    # a missing total (typical on HLS mid-download) shows just what's landed.
+    dl  = None if _bad(dl_s)  else dl_s
+    tot = None if _bad(tot_s) else tot_s
+    if tot is None and not _bad(est_s):
+        tot = '~' + est_s          # extrapolated: flag it so it doesn't read exact
+    if dl and tot:
+        size = f'{dl} / {tot}'
+    elif dl:
+        size = dl
+    else:
+        size = None
+
+    return pct, spd_mbps, eta, note, size
 
 
 def _purge_stale_fragments(out_dir, base):
@@ -2853,6 +2899,50 @@ def _purge_stale_fragments(out_dir, base):
     return removed
 
 
+def _purge_hls_partial(out_dir, base):
+    """Delete a partial HLS download so it restarts cleanly from fragment 0.
+
+    Unlike `_purge_stale_fragments` (which keeps the `.part`/`.ytdl` so an
+    in-process Ctrl+P resume continues against the SAME manifest), this drops the
+    partial entirely. It is called when re-entering download_with_ytdlp with a
+    FRESHLY RE-RESOLVED manifest -- e.g. the `resume` command picking a stopped
+    series back up. Those premilkyway/streamwish manifests are token-signed
+    (`?t=&s=&e=`): the resume mints a brand-new signed URL whose segment URLs no
+    longer match the bytes already in the old `.part`, so yt-dlp's `-c` tries to
+    continue against segments that now 403/416 and the episode wedges. Restarting
+    the one episode from scratch is the robust fix -- we lose only that episode's
+    partial progress, and it always completes.
+
+    Scoped exactly like _purge_stale_fragments: an anchored `base.` prefix plus a
+    shape check so a parallel sibling ("Episode 12" vs "Episode 1") is never hit.
+    """
+    if not out_dir or not base:
+        return 0
+    removed = 0
+    try:
+        import glob as _glob
+        pattern = os.path.join(out_dir, _glob.escape(base) + '.*')
+        # Anchor on `base.` so "Episode 12" is never swept by "Episode 1", then
+        # only remove in-progress artefacts -- a finished `<base>.<ext>` is kept.
+        prefix = base + '.'
+        for p in _glob.glob(pattern):
+            fn = os.path.basename(p)
+            if not fn.startswith(prefix):
+                continue
+            # yt-dlp's partials: `<base>[.fID].<ext>.part`, the `.ytdl` resume
+            # sidecar, and per-fragment `...-FragN(.part)` temps.
+            if (fn.endswith('.part') or fn.endswith('.ytdl') or '-Frag' in fn):
+                try:
+                    os.remove(p)
+                    removed += 1
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    return removed
+
+
+
 def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None,
                                   current_process=None, hard_timeout=6 * 60 * 60,
                                   resume_cmd=None, on_pause=None, on_resume=None,
@@ -2873,7 +2963,7 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
     _progress_broken = [False]
     # Last real progress frame, so retry/heartbeat repaints keep the true pct
     # instead of blanking the row to '--%'. Written only by the reader thread.
-    _last = {'pct': None, 'spd': None, 'eta': None, 'note': None, 't': time.time()}
+    _last = {'pct': None, 'spd': None, 'eta': None, 'note': None, 'size': None, 't': time.time()}
 
     def _reader(pipe):
         try:
@@ -2884,9 +2974,9 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
                 idx = line.find('@@DLP@@')
                 if idx != -1:
                     try:
-                        pct, spd, eta, note = _ytdlp_parse_progress(line[idx + 7:].strip())
-                        _last.update(pct=pct, spd=spd, eta=eta, note=note, t=time.time())
-                        progress.update(pct, spd, eta, note=note)
+                        pct, spd, eta, note, size = _ytdlp_parse_progress(line[idx + 7:].strip())
+                        _last.update(pct=pct, spd=spd, eta=eta, note=note, size=size, t=time.time())
+                        progress.update(pct, spd, eta, note=note, size=size)
                     except Exception as e:
                         # Never silent: a throw here is exactly what produced a
                         # blank progress row with no explanation. debug_print is
@@ -2918,7 +3008,7 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
                     note = (f'retry frag {m.group(1)} ({m.group(2)}/{m.group(3)})'
                             if m else 'retrying' + _ELLIPSIS)
                     try:
-                        progress.update(_last['pct'], _last['spd'], _last['eta'], note=note)
+                        progress.update(_last['pct'], _last['spd'], _last['eta'], note=note, size=_last['size'])
                     except Exception:
                         pass
                 tail.append(line)
@@ -2949,7 +3039,7 @@ def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None
             base = _last['note'] or ''
             note = f'{base} - stalled {int(age)}s' if base else f'stalled {int(age)}s'
             try:
-                progress.update(_last['pct'], _last['spd'], _last['eta'], note=note)
+                progress.update(_last['pct'], _last['spd'], _last['eta'], note=note, size=_last['size'])
             except Exception:
                 pass
 
@@ -3090,6 +3180,14 @@ def download_with_ytdlp(url, folder, filename, summary,
         config = {}
     base        = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
     out_template = os.path.join(folder, base + '.%(ext)s')
+    # This function is entered once per episode attempt with the manifest that was
+    # JUST resolved. On a cross-session `resume` the manifest is freshly
+    # token-signed, so any `.part`/`.ytdl`/`-Frag*` left from the previous signed
+    # URL can't be continued (its segment URLs 403/416) -- drop them so the
+    # episode restarts cleanly rather than wedging. The in-process Ctrl+P resume
+    # never re-enters here (it relaunches inside _run_ytdlp_with_live_progress
+    # against the SAME manifest), so its partial progress is untouched.
+    _purge_hls_partial(folder, base)
     quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
     # Always leave a bare `/best` at the end so HLS streams whose variants are
     # muxed-only (no separate video+audio to merge) or don't report a height
@@ -3098,6 +3196,15 @@ def download_with_ytdlp(url, folder, filename, summary,
     # nothing and yt-dlp aborts.
     if not quality_str.rstrip().endswith('best'):
         quality_str += '/best'
+    # The bare `/best` tail above keeps a metadata-poor HLS manifest downloadable,
+    # but on its own it makes yt-dlp pick the HIGHEST rendition whenever the
+    # height-capped selectors match nothing -- so a 480p setting silently pulls
+    # the 720p/1080p stream (confirmed: an ep set to 480p landed as 1280x720).
+    # Pair it with a format-SORT on the same ceiling: `-S height:<cap>` makes the
+    # fallback prefer the rendition CLOSEST to the cap (i.e. the smallest stream
+    # that still exists) instead of the largest, without ever hard-failing. No
+    # cap ('best' setting) -> no sort, so best-quality behaviour is unchanged.
+    _hcap = re.search(r'height<=(\d+)', quality_str)
 
     progress = LiveProgress(filename, parallel=parallel_mode)
     try:
@@ -3111,7 +3218,9 @@ def download_with_ytdlp(url, folder, filename, summary,
         # so the bar would stay blank for the whole download.
         prog_tmpl = ('download:@@DLP@@ %(progress._percent_str)s|'
                      '%(progress._speed_str)s|%(progress._eta_str)s|'
-                     '%(progress.fragment_index)s|%(progress.fragment_count)s')
+                     '%(progress.fragment_index)s|%(progress.fragment_count)s|'
+                     '%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|'
+                     '%(progress._total_bytes_estimate_str)s')
         # Pass the CDN's expected Referer/Origin/UA, same as the aria2c path.
         # yt-dlp runs as a separate process and can't see the resolver's
         # session.headers, so without this an HLS host with hotlink protection
@@ -3141,6 +3250,11 @@ def download_with_ytdlp(url, folder, filename, summary,
             # path needs is already on the command line, so refuse outside config.
             '--ignore-config',
             '-f', quality_str,
+            # Safety net for the `/best` fallback in quality_str: when a manifest
+            # omits RESOLUTION metadata the height filter matches nothing and the
+            # fallback would otherwise grab the largest stream. Sorting on the
+            # same ceiling makes it land on the closest-to-cap rendition instead.
+            *(['-S', f'height:{_hcap.group(1)}'] if _hcap else []),
             '--merge-output-format', 'mp4',
             '-o', out_template,
             '--no-playlist',
@@ -3426,7 +3540,9 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
     # and is what makes the progress-template authoritative here.
     prog_tmpl = ('download:@@DLP@@ %(progress._percent_str)s|'
                  '%(progress._speed_str)s|%(progress._eta_str)s|'
-                 '%(progress.fragment_index)s|%(progress.fragment_count)s')
+                 '%(progress.fragment_index)s|%(progress.fragment_count)s|'
+                 '%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|'
+                 '%(progress._total_bytes_estimate_str)s')
 
     def _run_ytdlp(fmt):
         cmd = [
