@@ -46,6 +46,7 @@ NAIJAPREY_DOMAIN  = 'naijaprey.tv'
 MYASIANTV_DOMAIN  = 'myasiantv9.com.ro'  # migrated from parked myasiantv9.com (2026-07)
 NAIJAVAULT_DOMAIN = 'naijavault.com'
 ANITAKU_DOMAIN    = 'anitaku.com.ro'
+ASIANC_DOMAIN     = 'asianc.id'  # Dramacool/AsianC — reuses the MyAsianTV episode layout
 PLUTO_DOMAIN      = 'plutomovies.com'
 PLUTO_BASE        = f'https://{PLUTO_DOMAIN}'
 ANITAKU_BASE      = f'https://{ANITAKU_DOMAIN}'

@@ -25,6 +25,7 @@ SITE_MAP = {
     NAIJAPREY_DOMAIN:  extract_naijaprey,
     MYASIANTV_DOMAIN:  extract_myasiantv,
     'myasiantv9.com.ro': extract_myasiantv,
+    ASIANC_DOMAIN:     extract_myasiantv,  # Dramacool/AsianC reuses MyAsianTV layout
     NAIJAVAULT_DOMAIN: extract_naijavault,
     PLUTO_DOMAIN:      extract_plutomovies,
 }
@@ -86,7 +87,7 @@ def process_link_queue(links, session, ctx=None):
             continue
         if not extractor:
             safe_print(render_message('unsupported_site'))
-            safe_print(render_message('supported_sites', sites='NKiri, DramaKey, DramaRain, NaijaVault, 9jaRocks, NaijaPrey, MyAsianTV, PlutoMovies, YouTube, Instagram, TikTok, Facebook, Pinterest'))
+            safe_print(render_message('supported_sites', sites='NKiri, DramaKey, DramaRain, NaijaVault, 9jaRocks, NaijaPrey, MyAsianTV, AsianC, PlutoMovies, YouTube, Instagram, TikTok, Facebook, Pinterest'))
             outcomes.append({'url': url, 'status': 'failed'})
             continue
         try:

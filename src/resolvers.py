@@ -520,6 +520,27 @@ class VidbasicResolver(BaseResolver):
             if direct:
                 return direct
 
+            # 1b) server-selector layout: vidb.top now serves a multi-server page
+            # whose data-video / data-src / iframe attrs point at EXTERNAL mirror
+            # embeds (streamwish hglink.to, vidhide minochinos.com, doodstream,
+            # streamtape) rather than a vidbasic crypto player. Hand the first
+            # mirror a registered resolver recognises back to the registry so it
+            # re-dispatches to the matching mirror resolver.
+            cands = re.findall(r'data-(?:video|src|embed|link)=["\']([^"\']+)["\']', text)
+            cands += re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', text)
+            for cand in cands:
+                cand = urljoin(url, unescape(cand.strip()))
+                if not cand.startswith('http') or cand == url:
+                    continue
+                for other in ResolverRegistry.RESOLVERS:
+                    if other is VidbasicResolver:
+                        continue
+                    try:
+                        if other.can_resolve(cand):
+                            return cand
+                    except Exception:
+                        continue
+
             # 2) embed page points at /3rdplayer.html?...&key=... — fetch and decrypt
             mv = re.search(r'data-video=["\']([^"\']+)["\']', text)
             if mv:
@@ -1089,10 +1110,280 @@ class PlutoMoviesResolver(BaseResolver):
             safe_print(f"      [!] PlutoMovies: Resolution error: {e}")
             return None
 
+# --- SHARED HELPERS FOR MIRROR-HOST RESOLVERS ---
+
+def _unpack_packed_js(text):
+    """Deobfuscate Dean Edwards' p.a.c.k.e.r payloads
+    (`eval(function(p,a,c,k,e,d){...}('payload',radix,count,'a|b|c'.split('|')))`)
+    used by mixdrop/streamwish/vidhide players to hide the video URL. Returns the
+    unpacked source string, or '' if the text isn't packed / doesn't parse.
+
+    The packer replaces each token with a base-`radix` index into the `k` word
+    list; we rebuild that mapping and substitute every `\\b\\w+\\b` token back."""
+    try:
+        m = re.search(
+            r"\}\s*\(\s*'(.*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'(.*?)'\.split\('\|'\)",
+            text, re.DOTALL)
+        if not m:
+            return ''
+        payload, radix, count, words = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4).split('|')
+        # Payload uses \' and \\ escapes in the JS string literal - unescape them.
+        payload = payload.replace("\\'", "'").replace('\\\\', '\\')
+
+        def _base_n(n, base):
+            digits = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+            if n == 0:
+                return '0'
+            out = ''
+            while n > 0:
+                out = digits[n % base] + out
+                n //= base
+            return out
+
+        table = {}
+        for i in range(count):
+            key = _base_n(i, radix)
+            table[key] = words[i] if i < len(words) and words[i] else key
+
+        return re.sub(r'\b\w+\b', lambda mo: table.get(mo.group(0), mo.group(0)), payload)
+    except Exception:
+        return ''
+
+
+_DEAD_FILE_MARKERS = (
+    'file is no longer available', 'file was deleted', 'file deleted',
+    'file not found', 'video not found', 'this file was deleted',
+    'has been removed', 'no longer exists',
+)
+
+def _looks_dead(text):
+    """True if an embed page is a tombstone for an expired/deleted upload."""
+    low = (text or '').lower()
+    return any(marker in low for marker in _DEAD_FILE_MARKERS)
+
+
+def _find_hls_or_mp4(text):
+    """Pull the first .m3u8 (preferred) or .mp4 URL out of player JS/HTML.
+    Looks at `file:`/`src:`/`sources:` assignments first, then any bare URL."""
+    for pat in (
+        r'''["']?(?:file|src)["']?\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']''',
+        r'''["']?(?:file|src)["']?\s*:\s*["'](https?://[^"']+\.mp4[^"']*)["']''',
+    ):
+        m = re.search(pat, text)
+        if m:
+            return m.group(1)
+    return find_direct_video(text)
+
+
+# --- MIRROR-HOST RESOLVERS (asianc.id / vidb.top server list) ---
+class DoodstreamResolver(BaseResolver):
+    """dood.wf & friends. The embed page hides the stream behind a `/pass_md5/`
+    token endpoint: GET the pass_md5 path (with the embed as Referer) to receive
+    a URL prefix, then append 10 random chars + `?token=<slug>&expiry=<ms>` to
+    build a short-lived direct .mp4. Confirmed live: returns 206 video/mp4."""
+    _HOSTS = ('dood.', 'doodstream.', 'ds2play.com', 'dooood.com', 'd0000d.com',
+              'd000d.com', 'vidply.com', 'do0od.com', 'dood.re')
+
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        net = urlparse(url).netloc.lower()
+        return any(h in net for h in DoodstreamResolver._HOSTS)
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        try:
+            parsed = urlparse(url)
+            base = f'{parsed.scheme}://{parsed.netloc}'
+            # Normalise /d/ share links to the /e/ embed the player script lives on.
+            embed = url.replace('/d/', '/e/')
+            r = safe_get(session, embed, referer=base + '/', timeout=20)
+            if not r:
+                return None
+            if _looks_dead(r.text):
+                safe_print("      [!] Doodstream: file expired/deleted")
+                return None
+            m = re.search(r"(/pass_md5/[^'\"\s]+)", r.text)
+            if not m:
+                return None
+            pass_url = base + m.group(1)
+            r2 = session.get(pass_url, timeout=20,
+                             headers={'Referer': embed, 'User-Agent': UA_DESKTOP})
+            if not r2 or r2.status_code != 200 or not r2.text.strip():
+                return None
+            prefix = r2.text.strip()
+            token = pass_url.rstrip('/').split('/')[-1]
+            import random as _rnd, string as _str
+            rand = ''.join(_rnd.choice(_str.ascii_letters + _str.digits) for _ in range(10))
+            expiry = int(time.time() * 1000)
+            return f'{prefix}{rand}?token={token}&expiry={expiry}'
+        except _http_exc_bases() as e:
+            if _is_network_error(e):
+                raise
+            safe_print(f"      [!] Doodstream: network request failed: {e}")
+            return None
+        except Exception as e:
+            safe_print(f"      [!] Doodstream: {e}")
+            return None
+
+
+class MixdropResolver(BaseResolver):
+    """mixdrop.ps & mirrors. The embed serves a packed p.a.c.k.e.r script; after
+    unpacking, `MDCore.wurl="//host/....mp4?..."` is the direct file. Confirmed
+    live: returns 206 video/mp4."""
+    _HOSTS = ('mixdrop.', 'mixdrp.', 'mdfx9dc8n.net', 'mixdroop.')
+
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        net = urlparse(url).netloc.lower()
+        return any(h in net for h in MixdropResolver._HOSTS)
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        try:
+            parsed = urlparse(url)
+            base = f'{parsed.scheme}://{parsed.netloc}'
+            embed = url.replace('/f/', '/e/')
+            r = safe_get(session, embed, referer=base + '/', timeout=20)
+            if not r:
+                return None
+            if _looks_dead(r.text):
+                safe_print("      [!] Mixdrop: file expired/deleted")
+                return None
+            unpacked = _unpack_packed_js(r.text) or r.text
+            m = re.search(r'wurl\s*=\s*["\'](//[^"\']+|https?://[^"\']+)["\']', unpacked)
+            if not m:
+                return None
+            wurl = m.group(1)
+            if wurl.startswith('//'):
+                wurl = 'https:' + wurl
+            return wurl
+        except _http_exc_bases() as e:
+            if _is_network_error(e):
+                raise
+            safe_print(f"      [!] Mixdrop: network request failed: {e}")
+            return None
+        except Exception as e:
+            safe_print(f"      [!] Mixdrop: {e}")
+            return None
+
+
+class StreamwishResolver(BaseResolver):
+    """streamwish (hglink.to & mirrors). The /e/ embed wraps the player in a JS
+    loader shell that requires client-side execution. Transform to sfastwish.com
+    /e/ (or embedwish.com) to bypass that shell and get the raw player HTML with
+    a Dean Edwards packed script containing `jwplayer` `links.hls2` master.m3u8.
+    Returns an .m3u8 (yt-dlp then selects quality via the height-capped format)."""
+    _HOSTS = ('hglink.to', 'streamwish.', 'strwsh.', 'stwish.', 'wishembed.',
+              'mwish.', 'awish.', 'sfastwish.', 'swishsrv.', 'ajmidyad', 'khadhnayad',
+              'obeywish.com', 'jodwish.com', 'streamwish.to', 'embedwish.')
+
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        net = urlparse(url).netloc.lower()
+        return any(h in net for h in StreamwishResolver._HOSTS)
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        try:
+            parsed = urlparse(url)
+            # Extract video ID from path. Streamwish embed URLs typically carry
+            # the video ID as the last path segment: /e/<id> or /v/<id>.
+            vid = parsed.path.rstrip('/').split('/')[-1]
+            if not vid or len(vid) < 6:
+                safe_print("      [!] Streamwish: no video ID in URL")
+                return None
+
+            # Transform to sfastwish.com /e/ path (or embedwish.com). These domains
+            # bypass the obfuscated main.js loader and serve the raw player HTML
+            # containing a Dean Edwards packed script with the jwplayer config.
+            candidates = [
+                f'https://sfastwish.com/e/{vid}',
+                f'https://embedwish.com/e/{vid}',
+                url,  # fallback to original if transform fails
+            ]
+
+            for cand in candidates:
+                r = safe_get(session, cand, referer='https://asianc.id/', timeout=20)
+                if not r:
+                    continue
+                if _looks_dead(r.text):
+                    safe_print("      [!] Streamwish: file expired/deleted")
+                    return None
+
+                # The raw player HTML has a Dean Edwards packed script. Unpack it
+                # to reveal jwplayer config containing `links: { "hls2": "...m3u8" }`.
+                unpacked = _unpack_packed_js(r.text) or r.text
+
+                # Look for jwplayer `links` object with `hls2` key first (preferred),
+                # then fall back to generic HLS/mp4 extraction.
+                hls2 = re.search(r'''["']?hls2["']?\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']''', unpacked)
+                if hls2:
+                    return hls2.group(1)
+
+                direct = _find_hls_or_mp4(unpacked)
+                if direct:
+                    return direct
+
+            return None
+        except _http_exc_bases() as e:
+            if _is_network_error(e):
+                raise
+            safe_print(f"      [!] Streamwish: network request failed: {e}")
+            return None
+        except Exception as e:
+            safe_print(f"      [!] Streamwish: {e}")
+            return None
+
+
+class VidhideResolver(BaseResolver):
+    """vidhide (minochinos.com & mirrors). Same player family as streamwish -
+    the source is a `sources:[{file:"...m3u8"}]` assignment, sometimes inside a
+    packed script. Many asianc uploads are expired; those are detected and fail
+    cleanly (None) rather than returning a tombstone page."""
+    _HOSTS = ('minochinos.com', 'vidhide.', 'vidhidepro.', 'vidhidevip.',
+              'filelions.', 'vid-guard.', 'nining.', 'peytonepre.com',
+              'techradar.ink', 'ryderjet.com')
+
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        net = urlparse(url).netloc.lower()
+        return any(h in net for h in VidhideResolver._HOSTS)
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        try:
+            parsed = urlparse(url)
+            base = f'{parsed.scheme}://{parsed.netloc}'
+            r = safe_get(session, url, referer=base + '/', timeout=20)
+            if not r:
+                return None
+            if _looks_dead(r.text):
+                safe_print("      [!] Vidhide: file expired/deleted")
+                return None
+            unpacked = _unpack_packed_js(r.text) or r.text
+            m = re.search(
+                r'sources\s*:\s*\[\s*\{[^}]*?file\s*:\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
+                unpacked)
+            if m:
+                return m.group(1)
+            return _find_hls_or_mp4(unpacked)
+        except _http_exc_bases() as e:
+            if _is_network_error(e):
+                raise
+            safe_print(f"      [!] Vidhide: network request failed: {e}")
+            return None
+        except Exception as e:
+            safe_print(f"      [!] Vidhide: {e}")
+            return None
+
 # --- REGISTRY ---
 
 class ResolverRegistry:
     RESOLVERS = [
+        StreamwishResolver,
+        VidhideResolver,
+        DoodstreamResolver,
+        MixdropResolver,
         WaffiCloudResolver,
         DownloadwellaResolver,
         LoadedfilesResolver,

@@ -3416,58 +3416,51 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
 
     progress = LiveProgress(filename)
 
+    # Sentinel progress-template (identical to the HLS/myasiantv path): the
+    # @@DLP@@ prefix lets the reader thread pick our progress frames out of
+    # yt-dlp's other output and feed LiveProgress, so YouTube and X render the
+    # same clean single-line bar as myasiantv/asianc instead of yt-dlp's raw
+    # multi-line flood. External aria2c is intentionally NOT used on this path:
+    # it never emits --progress-template, so the row would stay blank. yt-dlp's
+    # native downloader handles the (usually single-file) social streams fine
+    # and is what makes the progress-template authoritative here.
+    prog_tmpl = ('download:@@DLP@@ %(progress._percent_str)s|'
+                 '%(progress._speed_str)s|%(progress._eta_str)s|'
+                 '%(progress.fragment_index)s|%(progress.fragment_count)s')
+
     def _run_ytdlp(fmt):
-        proc = None
         cmd = [
-            'yt-dlp', '-f', fmt,
+            'yt-dlp',
+            # A stray user-level yt-dlp config could inject --no-progress or
+            # --downloader and silently blank the progress-template our reader
+            # depends on; everything this path needs is on the command line.
+            '--ignore-config',
+            '-f', fmt,
             '--merge-output-format', 'mp4',
             '-o', out_template,
             '--no-playlist',
             '--retries', '3', '--fragment-retries', '3',
-            '--no-warnings', '--progress', '--newline',
+            '--no-warnings', '--newline',
+            '--progress-template', prog_tmpl,
         ]
         cmd += _ytdlp_subtitle_flags(config, url)
-        if _check_aria2c_availability():
-            cmd += [
-                '--external-downloader', 'aria2c',
-                '--external-downloader-args',
-                f"aria2c:-x {config.get('aria2c_connections', 16)} -s {config.get('aria2c_splits', 16)} "
-                f"-c --max-tries=3 --retry-wait=10 --timeout=120 --connect-timeout=60 "
-                f"--file-allocation=none --min-split-size={config.get('aria2c_min_split_size', '1M')}"
-            ]
         cmd.append(url)
-        try:
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, creationflags=_POPEN_FLAGS)
-            register_process(proc)
-            if current_process is not None:
-                current_process.proc = proc
-            while proc.poll() is None:
-                if _is_stopped(stop_flag):
-                    _graceful_terminate(proc)
-                    break
-                if _is_paused(pause_flag):
-                    _graceful_terminate(proc)
-                    finish_process(proc)
-                    unregister_process(proc)
-                    if current_process is not None:
-                        current_process.proc = None
-                    ui_emit('download_paused_ctrlp')
-                    while _is_paused(pause_flag) and not _is_stopped(stop_flag):
-                        time.sleep(0.3)
-                    if _is_stopped(stop_flag):
-                        return -1
-                    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, creationflags=_POPEN_FLAGS)
-                    register_process(proc)
-                    if current_process is not None:
-                        current_process.proc = proc
-                    continue
-                time.sleep(0.5)
-            finish_process(proc)
-            return proc.returncode if proc.returncode is not None else -1
-        finally:
-            unregister_process(proc)
-            if current_process is not None:
-                current_process.proc = None
+
+        def _on_pause():
+            ui_emit('download_paused_ctrlp')
+
+        def _on_resume():
+            ui_emit('download_resuming')
+
+        code, tail = _run_ytdlp_with_live_progress(
+            cmd, progress,
+            stop_flag=stop_flag, pause_flag=pause_flag,
+            current_process=current_process,
+            resume_cmd=cmd,
+            on_pause=_on_pause, on_resume=_on_resume,
+            frag_dir=folder, frag_base=base,
+        )
+        return code
 
     try:
         start_time = time.time()

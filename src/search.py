@@ -717,6 +717,32 @@ async def _asearch_naijavault(session, query):
         pass
     return out
 
+async def _asearch_asianc(session, query):
+    """AsianC (Dramacool) real JSON search — /api?a=search returns a JSON array
+    of {value,url,cover,name,status}. url is a /drama-detail/<slug> path that
+    extract_myasiantv consumes directly. Returns (site, url, title) tuples so
+    results pass through the same relevance filter as the RSS/JSON searches."""
+    url = f"https://asianc.id/api?a=search&keyword={quote(query)}"
+    status, _, text = await _afetch(session, url)
+    if status != 200 or not text:
+        return []
+    out = []
+    try:
+        data = json.loads(text)
+        for item in (data if isinstance(data, list) else []):
+            if not isinstance(item, dict):
+                continue
+            link = item.get('url', '')
+            title = item.get('name') or item.get('value') or ''
+            if not link:
+                continue
+            if link.startswith('/'):
+                link = 'https://asianc.id' + link
+            out.append(('AsianC', link, title))
+    except Exception:
+        pass
+    return out
+
 async def _asearch_pluto(session, query):
     """PlutoMovies real HTML search — reuse the proven regex + episode filter."""
     query_clean = query.replace("'", "").replace('’', '')
@@ -761,7 +787,7 @@ async def _arun(query, site_filter, fast, hint, timeout):
         tasks = []
 
         # NKiri: slug probe + RSS search
-        if site_filter not in ('dramakey', 'plutomovies'):
+        if site_filter not in ('dramakey', 'plutomovies', 'asianc'):
             nkiri_pat = list(NKIRI_WAVE1) + ([] if fast else list(NKIRI_WAVE2))
             tasks.append(('slug', _aprobe_slug(session, 'https://thenkiri.com', nkiri_pat,
                           base, season_slug, year, 'NKiri', cancel_event)))
@@ -770,7 +796,7 @@ async def _arun(query, site_filter, fast, hint, timeout):
                 'NKiri', query)))
 
         # DramaKey.com + .cc + DramaRain: slug probe only (no server search)
-        if site_filter not in ('nkiri', 'plutomovies'):
+        if site_filter not in ('nkiri', 'plutomovies', 'asianc'):
             dk_pat = list(DRAMAKEY_WAVE1) + ([] if fast else list(DRAMAKEY_WAVE2))
             tasks.append(('slug', _aprobe_slug(session, 'https://dramakey.com', dk_pat,
                           base, season_slug, year, 'DramaKey', cancel_event)))
@@ -781,7 +807,7 @@ async def _arun(query, site_filter, fast, hint, timeout):
                           base, season_slug, year, 'DramaRain', cancel_event)))
 
         # Search-only sources — skipped in fast mode (slug-probe only)
-        if not fast and site_filter not in ('nkiri', 'dramakey'):
+        if not fast and site_filter not in ('nkiri', 'dramakey', 'asianc'):
             tasks.append(('pluto', _asearch_pluto(session, query)))
             tasks.append(('search', _asearch_rss(
                 session, f"https://9jarocks.com/search/{quote(query)}/feed/rss2/",
@@ -790,6 +816,10 @@ async def _arun(query, site_filter, fast, hint, timeout):
                 session, f"https://www.naijaprey.tv/search/{quote(query)}/feed/rss2/",
                 'NaijaPrey', query)))
             tasks.append(('search', _asearch_naijavault(session, query)))
+
+        # AsianC (Dramacool) — real JSON search, HLS-backed episodes
+        if site_filter not in ('nkiri', 'dramakey', 'plutomovies'):
+            tasks.append(('search', _asearch_asianc(session, query)))
 
         kinds = [k for k, _ in tasks]
         coros = [c for _, c in tasks]
@@ -1038,6 +1068,9 @@ def search(raw_query, session=None):
     elif query.lower().endswith(' plutomovies'):
         site_filter = 'plutomovies'
         query = query[:-12].strip()
+    elif query.lower().endswith(' asianc'):
+        site_filter = 'asianc'
+        query = query[:-7].strip()
 
     timeout = _search_timeout(45)
     safe_print("\n" + render_message('search_running', query=query))
@@ -1062,6 +1095,9 @@ def fsearch(raw_query, session=None):
     elif query.lower().endswith(' plutomovies'):
         site_filter = 'plutomovies'
         query = query[:-12].strip()
+    elif query.lower().endswith(' asianc'):
+        site_filter = 'asianc'
+        query = query[:-7].strip()
 
     if hint:
         safe_print("\n" + render_message('fast_search_running_hint', hint=hint, query=query))
