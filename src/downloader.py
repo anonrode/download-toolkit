@@ -2785,7 +2785,11 @@ def _ytdlp_parse_progress(payload):
     pct_s, spd_s, eta_s, fi_s, fc_s, dl_s, tot_s, est_s = (p.strip() for p in parts[:8])
 
     def _bad(v):
-        return (not v) or v.upper() in ('NA', 'UNKNOWN', 'UNKNOWN B/S', '-', 'NONE')
+        # yt-dlp spells the empty value several ways depending on the field and
+        # version: 'NA', 'N/A', 'Unknown', 'Unknown B/s', '--', '-'. Miss one and
+        # it prints through literally (e.g. a live line showing '10.5MiB / N/A').
+        return (not v) or v.upper() in (
+            'NA', 'N/A', 'UNKNOWN', 'UNKNOWN B/S', '-', '--', 'NONE')
 
     pct = None
     if not _bad(pct_s):
