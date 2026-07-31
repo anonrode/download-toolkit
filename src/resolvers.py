@@ -3,7 +3,7 @@ import sys
 import time
 import base64
 from html import unescape
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote
 
 from ._aes import aes_cbc_decrypt
 
@@ -624,10 +624,15 @@ class KissasianResolver(BaseResolver):
             return None
 
 class KisskhMegaplayResolver(BaseResolver):
+    _HOSTS = ('kisskh.megaplay.', 'megaplays.se', 'embtaku.', 'takuembed.',
+              'anihdplay.', 'gogohd.', 'megaplay.')
+
     @staticmethod
     def can_resolve(url: str) -> bool:
+        if '/playlist.php' in url or '/api/' in url:
+            return False
         netloc = urlparse(url).netloc.lower()
-        return 'kisskh.megaplay.' in netloc or ('megaplay.' in netloc and '/kisskh/' in url)
+        return any(h in netloc for h in KisskhMegaplayResolver._HOSTS) or '/kisskh/' in url
 
     @staticmethod
     def resolve(url: str, session) -> str:
@@ -642,6 +647,30 @@ class KisskhMegaplayResolver(BaseResolver):
             r = session.get(url, timeout=20, headers=headers)
             if not r or r.status_code != 200:
                 return None
+
+            # 1) megaplays.se / takuembed layout: proxyBase + defaultUrl / qualities
+            pb_m = re.search(r'''var\s+proxyBase\s*=\s*["']([^"']+)["']''', r.text)
+            def_m = re.search(r'''var\s+defaultUrl\s*=\s*["']([^"']+)["']''', r.text)
+            if def_m:
+                target_url = def_m.group(1).replace('\\/', '/')
+                if pb_m:
+                    proxy_base = pb_m.group(1)
+                    return proxy_base + quote(target_url, safe='')
+                return target_url
+
+            # 2) qualities map in script: {"1080p":"...", "720p":"...", "360p":"..."}
+            q_m = re.search(r'''var\s+qualities\s*=\s*(\{.*?\});''', r.text, re.DOTALL)
+            if q_m and pb_m:
+                try:
+                    import json
+                    q_dict = json.loads(q_m.group(1))
+                    target = q_dict.get('720p') or q_dict.get('360p') or next(iter(q_dict.values()), None)
+                    if target:
+                        return pb_m.group(1) + quote(target.replace('\\/', '/'), safe='')
+                except Exception:
+                    pass
+
+            # 3) Standard source tag
             m = re.search(r'"source"\s*:\s*"([^"]+\.m3u8[^"]*)"', r.text)
             if m:
                 return m.group(1)
