@@ -523,21 +523,26 @@ class VidbasicResolver(BaseResolver):
             # 1b) server-selector layout: vidb.top now serves a multi-server page
             # whose data-video / data-src / iframe attrs point at EXTERNAL mirror
             # embeds (streamwish hglink.to, vidhide minochinos.com, doodstream,
-            # streamtape) rather than a vidbasic crypto player. Hand the first
-            # mirror a registered resolver recognises back to the registry so it
-            # re-dispatches to the matching mirror resolver.
+            # streamtape) rather than a vidbasic crypto player. Try resolving candidates
+            # via the registry, falling through to the next mirror if one is dead/expired.
             cands = re.findall(r'data-(?:video|src|embed|link)=["\']([^"\']+)["\']', text)
             cands += re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', text)
+            seen = set()
             for cand in cands:
                 cand = urljoin(url, unescape(cand.strip()))
-                if not cand.startswith('http') or cand == url:
+                if not cand.startswith('http') or cand == url or cand in seen:
                     continue
+                seen.add(cand)
                 for other in ResolverRegistry.RESOLVERS:
                     if other is VidbasicResolver:
                         continue
                     try:
                         if other.can_resolve(cand):
-                            return cand
+                            resolved = ResolverRegistry.resolve(cand, session, _depth=1)
+                            if resolved:
+                                return resolved
+                            safe_print(f"      [!] Vidbasic mirror failed/dead: {cand[:60]} -- trying next candidate...")
+                            break
                     except Exception:
                         continue
 
