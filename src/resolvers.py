@@ -625,7 +625,7 @@ class KissasianResolver(BaseResolver):
 
 class KisskhMegaplayResolver(BaseResolver):
     _HOSTS = ('kisskh.megaplay.', 'megaplays.se', 'embtaku.', 'takuembed.',
-              'anihdplay.', 'gogohd.', 'megaplay.')
+              'anihdplay.', 'gogohd.', 'megaplay.', 'animesama.', 'tamilembed.')
 
     @staticmethod
     def can_resolve(url: str) -> bool:
@@ -637,6 +637,14 @@ class KisskhMegaplayResolver(BaseResolver):
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
+            # 0) tamilembed.lol layout: embed page with data-code -> loader.php
+            if 'tamilembed.' in url:
+                parsed = urlparse(url)
+                parts = [p for p in parsed.path.strip('/').split('/') if p]
+                code = parts[-1] if parts else None
+                if code:
+                    return f'https://tamilembed.lol/loader.php?id={code}'
+
             headers = {
                 'User-Agent': UA_DESKTOP,
                 'Referer': session.headers.get('Referer', ''),
@@ -648,7 +656,12 @@ class KisskhMegaplayResolver(BaseResolver):
             if not r or r.status_code != 200:
                 return None
 
-            # 1) megaplays.se / takuembed layout: proxyBase + defaultUrl / qualities
+            # 1) animesama.se layout: const STREAM = "..."
+            sm_m = re.search(r'''const\s+STREAM\s*=\s*["']([^"']+)["']''', r.text)
+            if sm_m:
+                return sm_m.group(1).replace('\\/', '/')
+
+            # 2) megaplays.se / takuembed layout: proxyBase + defaultUrl / qualities
             pb_m = re.search(r'''var\s+proxyBase\s*=\s*["']([^"']+)["']''', r.text)
             def_m = re.search(r'''var\s+defaultUrl\s*=\s*["']([^"']+)["']''', r.text)
             if def_m:
@@ -658,7 +671,7 @@ class KisskhMegaplayResolver(BaseResolver):
                     return proxy_base + quote(target_url, safe='')
                 return target_url
 
-            # 2) qualities map in script: {"1080p":"...", "720p":"...", "360p":"..."}
+            # 3) qualities map in script: {"1080p":"...", "720p":"...", "360p":"..."}
             q_m = re.search(r'''var\s+qualities\s*=\s*(\{.*?\});''', r.text, re.DOTALL)
             if q_m and pb_m:
                 try:
@@ -670,7 +683,7 @@ class KisskhMegaplayResolver(BaseResolver):
                 except Exception:
                     pass
 
-            # 3) Standard source tag
+            # 4) Standard source tag
             m = re.search(r'"source"\s*:\s*"([^"]+\.m3u8[^"]*)"', r.text)
             if m:
                 return m.group(1)
