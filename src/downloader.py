@@ -3254,12 +3254,9 @@ def download_with_ytdlp(url, folder, filename, summary,
             # path needs is already on the command line, so refuse outside config.
             '--ignore-config',
             '-f', quality_str,
-            # Safety net for the `/best` fallback in quality_str: when a manifest
-            # omits RESOLUTION metadata the height filter matches nothing and the
-            # fallback would otherwise grab the largest stream. Sorting in ascending
-            # order (+height,+size,+br) forces yt-dlp to always land on the smallest/lowest
-            # rendition available (360p over 480p, 480p over 720p).
-            *(['-S', f'+height,+size,+br,height:{_hcap.group(1)}'] if _hcap else ['-S', '+height,+size,+br']),
+            # Honor user's configured quality setting cap (e.g. 720p/1080p) when specified,
+            # falling back to ascending lowest quality (+height,+size,+br) for 360p / unconstrained settings.
+            *(['-S', f'height:{_hcap.group(1)},+size,+br'] if _hcap else ['-S', '+height,+size,+br']),
             '--merge-output-format', 'mp4',
             '-o', out_template,
             '--no-playlist',
