@@ -3,6 +3,7 @@ import sys
 import time
 import base64
 from html import unescape
+from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, quote
 
 from ._aes import aes_cbc_decrypt
@@ -637,14 +638,6 @@ class KisskhMegaplayResolver(BaseResolver):
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            # 0) tamilembed.lol layout: embed page with data-code -> loader.php
-            if 'tamilembed.' in url:
-                parsed = urlparse(url)
-                parts = [p for p in parsed.path.strip('/').split('/') if p]
-                code = parts[-1] if parts else None
-                if code:
-                    return f'https://tamilembed.lol/loader.php?id={code}'
-
             headers = {
                 'User-Agent': UA_DESKTOP,
                 'Referer': session.headers.get('Referer', ''),
@@ -653,8 +646,24 @@ class KisskhMegaplayResolver(BaseResolver):
                 'Sec-Fetch-Site': 'cross-site',
             }
             r = session.get(url, timeout=20, headers=headers)
-            if not r or r.status_code != 200:
+            if not r or r.status_code not in (200, 404):
                 return None
+
+            # 0) tamilembed.lol / player wrapper layout: check for inner nested <iframe>
+            # Player wrappers (e.g. tamilembed.lol, APICodes) embed Blogger (www.blogger.com/video.g?token=...)
+            # or secondary player streams inside an inner iframe tag.
+            if r.text:
+                soup = BeautifulSoup(r.text, 'html.parser')
+                iframe = soup.find('iframe', src=True)
+                if iframe:
+                    nested_src = urljoin(url, unescape(iframe['src']))
+                    if nested_src != url and not nested_src.startswith('javascript:'):
+                        if 'blogger.com' in nested_src:
+                            return nested_src
+                        if urlparse(nested_src).netloc != urlparse(url).netloc:
+                            sub_res = ResolverRegistry.resolve(nested_src, session, _depth=1)
+                            if sub_res:
+                                return sub_res
 
             # 1) animesama.se layout: const STREAM = "..."
             sm_m = re.search(r'''const\s+STREAM\s*=\s*["']([^"']+)["']''', r.text)
