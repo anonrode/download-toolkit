@@ -16,16 +16,37 @@ def extract_9jarocks(url, session, ctx=None):
     soup = BeautifulSoup(r.text, 'html.parser')
     def _extract_label(a):
         text = a.get_text(strip=True)
+        label_text = ''
         if text and not re.search(r'^\s*\[?\s*server\s*\d*\s*\]?\s*$', text, re.I) and not re.search(r'^\s*download\s*$', text, re.I):
-            return text
-        p = a.parent
-        if p:
-            p_text = p.get_text(strip=True)
-            cleaned = re.sub(r'\[?\s*server\s*\d*\s*\]?', '', p_text, flags=re.I)
-            cleaned = re.sub(r'\bdownload\b', '', cleaned, flags=re.I).strip()
-            if cleaned:
-                return cleaned
-        return text
+            label_text = re.sub(r'\bdownload\b', '', text, flags=re.I).strip()
+        else:
+            p = a.parent
+            if p:
+                p_text = p.get_text(strip=True)
+                cleaned = re.sub(r'\[?\s*server\s*\d*\s*\]?', '', p_text, flags=re.I)
+                cleaned = re.sub(r'\bdownload\b', '', cleaned, flags=re.I).strip()
+                if cleaned:
+                    label_text = cleaned
+            if not label_text:
+                label_text = text
+
+        # Walk parent elements to extract nearest Season header (e.g. Season 1, Season 2)
+        season_prefix = ''
+        curr = a.parent
+        for _ in range(5):
+            if not curr: break
+            prev = curr.find_previous_sibling(['h1', 'h2', 'h3', 'h4', 'strong', 'b', 'p', 'div'])
+            if prev:
+                prev_text = prev.get_text(strip=True)
+                sm = re.search(r'\b(season\s*\d+|s\d+)\b', prev_text, re.I)
+                if sm:
+                    s_str = sm.group(1).upper()
+                    if not re.search(r'\b(season\s*\d+|s\d+)\b', label_text, re.I):
+                        season_prefix = f"{s_str} - "
+                    break
+            curr = curr.parent
+
+        return f"{season_prefix}{label_text}".strip()
 
     lf_links = _dedup_by_href(
         (_extract_label(a), a['href'])
@@ -72,6 +93,7 @@ def extract_9jarocks(url, session, ctx=None):
     # network), so filtering here means the prefetcher never wastes a resolve on
     # an episode we'd only skip — matters on resume runs where most are done.
     work = []
+    seen_fnames = set()
     for i, (label, lf_url) in enumerate(lf_links, 1):
         # Anchor text is the episode code (e.g. S01E01) — use it when it's not generic
         label_clean = label.strip() if label else ''
@@ -81,7 +103,12 @@ def extract_9jarocks(url, session, ctx=None):
             slug_part = lf_url.rstrip('/').split('/')[-1]
             base_fname = re.sub(r'\.(mkv|mp4|webm)$', '', safe_filename(slug_part))
             if re.fullmatch(r'[0-9a-f]{8,}', base_fname, re.I):
-                base_fname = safe_filename(f"{name} - {i:02d}")
+                base_fname = safe_filename(f"{name} - Episode {i:02d}")
+
+        # Unique filename collision safeguard: NEVER allow identical filenames in a batch!
+        if base_fname in seen_fnames:
+            base_fname = safe_filename(f"{base_fname} ({i:02d})")
+        seen_fnames.add(base_fname)
         done, _ = already_downloaded(folder, base_fname + '.mp4', series_url=url)
         if not done:
             done, _ = already_downloaded(folder, base_fname + '.mkv', series_url=url)
