@@ -11,6 +11,7 @@ from .dramarain import extract_dramarain
 from .naijavault import extract_naijavault
 from .plutomovies import extract_plutomovies
 from .social import extract_social
+from .anitaku import extract_anitaku
 
 # Map site domains to their respective extractor function
 SITE_MAP = {
@@ -28,6 +29,10 @@ SITE_MAP = {
     ASIANC_DOMAIN:     extract_myasiantv,  # Dramacool/AsianC reuses MyAsianTV layout
     NAIJAVAULT_DOMAIN: extract_naijavault,
     PLUTO_DOMAIN:      extract_plutomovies,
+    'anitaku.com.ro':   extract_anitaku,
+    'anitaku.pe':       extract_anitaku,
+    'anitaku.so':       extract_anitaku,
+    'anitaku.to':       extract_anitaku,
 }
 
 def _social_alias(domain):
