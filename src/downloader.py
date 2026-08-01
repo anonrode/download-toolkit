@@ -3256,9 +3256,10 @@ def download_with_ytdlp(url, folder, filename, summary,
             '-f', quality_str,
             # Safety net for the `/best` fallback in quality_str: when a manifest
             # omits RESOLUTION metadata the height filter matches nothing and the
-            # fallback would otherwise grab the largest stream. Sorting on the
-            # same ceiling makes it land on the closest-to-cap rendition instead.
-            *(['-S', f'height:{_hcap.group(1)}'] if _hcap else []),
+            # fallback would otherwise grab the largest stream. Sorting in ascending
+            # order (+height,+size,+br) forces yt-dlp to always land on the smallest/lowest
+            # rendition available (360p over 480p, 480p over 720p).
+            *(['-S', f'+height,+size,+br,height:{_hcap.group(1)}'] if _hcap else ['-S', '+height,+size,+br']),
             '--merge-output-format', 'mp4',
             '-o', out_template,
             '--no-playlist',
