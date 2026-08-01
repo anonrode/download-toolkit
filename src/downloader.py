@@ -1486,6 +1486,8 @@ def get_referer_for_url(url):
         return 'https://plutomovies.com/'
     if 'kwik.cx' in url or 'animepahe' in url:
         return 'https://anitaku.com.ro/'
+    if 'kickassanime' in url or 'animesama' in url or 'tamilembed' in url or 'blogger.com' in url or 'draft.blogger.com' in url:
+        return 'https://anitaku.com.ro/'
     # Vidbasic (vidb.top embed -> hls.vidbasic.top manifest -> jisooido.top byte-
     # range segments). The segment host allowlists the *player* origin as Referer
     # and serves a 559-byte HTML decoy to everything else -- including the manifest
@@ -1498,29 +1500,13 @@ def get_referer_for_url(url):
     return base_domain(url) + '/'
 
 def is_streaming_link(url):
-    """True if the URL is an adaptive-streaming manifest (HLS/DASH) that must be
-    handed to yt-dlp instead of aria2c.
-
-    Both directions of a wrong answer are silently destructive:
-
-      - A MISSED manifest goes to aria2c, which cheerfully downloads the few-KB
-        playlist *text* and saves it as `Episode 1.mp4`. fetch_expected_size
-        reports that same small size so the completeness check agrees, aria2c
-        exits 0, and download_file writes a *complete* receipt and marks the
-        episode done -- permanently recorded as downloaded with a text file as
-        the payload. `.M3U8` (legal; some hosts uppercase it) and
-        `?format=m3u8` both slipped through the old `'.m3u8' in url` test.
-
-      - A FALSE POSITIVE sends a progressive MP4 to yt-dlp, where
-        --concurrent-fragments buys nothing and download_file skips
-        fetch_expected_size/save_episode_size, losing the reference size that
-        the resume completeness check needs. The old bare `'manifest' in
-        url.lower()` did exactly this to any path like `/manifest/ep1.mp4`.
+    """True if the URL is an adaptive-streaming manifest (HLS/DASH) or player token URL
+    (e.g. Blogger, Kickassanime) that must be handed to yt-dlp instead of aria2c.
     """
     low  = (url or '').lower()
     path = low.split('?', 1)[0].split('#', 1)[0]
-    # m3u8 is distinctive enough to accept anywhere -- path or query string.
-    if 'm3u8' in low:
+    # m3u8 and player token URLs (Blogger, Kickassanime) must go to yt-dlp
+    if 'm3u8' in low or 'blogger.com' in low or 'kickassanime' in low or 'video.g?' in low:
         return True
     if path.endswith(('.mpd', '.m3u', '.ism', '.f4m')):
         return True

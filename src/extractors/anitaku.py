@@ -60,17 +60,11 @@ def extract_anitaku(url, session, ctx=None):
 
         if resolved_stream:
             safe_print(f"  [*] Downloading stream: {resolved_stream[:70]}...")
-            if 'blogger.com' in resolved_stream:
-                download_file(
-                    resolved_stream, folder, safe_filename(f"{ep_name}.mp4"), summary,
-                    series_url=url, series_name=name, bandwidth_limit=bw,
-                    quality=quality, current_process=cur_proc, stop_flag=stop, pause_flag=pause
-                )
-            else:
-                download_with_ytdlp(
-                    resolved_stream, folder, safe_filename(f"{ep_name}.mp4"), summary,
-                    quality=quality, current_process=cur_proc, stop_flag=stop, pause_flag=pause
-                )
+            download_file(
+                resolved_stream, folder, safe_filename(f"{ep_name}.mp4"), summary,
+                series_url=url, series_name=name, bandwidth_limit=bw,
+                quality=quality, current_process=cur_proc, stop_flag=stop, pause_flag=pause
+            )
         else:
             safe_print(f"  [X] Could not resolve video stream for {ep_name}")
             summary.add_failed(ep_name)
