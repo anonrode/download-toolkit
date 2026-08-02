@@ -107,7 +107,37 @@ def extract_anitaku(url, session, ctx=None):
                 if ep_slug.startswith(f"{anime_base}-") or ep_slug.startswith(f"{anime_base}_"):
                     seen.add(href)
                     ep_links.append((urljoin(ANITAKU_BASE, href), text or ep_slug))
-        
+
+        # Movie/Special fallback. A movie or special is listed as a single watch
+        # page whose slug does NOT contain "-episode-N" (e.g.
+        # one-piece-heroines-special-episode, ...-infinity-castle-movie-1-eng),
+        # so the numbered-episode scrape above finds nothing. Rather than bail
+        # with "no episode links", pick up that lone child watch page (any anchor
+        # in the container whose slug is a child of anime_base but isn't the
+        # series page itself) and download it as a one-off.
+        if not ep_links:
+            for a in search_root.find_all('a', href=True):
+                href = a['href']
+                if href in seen or href.startswith(('javascript:', '#')):
+                    continue
+                child = href.rstrip('/').split('/')[-1]
+                if not child or child == anime_base:
+                    continue
+                if not (child.startswith(f"{anime_base}-")
+                        or child.startswith(f"{anime_base}_")):
+                    continue
+                # Skip share/nav junk that occasionally leaks into the container.
+                if any(x in href for x in ('pinterest', 't.me', 'facebook',
+                                           'twitter', 'whatsapp', '/genre',
+                                           '/tag/', '?')):
+                    continue
+                seen.add(href)
+                ep_links.append((urljoin(ANITAKU_BASE, href),
+                                 a.get_text(strip=True) or child))
+                break  # a movie/special is a single entry; one is enough
+            if ep_links:
+                safe_print("[*] Movie/Special - single video, no episode list.")
+
         if not ep_links:
             safe_print(render_message('no_episode_links'))
             return

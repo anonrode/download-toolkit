@@ -771,10 +771,50 @@ async def _asearch_pluto(session, query):
             return out
     return []
 
+# Franchise-noise words that anitaku's literal ?s= matcher chokes on. The site
+# titles its entries by arc/marketing name ("Kimetsu no Yaiba Infinity Castle"),
+# never "Season 1", so a query like "demon slayer season 1" matches ZERO titles
+# even though "demon slayer" matches two. We strip these and retry.
+_ANITAKU_NOISE_RE = re.compile(
+    r'\b(?:season|series|part|cour|arc|saison)\s*\d{0,3}\b'
+    r'|\bs\d{1,3}\b'          # S01, S1
+    r'|\bseason\b|\bpart\b',
+    re.I)
+
+
+def _anitaku_query_variants(query):
+    """Ordered, de-duped list of query strings to try against anitaku's literal
+    search, most-specific first. The raw query wins when it actually matches;
+    the noise-stripped form rescues 'demon slayer season 1' -> 'demon slayer'."""
+    variants = [query]
+    stripped = _ANITAKU_NOISE_RE.sub(' ', query)
+    stripped = re.sub(r'\s+', ' ', stripped).strip()
+    if stripped and stripped.lower() != query.strip().lower():
+        variants.append(stripped)
+    # de-dupe preserving order
+    seen = set()
+    out = []
+    for v in variants:
+        k = v.lower()
+        if v and k not in seen:
+            seen.add(k)
+            out.append(v)
+    return out
+
+
 async def _asearch_anitaku(session, query):
-    url = f"https://anitaku.com.ro/?s={quote(query)}"
-    status, _, text = await _afetch(session, url)
-    if status != 200 or not text:
+    text = None
+    for variant in _anitaku_query_variants(query):
+        url = f"https://anitaku.com.ro/?s={quote(variant)}"
+        status, _, body = await _afetch(session, url)
+        if status == 200 and body and 'article' in body:
+            # Cheap check that the results grid actually rendered cards before
+            # committing to this variant; otherwise fall through to the next.
+            probe = BeautifulSoup(body, 'html.parser')
+            if probe.select('div.listupd article.bs'):
+                text = body
+                break
+    if not text:
         return []
     out = []
     try:
