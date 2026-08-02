@@ -66,7 +66,17 @@ def extract_anitaku(url, session, ctx=None):
                 quality=quality, current_process=cur_proc, stop_flag=stop, pause_flag=pause
             )
         else:
-            safe_print(f"  [X] Could not resolve video stream for {ep_name}")
+            # nova.upn.one (upn.one) is a hardened player: the stream URLs come
+            # back AES-256-CBC encrypted with a key derived from a live browser
+            # fingerprint, behind an obfuscated string-table bundle. There's no
+            # scrapable direct URL, so we surface a clear reason rather than a
+            # generic "could not resolve". Anitaku only serves this as the sole
+            # server on some movies/specials -- series use resolvable hosts.
+            if any(re.search(r'\bupn\.one\b', e) for e in seen):
+                safe_print(f"  [X] {ep_name}: only server is nova.upn.one, a "
+                           "hardened/encrypted player we can't resolve. Skipping.")
+            else:
+                safe_print(f"  [X] Could not resolve video stream for {ep_name}")
             summary.add_failed(ep_name)
 
     if is_episode:
