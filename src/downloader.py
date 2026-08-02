@@ -12,6 +12,7 @@ import threading
 import signal
 import subprocess
 import tempfile
+import hashlib
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
@@ -661,54 +662,75 @@ class DownloadReceipt:
         return None
 
 
+def _format_bytes_aria(n):
+    """Format bytes into binary units matching aria2c style (B, KiB, MiB, GiB, TiB)."""
+    if n is None or n < 0:
+        return '--'
+    try:
+        n = float(n)
+    except (ValueError, TypeError):
+        return '--'
+    for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
+        if n < 1024.0 or unit == 'TiB':
+            return f'{int(n)}B' if unit == 'B' else f'{n:.2f}{unit}'
+        n /= 1024.0
+    return '--'
+
+
+def _format_speed_aria(spd_mbps):
+    """Format download speed MB/s float or string into binary aria2c rate (e.g. DL:3.20MiB/s or DL:0B/s)."""
+    if spd_mbps is None:
+        return 'DL:0B/s'
+    if isinstance(spd_mbps, (int, float)):
+        if spd_mbps <= 0:
+            return 'DL:0B/s'
+        bytes_per_sec = spd_mbps * 1024.0 * 1024.0
+        return f'DL:{_format_bytes_aria(bytes_per_sec)}/s'
+    spd_s = str(spd_mbps).strip()
+    if not spd_s or spd_s == '0' or spd_s.startswith('0B'):
+        return 'DL:0B/s'
+    if not spd_s.startswith('DL:'):
+        return f'DL:{spd_s}'
+    return spd_s
+
+
 class LiveProgress:
     """Progress display that adapts to the surface it is drawing on.
 
-    Three modes, chosen at render time rather than construction time so a
-    terminal resize (or a rotate on a phone) is picked up on the next tick:
+    Configurable layout modes:
+      * 'aria2c' (default baseline): Compact bracketed aria2c output
+        [#<id> <dl>/<total>(<pct>%) DL:<speed> ETA:<eta>] (and optional Frag:<cur>/<tot>)
+      * 'aria2c_labeled': Aria2c bracket format with elided filename included
+        [#<id> <filename> <dl>/<total>(<pct>%) DL:<speed> ETA:<eta>]
+      * 'slim_bar': Minimalist progress bar output
+        [#<id>] <filename> [<bar>] <pct>% <dl>/<total> DL:<speed> ETA:<eta>
 
-      * interactive TTY -- one live line owned by SURFACE, clamped to the
-        terminal width so it can never wrap. A wrapped line is unfixable by
-        `\\r`, which returns to the start of the LAST physical row only: the
-        first row is stranded on screen and every subsequent tick strands
-        another, which is the runaway wall of half-drawn bars seen on mobile.
-      * parallel -- several workers share stdout, so a live line is meaningless;
-        emit a plain sampled line instead. Sampling triggers on a decile change,
-        on a fragment-counter change (rate-limited), or on a heartbeat, so a
-        download whose percentage is pinned still shows movement.
-      * not a TTY (web UI, ngrok, redirect to a file) -- same as parallel. ANSI
-        would be literal bytes here.
-
-    The filename absorbs the width pressure: fixed fields are budgeted first and
-    the name gets whatever is left, middle-elided. Truncating the tail instead
-    would leave `cases-between-us-2026-epis` for every episode in a series --
-    identical for all 26, so the user cannot tell which one is running.
+    Adapts rendering dynamically based on viewport width (_term_width()),
+    TTY status, and multi-worker parallelism. Thread safe via TerminalSurface locks.
     """
 
     _PREFIX = f'  [{_ARROW}] '
-    # len(_PREFIX) + the two spaces before the percentage, plus 2 columns of slack:
-    # '↓' and '…' are East-Asian-ambiguous, and some phone terminals render them
-    # double-width. Budgeting for that is cheaper than a wrapped line.
     _CHROME = len(_PREFIX) + 2 + 2
 
-    # Static-mode sampling. A note change (frag N/M stepping) is the only proof
-    # of life on a stalled HLS download, but it fires per fragment, so it gets
-    # its own floor to keep 223 fragments from becoming 223 lines. The heartbeat
-    # is the backstop: no line for this long means the display looks hung.
     _STATIC_MIN_GAP    = 5.0
     _STATIC_HEARTBEAT  = 20.0
 
-    def __init__(self, filename, parallel=False):
+    def __init__(self, filename, parallel=False, download_id=None, layout='aria2c'):
         self._full_name = filename
         self._name     = filename[:50] if len(filename) > 50 else filename
         self._parallel = parallel
+        self._layout   = layout
+        if download_id is not None:
+            self._id   = str(download_id)
+        else:
+            self._id   = hashlib.md5(filename.encode('utf-8', errors='replace')).hexdigest()[:6]
         self._started  = False
         self._done     = False
         self._last_update = 0
         self._last_decile = None
-        self._last_static  = 0.0    # when static mode last emitted a line
+        self._last_static  = 0.0
         self._last_note    = None
-        self._dbg_dumped   = False  # one-shot DLT_PROGRESS_DEBUG dump latch
+        self._dbg_dumped   = False
 
     @staticmethod
     def _elide(name, budget):
@@ -720,54 +742,81 @@ class LiveProgress:
             return name[:budget]
         if budget <= len(_ELLIPSIS):
             return name[:budget]
-        keep = budget - len(_ELLIPSIS)         # columns left for the name itself
-        head = (keep + 1) // 2                 # bias to the head on odd budgets
+        keep = budget - len(_ELLIPSIS)
+        head = (keep + 1) // 2
         return name[:head] + _ELLIPSIS + name[len(name) - (keep - head):]
 
     def _compose(self, pct, spd_mbps, eta, note, width, size=None):
-        """Build the live line, dropping optional fields until it fits `width`.
+        id_tag = f"#{self._id}"
 
-        Order matters: ETA goes before speed because a stalled CDN reports
-        `ETA --:--` while the speed still carries information, and the fragment
-        note goes last because on HLS it is the only field that shows progress
-        at all when the percentage is pinned near zero.
-        """
-        pct_s = f'{pct:5.1f}%' if pct is not None else '   --%'
-        # (rank, text) -- the LOWEST rank is dropped first. Fields are listed in
-        # display order, which is also descending value: the fragment note stays
-        # longest because on HLS it is the only field that still moves while the
-        # percentage is pinned near zero, and ETA goes first because a stalled CDN
-        # reports `--:--` and tells the user nothing.
-        fields = []
-        if note is not None:
-            fields.append((4, f' - {note}'))
-        # Size ('45.2MiB / 512MiB', or just downloaded when the total is unknown)
-        # ranks above speed/ETA: it survives a narrowing line longer because on a
-        # size-reporting HLS stream the growing byte count is proof of life the
-        # same way the fragment note is, and it's what the user asked to see.
+        if pct is not None:
+            try:
+                p_val = float(pct)
+                pct_str = f"{int(p_val)}%" if p_val == int(p_val) else f"{p_val:.1f}%"
+            except (ValueError, TypeError):
+                pct_str = f"{pct}%"
+        else:
+            pct_str = "--%"
+
         if size:
-            fields.append((3, f' - {size}'))
-        # A zero rate is what yt-dlp reports before the first fragment lands, and
-        # `ETA --:--` is what a stalling CDN reports for minutes on end. Both are
-        # filler that costs the filename columns it needs, so neither is drawn.
-        if spd_mbps:
-            fields.append((2, f' - {spd_mbps:.1f} MB/s'))
+            if ' / ' in str(size):
+                parts = str(size).split(' / ', 1)
+                dl_part = parts[0].strip()
+                tot_part = parts[1].strip()
+                size_str = f"{dl_part}/{tot_part}"
+            else:
+                size_str = f"{str(size).strip()}/--"
+        else:
+            size_str = "--/--"
+
+        spd_str = _format_speed_aria(spd_mbps)
+
         if eta and not set(str(eta)) <= set('-:0 '):
-            fields.append((1, f' - ETA {eta}'))
-        while fields:
-            tail = ''.join(t for _, t in fields)
-            budget = width - self._CHROME - len(pct_s) - len(tail)
-            # Stop once the name has a usable budget, or once one field is left --
-            # below that the name matters more than any of these numbers.
-            if budget >= 12 or len(fields) == 1:
-                break
-            fields.remove(min(fields, key=lambda f: f[0]))
-        tail = ''.join(t for _, t in fields)
-        budget = max(0, width - self._CHROME - len(pct_s) - len(tail))
-        name = self._elide(self._full_name, budget)
-        line = f'{self._PREFIX}{name}  {pct_s}{tail}'
-        # Final hard clamp: a pathological width (or a name we could not elide
-        # far enough) must still not wrap.
+            eta_str = f"ETA:{eta}"
+        else:
+            eta_str = "ETA:--"
+
+        frag_str = ""
+        if note and 'frag' in str(note).lower():
+            f_val = str(note).lower().replace('frag', '').replace(':', '').strip()
+            frag_str = f" Frag:{f_val}"
+
+        if self._layout == 'slim_bar':
+            bar_w = 10 if width >= 70 else 0
+            if bar_w > 0:
+                p_num = float(pct) if (pct is not None and isinstance(pct, (int, float))) else 0.0
+                filled = int(round(p_num / 100.0 * bar_w))
+                filled = max(0, min(bar_w, filled))
+                bar_chars = '=' * filled + ('>' if filled < bar_w else '') + '.' * max(0, bar_w - filled - (1 if filled < bar_w else 0))
+                bar_str = f" [{bar_chars[:bar_w]}]"
+            else:
+                bar_str = ""
+            base_info = f" {pct_str} {size_str} {spd_str} {eta_str}{frag_str}".rstrip()
+            rem = width - len(id_tag) - 3 - len(bar_str) - len(base_info)
+            elided_name = self._elide(self._full_name, max(0, rem))
+            name_part = f" {elided_name}" if elided_name else ""
+            line = f"[{id_tag}]{name_part}{bar_str}{base_info}"
+        elif self._layout == 'aria2c_labeled':
+            base_info = f" {size_str}({pct_str}) {spd_str} {eta_str}{frag_str}]"
+            rem = width - len(id_tag) - 3 - len(base_info)
+            elided_name = self._elide(self._full_name, max(0, rem))
+            name_part = f" {elided_name}" if elided_name else ""
+            line = f"[{id_tag}{name_part}{base_info}"
+        else:
+            # Default: 'aria2c' compact baseline
+            line = f"[{id_tag} {size_str}({pct_str}) {spd_str} {eta_str}{frag_str}]"
+            if _visible_len(line) > width:
+                if frag_str:
+                    frag_str = ""
+                    line = f"[{id_tag} {size_str}({pct_str}) {spd_str} {eta_str}]"
+                if _visible_len(line) > width and eta_str != "ETA:--":
+                    eta_str = "ETA:--"
+                    line = f"[{id_tag} {size_str}({pct_str}) {spd_str} {eta_str}]"
+                if _visible_len(line) > width:
+                    line = f"[{id_tag} {size_str}({pct_str}) {spd_str}]"
+                if _visible_len(line) > width:
+                    line = f"[{id_tag} {size_str}({pct_str})]"
+
         if _visible_len(line) > width:
             line = line[:width]
         return line
@@ -1488,6 +1537,8 @@ def get_referer_for_url(url):
         return 'https://anitaku.com.ro/'
     if 'kickassanime' in url or 'animesama' in url or 'tamilembed' in url or 'blogger.com' in url or 'draft.blogger.com' in url:
         return 'https://anitaku.com.ro/'
+    if 'googlevideo.com' in url:
+        return 'https://www.blogger.com/'
     # Vidbasic (vidb.top embed -> hls.vidbasic.top manifest -> jisooido.top byte-
     # range segments). The segment host allowlists the *player* origin as Referer
     # and serves a 559-byte HTML decoy to everything else -- including the manifest
@@ -1506,7 +1557,7 @@ def is_streaming_link(url):
     low  = (url or '').lower()
     path = low.split('?', 1)[0].split('#', 1)[0]
     # m3u8 and player token URLs (Blogger, Kickassanime) must go to yt-dlp
-    if 'm3u8' in low or 'blogger.com' in low or 'kickassanime' in low or 'video.g?' in low:
+    if 'm3u8' in low or 'kickassanime' in low:
         return True
     if path.endswith(('.mpd', '.m3u', '.ism', '.f4m')):
         return True
@@ -2771,11 +2822,8 @@ def _ytdlp_parse_progress(payload):
     pct_s, spd_s, eta_s, fi_s, fc_s, dl_s, tot_s, est_s = (p.strip() for p in parts[:8])
 
     def _bad(v):
-        # yt-dlp spells the empty value several ways depending on the field and
-        # version: 'NA', 'N/A', 'Unknown', 'Unknown B/s', '--', '-'. Miss one and
-        # it prints through literally (e.g. a live line showing '10.5MiB / N/A').
         return (not v) or v.upper() in (
-            'NA', 'N/A', 'UNKNOWN', 'UNKNOWN B/S', '-', '--', 'NONE')
+            'NA', 'N/A', 'UNKNOWN', 'UNKNOWN B/S', '-', '--', '--:--', 'NONE')
 
     pct = None
     if not _bad(pct_s):
@@ -3178,7 +3226,7 @@ def download_with_ytdlp(url, folder, filename, summary,
     # never re-enters here (it relaunches inside _run_ytdlp_with_live_progress
     # against the SAME manifest), so its partial progress is untouched.
     _purge_hls_partial(folder, base)
-    quality_str  = quality or 'bestvideo[height<=480]+bestaudio/best[height<=480]'
+    quality_str  = quality or 'bestvideo[height<=360]+bestaudio/best[height<=360]'
     # Always leave a bare `/best` at the end so HLS streams whose variants are
     # muxed-only (no separate video+audio to merge) or don't report a height
     # still download instead of erroring with "Requested format is not
@@ -3186,15 +3234,41 @@ def download_with_ytdlp(url, folder, filename, summary,
     # nothing and yt-dlp aborts.
     if not quality_str.rstrip().endswith('best'):
         quality_str += '/best'
-    # The bare `/best` tail above keeps a metadata-poor HLS manifest downloadable,
-    # but on its own it makes yt-dlp pick the HIGHEST rendition whenever the
-    # height-capped selectors match nothing -- so a 480p setting silently pulls
-    # the 720p/1080p stream (confirmed: an ep set to 480p landed as 1280x720).
-    # Pair it with a format-SORT on the same ceiling: `-S height:<cap>` makes the
-    # fallback prefer the rendition CLOSEST to the cap (i.e. the smallest stream
-    # that still exists) instead of the largest, without ever hard-failing. No
-    # cap ('best' setting) -> no sort, so best-quality behaviour is unchanged.
-    _hcap = re.search(r'height<=(\d+)', quality_str)
+    # Data-saver sort: ALWAYS ascending (+height,+size,+br). This makes yt-dlp
+    # pick the LOWEST rendition that the -f filter allows. When the height cap
+    # (e.g. 360p) matches nothing and the /best fallback fires, ascending sort
+    # still grabs the smallest available stream instead of silently upgrading to
+    # 1080p. The height cap in -f already limits *what* can be selected; the
+    # sort controls *which* of those matches wins.
+    _sort_args = ['-S', '+height,+size,+br']
+
+    # ── Quality probe (Option A) ─────────────────────────────────
+    # Fetch ONLY the manifest (few KB) to discover which resolution yt-dlp will
+    # actually select, and print it before the video bytes start flowing.
+    # Wrapped in try/except so a probe failure never blocks the real download.
+    _probed_quality = None
+    try:
+        _probe_cmd = [
+            'yt-dlp', '--ignore-config',
+            '-f', quality_str, *_sort_args,
+            '--print', '%(height)s',
+            '--no-download',
+            '--user-agent', UA_DESKTOP,
+            '--referer', get_referer_for_url(url),
+            '--no-warnings',
+            url,
+        ]
+        _probe = subprocess.run(
+            _probe_cmd, capture_output=True, text=True, timeout=15,
+            stdin=subprocess.DEVNULL,
+        )
+        if _probe.returncode == 0 and _probe.stdout.strip():
+            _h = _probe.stdout.strip().split('\n')[0].strip()
+            if _h.isdigit() and int(_h) > 0:
+                _probed_quality = f'{_h}p'
+                safe_print(f'  [*] Stream quality: {_probed_quality} (lowest available)')
+    except Exception:
+        pass  # probe failed — proceed with download, quality unknown
 
     progress = LiveProgress(filename, parallel=parallel_mode)
     try:
@@ -3240,9 +3314,9 @@ def download_with_ytdlp(url, folder, filename, summary,
             # path needs is already on the command line, so refuse outside config.
             '--ignore-config',
             '-f', quality_str,
-            # Honor user's configured quality setting cap (e.g. 720p/1080p) when specified,
-            # falling back to ascending lowest quality (+height,+size,+br) for 360p / unconstrained settings.
-            *(['-S', f'height:{_hcap.group(1)},+size,+br'] if _hcap else ['-S', '+height,+size,+br']),
+            # Data-saver: always ascending — lowest rendition first, never
+            # silently upgrades to 1080p when the height cap matches nothing.
+            *_sort_args,
             '--merge-output-format', 'mp4',
             '-o', out_template,
             '--no-playlist',

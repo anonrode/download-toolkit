@@ -686,7 +686,7 @@ class KisskhMegaplayResolver(BaseResolver):
                 try:
                     import json
                     q_dict = json.loads(q_m.group(1))
-                    target = q_dict.get('720p') or q_dict.get('360p') or next(iter(q_dict.values()), None)
+                    target = q_dict.get('360p') or q_dict.get('480p') or q_dict.get('720p') or next(iter(q_dict.values()), None)
                     if target:
                         return pb_m.group(1) + quote(target.replace('\\/', '/'), safe='')
                 except Exception:
@@ -1432,6 +1432,166 @@ class VidhideResolver(BaseResolver):
             safe_print(f"      [!] Vidhide: {e}")
             return None
 
+# --- BLOGGER (batchexecute RPC) ---
+
+# itag → quality mapping. Ordered ascending so the data-saver loop can pick
+# the FIRST match (lowest quality) that resolves.
+_BLOGGER_ITAG_MAP = {
+    '18': '360p',
+    '22': '720p',
+    '37': '1080p',
+}
+# Preferred quality order: ascending (data-saver first)
+_BLOGGER_QUALITY_ORDER = ['18', '22', '37']
+
+
+class BloggerResolver(BaseResolver):
+    """Resolve blogger.com/video.g?token=… URLs via Blogger's internal
+    batchexecute RPC endpoint.
+
+    yt-dlp's built-in Blogger extractor is broken ('Unable to extract JSON
+    data'), so this resolver bypasses it entirely. The approach:
+
+      1. GET the video.g page → scrape FdrFJe (f.sid) and bl (build label)
+      2. POST /_/BloggerVideoPlayerUi/data/batchexecute with WcwnYd RPC
+      3. Parse googlevideo.com direct MP4 URLs from the response
+      4. Return the lowest-quality URL (itag 18 = 360p preferred)
+
+    The returned URL is a direct progressive MP4 on googlevideo.com, so
+    download_file routes it through aria2c (fast, resumable, no yt-dlp).
+    """
+
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        low = url.lower()
+        return 'blogger.com' in low and ('video.g' in low or 'token=' in low)
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        import json as _json
+        try:
+            # ── Step 1: Fetch the video page and extract bootstrap values ──
+            headers = {
+                'User-Agent': UA_DESKTOP,
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+            }
+            r = session.get(url, timeout=20, headers=headers)
+            if not r or r.status_code != 200:
+                safe_print(f"      [!] Blogger: Failed to load page (HTTP {r.status_code if r else 'N/A'})")
+                return None
+
+            html = r.text
+
+            # Extract f.sid (FdrFJe)
+            fsid_m = re.search(r'"FdrFJe":"([^"]+)"', html)
+            if not fsid_m:
+                safe_print("      [!] Blogger: Could not extract f.sid (FdrFJe)")
+                return None
+            f_sid = fsid_m.group(1)
+
+            # Extract bl (build label)
+            bl_m = re.search(r'boq_bloggeruiserver_[^\'"", ]+', html)
+            if not bl_m:
+                safe_print("      [!] Blogger: Could not extract build label (bl)")
+                return None
+            bl = bl_m.group(0)
+
+            # Extract the token from the URL
+            token_m = re.search(r'[?&]token=([^&]+)', url)
+            if not token_m:
+                safe_print("      [!] Blogger: No token found in URL")
+                return None
+            token = token_m.group(1)
+
+            # ── Step 2: POST to batchexecute RPC ──
+            rpc_url = (
+                f"https://www.blogger.com/_/BloggerVideoPlayerUi/data/batchexecute"
+                f"?rpcids=WcwnYd"
+                f"&source-path=%2Fvideo.g"
+                f"&f.sid={quote(f_sid)}"
+                f"&bl={quote(bl)}"
+                f"&hl=en-US"
+                f"&rt=c"
+            )
+
+            # Build the f.req payload exactly as the C# script does
+            f_req = f'[[["WcwnYd","[\\"{token}\\"]",null,"generic"]]]'
+
+            rpc_headers = {
+                'User-Agent': UA_DESKTOP,
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.blogger.com/',
+                'Origin': 'https://www.blogger.com',
+                'X-Same-Domain': '1',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Pragma': 'no-cache',
+                'Cache-Control': 'no-cache',
+            }
+
+            r2 = session.post(rpc_url, data={'f.req': f_req},
+                              timeout=20, headers=rpc_headers)
+            if not r2 or r2.status_code != 200:
+                safe_print(f"      [!] Blogger: batchexecute failed (HTTP {r2.status_code if r2 else 'N/A'})")
+                return None
+
+            body = r2.text
+
+            # ── Step 3: Extract googlevideo.com URLs ──
+            raw_urls = re.findall(
+                r'"(https://[^"]+googlevideo\.com[^"]+)"', body)
+            if not raw_urls:
+                safe_print("      [!] Blogger: No googlevideo URLs found in RPC response")
+                return None
+
+            # Unescape unicode and backslash entities. The batchexecute
+            # response double-escapes (\\\\u003d), so after replacing the
+            # unicode escapes bare backslashes remain. Strip them all.
+            def _unescape(u):
+                u = u.replace('\\u003d', '=')
+                u = u.replace('\\u0026', '&')
+                u = u.replace('\\/', '/')
+                u = u.replace('\\', '')
+                return u
+
+            urls = list(dict.fromkeys(_unescape(u) for u in raw_urls))
+
+            # ── Step 4: Pick the lowest quality (data-saver) ──
+            # Build itag → url map
+            itag_map = {}
+            for u in urls:
+                itag_m = re.search(r'[?&]itag=(\d+)', u)
+                if itag_m:
+                    itag_map[itag_m.group(1)] = u
+
+            # Pick in ascending quality order
+            for itag in _BLOGGER_QUALITY_ORDER:
+                if itag in itag_map:
+                    quality = _BLOGGER_ITAG_MAP.get(itag, f'itag {itag}')
+                    safe_print(f"      [*] Blogger: Resolved {quality} direct MP4 (bypassing yt-dlp)")
+                    return itag_map[itag]
+
+            # Fallback: return the first URL if no known itag matched
+            if urls:
+                safe_print("      [*] Blogger: Resolved direct MP4 (unknown quality)")
+                return urls[0]
+
+            return None
+
+        except _http_exc_bases() as e:
+            if _is_network_error(e):
+                raise
+            safe_print(f"      [!] Blogger: Network error: {e}")
+            return None
+        except Exception as e:
+            safe_print(f"      [!] Blogger: Resolution error: {e}")
+            return None
+
 # --- REGISTRY ---
 
 class ResolverRegistry:
@@ -1446,6 +1606,7 @@ class ResolverRegistry:
         WildshareResolver,
         StreamtapeResolver,
         VidmolyResolver,
+        BloggerResolver,
         VidbasicResolver,
         KissasianResolver,
         KisskhMegaplayResolver,

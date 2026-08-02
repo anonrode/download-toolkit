@@ -10,7 +10,7 @@ def _quality_str(q):
     if '480'  in q: return 'bestvideo[height<=480]+bestaudio/best[height<=480]'
     if '360'  in q: return 'bestvideo[height<=360]+bestaudio/best[height<=360]'
     if 'best' in q: return 'bestvideo+bestaudio/best'
-    return 'bestvideo[height<=480]+bestaudio/best[height<=480]'
+    return 'bestvideo[height<=360]+bestaudio/best[height<=360]'
 
 
 class AppState:
@@ -87,7 +87,7 @@ class AppState:
             'stop':            self.stop,
             'pause':           self.pause,
             'bandwidth':       cfg.get('bandwidth', 0),
-            'quality':         _quality_str(cfg.get('quality', '480p')),
+            'quality':         _quality_str(cfg.get('quality', '360p')),
             'social_quality':  cfg.get('social_quality', '720p'),
             'parallel':        cfg.get('parallel', 1),
             'current_process': self.current_process,
