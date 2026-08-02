@@ -1078,6 +1078,15 @@ def search(raw_query, session=None):
     elif query.lower().endswith(' plutomovies'):
         site_filter = 'plutomovies'
         query = query[:-12].strip()
+    elif query.lower().endswith(' anitaku'):
+        site_filter = 'anitaku'
+        query = query[:-8].strip()
+    elif query.lower().endswith(' anime'):
+        site_filter = 'anitaku'
+        query = query[:-6].strip()
+    elif query.lower().endswith(' ani'):
+        site_filter = 'anitaku'
+        query = query[:-4].strip()
     elif query.lower().endswith(' asianc'):
         site_filter = 'asianc'
         query = query[:-7].strip()

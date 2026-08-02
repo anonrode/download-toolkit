@@ -2285,6 +2285,18 @@ def main():
         elif lower in ('tresume', 'tr'):
             cmd_torrent('resume', session, cfg)
 
+        elif lower.startswith('ani ') or lower.startswith('anime ') or lower.startswith('anitaku '):
+            query = raw.split(' ', 1)[1].strip()
+            if query:
+                url = search(query + " anitaku", session)
+                if url:
+                    print(f"\n[*] Downloading: {url[:60]}")
+                    app.reset_download_state()
+                    ctx = _make_ctx(cfg)
+                    process_link_queue([url], session, ctx)
+            else:
+                print("[!] Usage: ani <anime title>   (e.g. ani jujutsu kaisen)")
+
         elif lower.startswith('search ') or lower.startswith('s '):
             query = raw.split(' ', 1)[1].strip()
             if query:
