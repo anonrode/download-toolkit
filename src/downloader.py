@@ -1863,7 +1863,9 @@ def _download_magnet_aria2c(url, folder, filename, summary,
     config = config or {}
 
     max_concurrent = int(config.get('parallel', 2))
-    bt_peers = min(max(int(config.get('aria2c_connections', 16)) * 3, 20), 100)
+    # More peers = more seeders reached = faster. The old ceiling of 100 left
+    # popular torrents starved; raise it so aria2c can fan out to fast seeders.
+    bt_peers = min(max(int(config.get('aria2c_connections', 16)) * 4, 60), 250)
     timeout = int(config.get('download_timeout', 120))
 
     cmd = [
@@ -1871,12 +1873,20 @@ def _download_magnet_aria2c(url, folder, filename, summary,
         '--enable-dht=true',
         '--bt-enable-lpd=true',
         '--enable-peer-exchange=true',
+        # DHT bootstrap nodes: without these DHT can take a long time to find
+        # its first peers on a cold start when trackers are slow to answer.
+        '--dht-entry-point=router.bittorrent.com:6881',
+        '--dht-entry-point6=router.bittorrent.com:6881',
         '--seed-time=0',
         '--seed-ratio=0.0',
         '--follow-torrent=mem',
         '--bt-stop-timeout=300',
         '--bt-tracker-connect-timeout=30',
         '--bt-max-peers', str(bt_peers),
+        # aria2c stops opening new connections once the torrent hits this speed.
+        # The default is a mere 50K/s, which throttles video torrents badly;
+        # 50M effectively means "never stop looking for more bandwidth".
+        '--bt-request-peer-speed-limit=50M',
         '--max-concurrent-downloads', str(max_concurrent),
         '--file-allocation=none',
         '--console-log-level=error',

@@ -184,13 +184,29 @@ def check_infohash(info_hash):
 
 # ─── LAYER 4: MAGNET & INJECTION GUARD ─────────────────────────
 
-# Standard tracker list — pre-encoded, trusted
+# Standard tracker list — pre-encoded, trusted.
+#
+# These only affect PEER DISCOVERY (who we announce to and get peer IPs from),
+# never content integrity: the infohash in the magnet cryptographically pins
+# every byte we accept, and finished files still pass validate_file(). So a
+# fatter, fresher list is a pure download-speed win with no security cost.
+# Curated from the high-uptime public set (ngosang/trackerslist "best"),
+# dropping the dead popcorn-tracker/bittor.pw entries that were slowing the
+# announce round-trip. More live trackers => more seeders found faster.
 TRACKERS = [
     'udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce',
     'udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce',
     'udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce',
-    'udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce',
-    'udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce',
+    'udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce',
+    'udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce',
+    'udp%3A%2F%2Fopentracker.i2p.rocks%3A6969%2Fannounce',
+    'udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce',
+    'udp%3A%2F%2Fexplodie.org%3A6969%2Fannounce',
+    'udp%3A%2F%2Ftracker1.bt.moack.co.kr%3A80%2Fannounce',
+    'udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce',
+    'udp%3A%2F%2Ftracker.tiny-vps.com%3A6969%2Fannounce',
+    'udp%3A%2F%2Fwww.torrent.eu.org%3A451%2Fannounce',
+    'https%3A%2F%2Ftracker.tamersunion.org%3A443%2Fannounce',
 ]
 
 
