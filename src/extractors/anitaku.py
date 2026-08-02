@@ -91,11 +91,7 @@ def extract_anitaku(url, session, ctx=None):
                     seen.add(href)
                     ep_links.append((urljoin(ANITAKU_BASE, href), text or ep_slug))
         if not ep_links:
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                if 'episode-' in href and href not in seen:
-                    seen.add(href)
-                    ep_links.append((urljoin(ANITAKU_BASE, href), a.get_text(strip=True) or href.split('/')[-1]))
+            safe_print("  [!] Category page soft-404: No episodes found for this slug.")
         if not ep_links:
             safe_print(render_message('no_episode_links'))
             return
