@@ -803,65 +803,72 @@ def _anitaku_query_variants(query):
 
 
 async def _asearch_anitaku(session, query):
-    text = None
+    """Search Anitaku via the theme's own AJAX endpoint (admin-ajax.php,
+    action=ts_ac_do_search) instead of scraping the ?s= results HTML.
+
+    The endpoint returns structured JSON -- {"series":[{"all":[{...}]}]} -- with
+    exactly the fields the picker wants (post_title, post_type, post_status,
+    post_sub, post_latest, post_link). That's the same badge data we used to dig
+    out of result-card CSS selectors, delivered first-party, so it survives
+    layout changes and drops the whole soft-404 / sidebar-pollution problem.
+
+    Label contract is unchanged: "Anitaku (anime): {title}" with an optional
+    NUL-delimited "{type · status · sub}" meta tail, so _present_results needs
+    no changes.
+    """
+    ajax = "https://anitaku.com.ro/wp-admin/admin-ajax.php"
+    body = None
     for variant in _anitaku_query_variants(query):
-        url = f"https://anitaku.com.ro/?s={quote(variant)}"
-        status, _, body = await _afetch(session, url)
-        if status == 200 and body and 'article' in body:
-            # Cheap check that the results grid actually rendered cards before
-            # committing to this variant; otherwise fall through to the next.
-            probe = BeautifulSoup(body, 'html.parser')
-            if probe.select('div.listupd article.bs'):
-                text = body
-                break
-    if not text:
+        try:
+            async with session.post(
+                ajax,
+                data={'action': 'ts_ac_do_search', 'ts_ac_query': variant},
+                headers={'X-Requested-With': 'XMLHttpRequest',
+                         'Referer': 'https://anitaku.com.ro/'},
+                timeout=aiohttp.ClientTimeout(total=12),
+            ) as r:
+                if r.status == 200:
+                    txt = await r.text()
+                    if txt and '"post_link"' in txt:
+                        body = txt
+                        break
+        except Exception:
+            continue
+    if not body:
         return []
+
     out = []
     try:
-        soup = BeautifulSoup(text, 'html.parser')
-        # Scope to the search-results grid (div.listupd). Scraping every
-        # on-domain <a> also scoops the header nav, the "Latest Episodes"
-        # widget and the "Popular" sidebar -- unrelated shows that then
-        # bypass the relevance filter and pollute results. The results grid
-        # is the only place the actual matches live.
-        roots = soup.select('div.listupd')
+        data = json.loads(body)
+        # Flatten {"series":[{"all":[...]}, ...], ...} -> list of item dicts.
+        items = []
+        for group in data.values():
+            if not isinstance(group, list):
+                continue
+            for block in group:
+                if isinstance(block, dict) and isinstance(block.get('all'), list):
+                    items.extend(block['all'])
         seen = set()
-        for root in roots:
-            for art in root.select('article.bs'):
-                a = art.select_one('div.bsx a[href]') or art.select_one('a[href]')
-                if not a:
-                    continue
-                href = a['href']
-                # Prefer the <h2> headline; fall back to the anchor title.
-                h2 = art.select_one('h2')
-                title = (h2.get_text(strip=True) if h2
-                         else (a.get('title') or a.get_text(strip=True)))
-                if not title or len(title) < 3 or href in seen:
-                    continue
-                if 'anitaku.com.ro/' not in href:
-                    continue
-                if any(x in href for x in ('/page/', '/category/', '/genres/',
-                                           '/genre/', '?s=', '/tag/')):
-                    continue
-                # Series pages only -- skip the loose episode permalinks that
-                # some layouts drop into the grid.
-                if re.search(r'-episode-\d+', href):
-                    continue
-                seen.add(href)
-                # Pull the badges the result card exposes so the picker can show
-                # what each hit actually is (type / status / sub-dub) instead of
-                # three near-identical titles the user has to guess between.
-                def _txt(sel):
-                    el = art.select_one(sel)
-                    return el.get_text(strip=True) if el else ''
-                typez  = _txt('div.typez')                 # Anime / Movie / Special / OVA
-                status = _txt('span.epx') or _txt('div.status')  # Completed / Ongoing
-                subdub = _txt('span.sb')                   # Sub / Dub
-                meta = ' · '.join(p for p in (typez, status, subdub) if p)
-                label = f"Anitaku (anime): {title}"
-                if meta:
-                    label += f"\x00{meta}"   # NUL-delimited; stripped at display
-                out.append((label, href))
+        for it in items:
+            href = (it.get('post_link') or '').strip()
+            title = (it.get('post_title') or '').strip()
+            if not href or not title or href in seen:
+                continue
+            if 'anitaku.com.ro/' not in href:
+                continue
+            seen.add(href)
+            # Badges, in the same order the old scrape produced: type / status /
+            # sub-dub. post_latest ("Ep 1171", "Movie", "22") is a useful hint
+            # but _enrich_anitaku_counts fetches a live count for the shown rows,
+            # so keep the badge tail to the three stable descriptors here.
+            typez  = (it.get('post_type') or '').strip()    # Anime / Movie / Special / OVA
+            status = (it.get('post_status') or '').strip()  # Completed / Ongoing
+            subdub = (it.get('post_sub') or '').strip()      # Sub / Dub
+            meta = ' · '.join(p for p in (typez, status, subdub) if p)
+            label = f"Anitaku (anime): {title}"
+            if meta:
+                label += f"\x00{meta}"   # NUL-delimited; stripped at display
+            out.append((label, href))
     except Exception:
         pass
     return out
