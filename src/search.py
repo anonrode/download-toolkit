@@ -771,18 +771,17 @@ async def _asearch_pluto(session, query):
     return []
 
 async def _asearch_anitaku(session, base):
-    # Common alternate mappings for popular shows whose URLs use Japanese/Romaji titles
     aliases = {
         'demon-slayer': ['demon-slayer', 'kimetsu-no-yaiba', 'demon-slayer-kimetsu-no-yaiba'],
         'attack-on-titan': ['attack-on-titan', 'shingeki-no-kyojin'],
         'my-hero-academia': ['my-hero-academia', 'boku-no-hero-academia'],
-        'jujutsu-kaisen': ['jujutsu-kaisen'],
     }
     slugs = aliases.get(base, [base])
     out = []
     for slug in slugs:
         url = f"https://anitaku.com.ro/category/{slug}"
-        if await _averify_title(session, url, slug):
+        res = await _ahead(session, url)
+        if res and res[1] == 200:
             title_display = slug.replace('-', ' ').title()
             out.append(('Anitaku', url, f"Anitaku (series): {title_display}"))
             break
