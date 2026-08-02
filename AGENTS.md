@@ -9,3 +9,4 @@ Hard rules that override any default:
 - **Verify against the live world before coding against it** — every endpoint, selector, and JSON field. A silent `return None` here degrades into a failed episode with no stack trace.
 - **`src/downloader.py` is ~3900 lines — never bulk-read it.** Use narrow `grep -n` / small ranges.
 - **Ask before pushing** and before large refactors.
+- **Never delete or replace [`.agents/AGENTS.md`](.agents/AGENTS.md).** It is the permanent source of truth. Keep your own work-in-progress notes in a separate file (e.g. `PROJECT.md`); update the charter's §10/§11 in place, never blank it.
