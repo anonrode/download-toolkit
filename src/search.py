@@ -1068,6 +1068,59 @@ def _run_search_legacy(query, site_filter=None, fast=False, hint=None, timeout=4
 
     return results
 
+def _anitaku_episode_count(url, timeout=6):
+    """Best-effort: return the highest episode number on an Anitaku series page
+    (e.g. 1171 for One Piece, 0 for a movie/special). This is the one signal
+    that reliably separates a real long-running series from a same-named
+    spin-off/movie in the picker. Returns None on any failure -- the caller
+    just shows badges without a count, never blocks."""
+    try:
+        r = requests.get(url, headers={'User-Agent': UA_DESKTOP},
+                         timeout=timeout)
+        if r.status_code != 200 or not r.text:
+            return None
+        soup = BeautifulSoup(r.text, 'html.parser')
+        cont = (soup.select_one('div.bixbox.bxcl.epcheck')
+                or soup.select_one('div.eplister')
+                or soup.select_one('div.bxcl'))
+        if not cont:
+            return None
+        nums = set()
+        for a in cont.find_all('a', href=True):
+            m = re.search(r'-episode-(\d+)', a['href'])
+            if m:
+                nums.add(int(m.group(1)))
+        return max(nums) if nums else 0
+    except Exception:
+        return None
+
+
+def _enrich_anitaku_counts(display_results):
+    """Fetch episode counts for the Anitaku rows in the display set, in
+    parallel with a shared short deadline. Returns {url: count_str}. Never
+    raises; missing entries just don't get annotated."""
+    targets = [url for site, url in display_results
+               if site.startswith("Anitaku (anime): ")]
+    if not targets:
+        return {}
+    out = {}
+    try:
+        with ThreadPoolExecutor(max_workers=min(4, len(targets))) as ex:
+            futs = {ex.submit(_anitaku_episode_count, u): u for u in targets}
+            for fut in as_completed(futs, timeout=8):
+                u = futs[fut]
+                try:
+                    n = fut.result()
+                except Exception:
+                    n = None
+                if n is None:
+                    continue
+                out[u] = 'Movie/Special' if n == 0 else f'{n} eps'
+    except Exception:
+        pass  # timeout or pool error -> partial/empty, that's fine
+    return out
+
+
 def _present_results(results, raw_query):
     if not results:
         safe_print("\n" + render_message('search_nothing_found', query=raw_query))
@@ -1106,6 +1159,10 @@ def _present_results(results, raw_query):
 
     print()
     print(f"  {'-'*55}")
+    # Enrich the Anitaku rows with a live episode count so the picker can tell a
+    # 1000+ ep series from a same-named movie/special. Best-effort and time-
+    # boxed; if it comes back empty we just show the badges.
+    ep_counts = _enrich_anitaku_counts(display_results)
     for i, (site, url) in enumerate(display_results, 1):
         if site.startswith("PlutoMovies "):
             source = site.replace("PlutoMovies ", "Pluto")
@@ -1116,9 +1173,12 @@ def _present_results(results, raw_query):
             # to the side -- no redundant slugified copy.
             label = site[len("Anitaku (anime): "):]
             title, _, meta = label.partition('\x00')
+            parts = [meta.strip()] if meta else []
+            if url in ep_counts:
+                parts.append(ep_counts[url])
             line = f"  [{i}] {title.strip()}"
-            if meta:
-                line += f"   ({meta.strip()})"
+            if parts:
+                line += f"   ({' · '.join(parts)})"
             print(line)
         else:
             # NKiri / DramaKey / DramaRain
