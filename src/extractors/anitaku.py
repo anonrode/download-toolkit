@@ -117,6 +117,10 @@ def extract_anitaku(url, session, ctx=None):
             return int(m.group(1)) if m else 0
 
         ep_links.sort(key=ep_num)
+        # Interactive preview: show the episode range and let the user pick a
+        # slice before we start (skipped when a CLI --episodes range was given,
+        # or when not on a TTY). Then apply any explicit CLI range on top.
+        ep_links = _interactive_episode_preview(ep_links, ctx, title=name)
         ep_links = _filter_by_episode_range(ep_links, ctx)
         if not ep_links:
             safe_print(render_message('no_episodes_in_range'))

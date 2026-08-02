@@ -213,6 +213,104 @@ def _filter_by_episode_range(items, ctx):
     safe_print(f"[*] Episode range selected: {len(filtered)} of {len(items)}")
     return filtered
 
+
+def _episode_num_of(item):
+    """Best-effort episode number from an (url, label) item, for preview display.
+    Falls back to positional index when no -episode-N is present."""
+    for field in item if isinstance(item, (list, tuple)) else (item,):
+        m = re.search(r'episode[-_](\d+)', str(field))
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _interactive_episode_preview(items, ctx, title=None):
+    """Show the episode list and let the user pick a range BEFORE downloading.
+
+    Returns the (possibly narrowed) list. Runs only when it makes sense:
+      * a CLI --episodes range was already given (episode_filter set) -> skip,
+        the explicit range wins and is applied by _filter_by_episode_range.
+      * not attached to a TTY (piped/automated/tests) -> skip, download all.
+      * single episode / empty -> nothing to pick, return as-is.
+
+    Kept generic so any multi-episode extractor can reuse it. On any input
+    error (EOF/Ctrl-C) it returns the full list unchanged rather than aborting
+    -- the safe default for a preview is "download everything", never "nothing".
+    """
+    if not items or len(items) < 2:
+        return items
+    if ctx and ctx.get('episode_filter'):
+        return items  # explicit CLI range already chosen; don't second-guess it
+    try:
+        import sys
+        if not sys.stdin or not sys.stdin.isatty():
+            return items
+    except Exception:
+        return items
+
+    nums = [_episode_num_of(it) for it in items]
+    lo = next((n for n in nums if n is not None), None)
+    hi = next((n for n in reversed(nums) if n is not None), None)
+    total = len(items)
+
+    safe_print("")
+    if title:
+        safe_print(f"  {title}")
+    if lo is not None and hi is not None:
+        safe_print(f"  Episodes available: {lo}-{hi}  ({total} total)")
+    else:
+        safe_print(f"  Episodes available: 1-{total}  ({total} total)")
+    safe_print("  [1] Download all")
+    safe_print("  [2] Pick a range / specific episodes")
+    try:
+        choice = input("  Choice [1]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return items
+    if choice not in ('2',):
+        return items  # default = all
+
+    safe_print("  e.g.  1-12   or   1-5,10   or   24")
+    try:
+        spec = input("  Episodes: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return items
+    if not spec:
+        return items
+
+    # Parse the same "1-5,10" grammar as the CLI. These are episode NUMBERS,
+    # matched against each item's real episode number when we have one, and
+    # falling back to 1-based position when the label carries no number.
+    try:
+        wanted = set()
+        for part in spec.replace(' ', '').split(','):
+            if not part:
+                continue
+            if '-' in part:
+                a, b = part.split('-', 1)
+                a, b = int(a), int(b)
+                if a > b:
+                    a, b = b, a
+                wanted.update(range(a, b + 1))
+            else:
+                wanted.add(int(part))
+    except ValueError:
+        safe_print("  [!] Couldn't read that range - downloading all instead.")
+        return items
+    if not wanted:
+        return items
+
+    filtered = []
+    for idx, it in enumerate(items, 1):
+        n = _episode_num_of(it)
+        key = n if n is not None else idx
+        if key in wanted:
+            filtered.append(it)
+    if not filtered:
+        safe_print("  [!] Nothing matched that range - downloading all instead.")
+        return items
+    safe_print(f"  [*] Selected {len(filtered)} of {total} episode(s).")
+    return filtered
+
 # How long a resolve will wait out a dead connection before giving up and
 # pausing the whole series. Tuned short on purpose: a flaky mobile link usually
 # recovers within seconds, so 2 min is plenty to ride out a blip while still
