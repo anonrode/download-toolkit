@@ -3833,7 +3833,14 @@ def download_file(url, folder, filename, summary,
             p = os.path.join(folder, f'{base}.{ext}')
             if os.path.exists(p):
                 actual_size = os.path.getsize(p)
-                DownloadReceipt.mark_complete(ep_key, p, actual_size)
+                # Ghost Download check: if file is < 1MB, it's an HTML error page
+                if actual_size < 1024 * 1024:
+                    os.remove(p)
+                    result = False
+                    ui_emit('failed', reason='Ghost HTML download (host dead)')
+                    summary.add_failed(filename)
+                else:
+                    DownloadReceipt.mark_complete(ep_key, p, actual_size)
                 break
         mark_episode_done(series_url, series_name or folder, filename)
     elif not result and series_url:
