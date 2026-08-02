@@ -787,9 +787,15 @@ async def _asearch_anitaku(session, query):
         roots = soup.select('div.listupd')
         seen = set()
         for root in roots:
-            for a in root.select('div.bsx a[href], article.bs a[href]'):
+            for art in root.select('article.bs'):
+                a = art.select_one('div.bsx a[href]') or art.select_one('a[href]')
+                if not a:
+                    continue
                 href = a['href']
-                title = a.get('title') or a.get_text(strip=True)
+                # Prefer the <h2> headline; fall back to the anchor title.
+                h2 = art.select_one('h2')
+                title = (h2.get_text(strip=True) if h2
+                         else (a.get('title') or a.get_text(strip=True)))
                 if not title or len(title) < 3 or href in seen:
                     continue
                 if 'anitaku.com.ro/' not in href:
@@ -802,7 +808,20 @@ async def _asearch_anitaku(session, query):
                 if re.search(r'-episode-\d+', href):
                     continue
                 seen.add(href)
-                out.append((f"Anitaku (anime): {title}", href))
+                # Pull the badges the result card exposes so the picker can show
+                # what each hit actually is (type / status / sub-dub) instead of
+                # three near-identical titles the user has to guess between.
+                def _txt(sel):
+                    el = art.select_one(sel)
+                    return el.get_text(strip=True) if el else ''
+                typez  = _txt('div.typez')                 # Anime / Movie / Special / OVA
+                status = _txt('span.epx') or _txt('div.status')  # Completed / Ongoing
+                subdub = _txt('span.sb')                   # Sub / Dub
+                meta = ' · '.join(p for p in (typez, status, subdub) if p)
+                label = f"Anitaku (anime): {title}"
+                if meta:
+                    label += f"\x00{meta}"   # NUL-delimited; stripped at display
+                out.append((label, href))
     except Exception:
         pass
     return out
@@ -1069,7 +1088,13 @@ def _present_results(results, raw_query):
 
     if len(display_results) == 1:
         site, url = display_results[0]
-        print(f"\n  Found on {site}:")
+        if site.startswith("Anitaku (anime): "):
+            label = site[len("Anitaku (anime): "):]
+            title, _, meta = label.partition('\x00')
+            shown = title.strip() + (f"   ({meta.strip()})" if meta else "")
+            print(f"\n  Found: {shown}")
+        else:
+            print(f"\n  Found on {site}:")
         print(f"  {url}")
         try:
             ans = input("\n  Download this? [Y/n]: ").strip().lower()
@@ -1085,6 +1110,16 @@ def _present_results(results, raw_query):
         if site.startswith("PlutoMovies "):
             source = site.replace("PlutoMovies ", "Pluto")
             print(f"  [{i}] [{source}]")
+        elif site.startswith("Anitaku (anime): "):
+            # Anitaku carries its real title (and optional NUL-delimited badges
+            # like "Anime · Completed · Sub"). Show the title once, badges dimmed
+            # to the side -- no redundant slugified copy.
+            label = site[len("Anitaku (anime): "):]
+            title, _, meta = label.partition('\x00')
+            line = f"  [{i}] {title.strip()}"
+            if meta:
+                line += f"   ({meta.strip()})"
+            print(line)
         else:
             # NKiri / DramaKey / DramaRain
             slug = url.rstrip('/').split('/')[-1]
