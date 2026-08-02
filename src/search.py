@@ -770,21 +770,25 @@ async def _asearch_pluto(session, query):
             return out
     return []
 
-async def _asearch_anitaku(session, base):
-    aliases = {
-        'demon-slayer': ['demon-slayer', 'kimetsu-no-yaiba', 'demon-slayer-kimetsu-no-yaiba'],
-        'attack-on-titan': ['attack-on-titan', 'shingeki-no-kyojin'],
-        'my-hero-academia': ['my-hero-academia', 'boku-no-hero-academia'],
-    }
-    slugs = aliases.get(base, [base])
+async def _asearch_anitaku(session, query):
+    url = f"https://anitaku.com.ro/?s={quote(query)}"
+    status, _, text = await _afetch(session, url)
+    if status != 200 or not text:
+        return []
     out = []
-    for slug in slugs:
-        url = f"https://anitaku.com.ro/category/{slug}"
-        res = await _ahead(session, url)
-        if res and res[1] == 200:
-            title_display = slug.replace('-', ' ').title()
-            out.append(('Anitaku', url, f"Anitaku (series): {title_display}"))
-            break
+    try:
+        soup = BeautifulSoup(text, 'html.parser')
+        seen = set()
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            title = a.get_text(strip=True)
+            if not title or len(title) < 3 or href in seen:
+                continue
+            if 'anitaku.com.ro/' in href and not any(x in href for x in ['/page/', '/category/', '/genre/', '?s=', '/tag/']):
+                seen.add(href)
+                out.append(('Anitaku', href, title))
+    except Exception:
+        pass
     return out
 
 async def _arun(query, site_filter, fast, hint, timeout):
@@ -838,9 +842,9 @@ async def _arun(query, site_filter, fast, hint, timeout):
         if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'anitaku'):
             tasks.append(('search', _asearch_asianc(session, query)))
 
-        # Anitaku (Gogoanime) — exact match by URL category/slug
+        # Anitaku (Gogoanime) — real HTML search
         if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'asianc'):
-            tasks.append(('search', _asearch_anitaku(session, base)))
+            tasks.append(('search', _asearch_anitaku(session, query)))
 
         kinds = [k for k, _ in tasks]
         coros = [c for _, c in tasks]
