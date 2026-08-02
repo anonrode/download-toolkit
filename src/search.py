@@ -21,6 +21,7 @@ import time
 import datetime
 import threading
 from urllib.parse import quote, urlparse
+from bs4 import BeautifulSoup
 
 # Lazy `requests`: the legacy search path and cache use it, but importing it
 # (+ urllib3 + charset_normalizer, ~700ms) would block every launch since main
