@@ -92,55 +92,50 @@ def extract_anitaku(url, session, ctx=None):
             safe_print("  [!] Category page soft-404: Invalid category page.")
             return
 
+        # The episode container IS the source of truth. Whatever watch links
+        # live inside div.bixbox.bxcl.epcheck ARE the episodes -- 1171 for a
+        # long-running series, or a single entry for a movie/special. So we take
+        # every real watch link in the container, in document order, and DON'T
+        # gate on the slug: anitaku rewords slugs between the series landing page
+        # and the watch page (series "...-the-movie-infinity-castle" -> watch
+        # "...-infinity-castle-dub-movie-1") and names specials without any
+        # "-episode-N" at all, so any slug/regex gate here is whack-a-mole. The
+        # "-episode-N" pattern is used ONLY to number/sort below, never to
+        # decide what counts as an episode.
         seen = set()
         ep_links = []
-        anime_base = slug.rstrip('/')
-
-        # Scrape episode links specifically inside the episode container
         search_root = container
-        for a in search_root.find_all('a', href=True):
-            href = a['href']
-            text = a.get_text(strip=True)
-            if 'episode-' in href and href not in seen:
-                ep_slug = href.rstrip('/').split('/')[-1]
-                # Strict matching: must start with anime_base + '-'
-                if ep_slug.startswith(f"{anime_base}-") or ep_slug.startswith(f"{anime_base}_"):
-                    seen.add(href)
-                    ep_links.append((urljoin(ANITAKU_BASE, href), text or ep_slug))
 
-        # Movie/Special fallback. A movie or special is listed as a single watch
-        # page whose slug does NOT contain "-episode-N" (e.g.
-        # one-piece-heroines-special-episode, ...-infinity-castle-movie-1-eng),
-        # so the numbered-episode scrape above finds nothing. Rather than bail
-        # with "no episode links", pick up that lone child watch page (any anchor
-        # in the container whose slug is a child of anime_base but isn't the
-        # series page itself) and download it as a one-off.
-        if not ep_links:
-            for a in search_root.find_all('a', href=True):
-                href = a['href']
-                if href in seen or href.startswith(('javascript:', '#')):
-                    continue
-                child = href.rstrip('/').split('/')[-1]
-                if not child or child == anime_base:
-                    continue
-                if not (child.startswith(f"{anime_base}-")
-                        or child.startswith(f"{anime_base}_")):
-                    continue
-                # Skip share/nav junk that occasionally leaks into the container.
-                if any(x in href for x in ('pinterest', 't.me', 'facebook',
-                                           'twitter', 'whatsapp', '/genre',
-                                           '/tag/', '?')):
-                    continue
-                seen.add(href)
-                ep_links.append((urljoin(ANITAKU_BASE, href),
-                                 a.get_text(strip=True) or child))
-                break  # a movie/special is a single entry; one is enough
-            if ep_links:
-                safe_print("[*] Movie/Special - single video, no episode list.")
+        # Prefer the list-item anchors (the site renders each episode as one
+        # <li><a>), falling back to any anchor in the container if the markup
+        # ever drops the <li> wrapper.
+        anchors = search_root.select('li a[href]') or search_root.find_all('a', href=True)
+        for a in anchors:
+            href = a['href']
+            if href in seen or not href or href.startswith(('javascript:', '#')):
+                continue
+            full = urljoin(ANITAKU_BASE, href)
+            if 'anitaku.com.ro/' not in full:
+                continue
+            child = full.rstrip('/').split('/')[-1]
+            # Not the series page itself, and not share/nav junk that sometimes
+            # leaks into the container.
+            if not child or child == slug.rstrip('/'):
+                continue
+            if any(x in full for x in ('pinterest', 't.me', 'facebook',
+                                       'twitter', 'whatsapp', '/genre',
+                                       '/genres/', '/tag/', '?')):
+                continue
+            seen.add(href)
+            ep_links.append((full, a.get_text(strip=True) or child))
 
         if not ep_links:
             safe_print(render_message('no_episode_links'))
             return
+
+        # A single entry with no "-episode-N" number is a movie/special.
+        if len(ep_links) == 1 and not re.search(r'episode-(\d+)', ep_links[0][0]):
+            safe_print("[*] Movie/Special - single video, no episode list.")
 
         def ep_num(item):
             m = re.search(r'episode-(\d+)', item[0])
