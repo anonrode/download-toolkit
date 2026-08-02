@@ -786,7 +786,7 @@ async def _asearch_anitaku(session, query):
                 continue
             if 'anitaku.com.ro/' in href and not any(x in href for x in ['/page/', '/category/', '/genre/', '?s=', '/tag/']):
                 seen.add(href)
-                out.append(('Anitaku', href, title))
+                out.append((f"Anitaku (anime): {title}", href))
     except Exception:
         pass
     return out
@@ -844,7 +844,7 @@ async def _arun(query, site_filter, fast, hint, timeout):
 
         # Anitaku (Gogoanime) — real HTML search
         if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'asianc'):
-            tasks.append(('search', _asearch_anitaku(session, query)))
+            tasks.append(('anitaku', _asearch_anitaku(session, query)))
 
         kinds = [k for k, _ in tasks]
         coros = [c for _, c in tasks]
@@ -861,6 +861,7 @@ async def _arun(query, site_filter, fast, hint, timeout):
         done = await asyncio.gather(*[_guard(c) for c in coros],
                                     return_exceptions=True)
 
+        anitaku_results = []
         for kind, res in zip(kinds, done):
             if isinstance(res, Exception):
                 continue
@@ -870,6 +871,8 @@ async def _arun(query, site_filter, fast, hint, timeout):
                     cancel_event.set()
             elif kind == 'search' and res:
                 search_scored.extend(res)
+            elif kind == 'anitaku' and res:
+                anitaku_results.extend(res)
             elif kind == 'pluto' and res:
                 pluto_results.extend(res)
 
@@ -877,9 +880,9 @@ async def _arun(query, site_filter, fast, hint, timeout):
     for site, _ in slug_results:
         safe_print("  " + render_message('search_found_on', site=site))
 
-    # Merge: exact slug hits first, then relevance-filtered search, then Pluto.
+    # Merge: exact slug hits first, then Anitaku, then relevance-filtered search, then Pluto.
     ranked_search = _filter_by_relevance(query, search_scored)
-    merged = slug_results + ranked_search + pluto_results
+    merged = slug_results + anitaku_results + ranked_search + pluto_results
     # Dedupe on a normalized key (drop query string + trailing slash) so an RSS
     # result carrying ?utm_source= doesn't duplicate the clean slug-probe hit.
     seen, final = set(), []
