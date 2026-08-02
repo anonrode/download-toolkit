@@ -3833,8 +3833,11 @@ def download_file(url, folder, filename, summary,
             p = os.path.join(folder, f'{base}.{ext}')
             if os.path.exists(p):
                 actual_size = os.path.getsize(p)
-                # Ghost Download check: if file is < 1MB, it's an HTML error page
-                if actual_size < 1024 * 1024:
+                # Ghost Download check: a dead host serves a tiny HTML error
+                # page instead of media. HTML error bodies are typically <50KB;
+                # 100KB stays clear of legit short clips/recaps while still
+                # catching ghosts. (Was 1MB, which could delete small real files.)
+                if actual_size < 100 * 1024:
                     os.remove(p)
                     result = False
                     ui_emit('failed', reason='Ghost HTML download (host dead)')

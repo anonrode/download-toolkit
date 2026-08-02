@@ -79,19 +79,35 @@ def extract_anitaku(url, session, ctx=None):
             safe_print(render_message('page_fetch_failed'))
             return
         soup = BeautifulSoup(r.text, 'html.parser')
+        # Soft-404 guard. anitaku.com.ro serves its generic homepage/landing
+        # (HTTP 200) for unknown slugs, so a status check isn't enough. The
+        # episode list lives in div.bixbox.bxcl.epcheck (episodes under
+        # div.inepcx) on the current layout -- its absence means this slug has
+        # no series page. (The old #episode_page/#episode_related ids were the
+        # legacy Gogoanime layout and no longer exist here.)
+        container = (soup.select_one('div.bixbox.bxcl.epcheck')
+                     or soup.select_one('div.eplister')
+                     or soup.select_one('div.bxcl'))
+        if not container:
+            safe_print("  [!] Category page soft-404: Invalid category page.")
+            return
+
         seen = set()
         ep_links = []
-        for a in soup.find_all('a', href=True):
+        anime_base = slug.rstrip('/')
+
+        # Scrape episode links specifically inside the episode container
+        search_root = container
+        for a in search_root.find_all('a', href=True):
             href = a['href']
             text = a.get_text(strip=True)
             if 'episode-' in href and href not in seen:
                 ep_slug = href.rstrip('/').split('/')[-1]
-                anime_base = slug.rstrip('/')
-                if ep_slug.startswith(anime_base) or anime_base in ep_slug:
+                # Strict matching: must start with anime_base + '-'
+                if ep_slug.startswith(f"{anime_base}-") or ep_slug.startswith(f"{anime_base}_"):
                     seen.add(href)
                     ep_links.append((urljoin(ANITAKU_BASE, href), text or ep_slug))
-        if not ep_links:
-            safe_print("  [!] Category page soft-404: No episodes found for this slug.")
+        
         if not ep_links:
             safe_print(render_message('no_episode_links'))
             return

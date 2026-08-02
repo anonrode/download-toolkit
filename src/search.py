@@ -778,13 +778,28 @@ async def _asearch_anitaku(session, query):
     out = []
     try:
         soup = BeautifulSoup(text, 'html.parser')
+        # Scope to the search-results grid (div.listupd). Scraping every
+        # on-domain <a> also scoops the header nav, the "Latest Episodes"
+        # widget and the "Popular" sidebar -- unrelated shows that then
+        # bypass the relevance filter and pollute results. The results grid
+        # is the only place the actual matches live.
+        roots = soup.select('div.listupd')
         seen = set()
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            title = a.get_text(strip=True)
-            if not title or len(title) < 3 or href in seen:
-                continue
-            if 'anitaku.com.ro/' in href and not any(x in href for x in ['/page/', '/category/', '/genre/', '?s=', '/tag/']):
+        for root in roots:
+            for a in root.select('div.bsx a[href], article.bs a[href]'):
+                href = a['href']
+                title = a.get('title') or a.get_text(strip=True)
+                if not title or len(title) < 3 or href in seen:
+                    continue
+                if 'anitaku.com.ro/' not in href:
+                    continue
+                if any(x in href for x in ('/page/', '/category/', '/genres/',
+                                           '/genre/', '?s=', '/tag/')):
+                    continue
+                # Series pages only -- skip the loose episode permalinks that
+                # some layouts drop into the grid.
+                if re.search(r'-episode-\d+', href):
+                    continue
                 seen.add(href)
                 out.append((f"Anitaku (anime): {title}", href))
     except Exception:
