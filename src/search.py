@@ -770,6 +770,12 @@ async def _asearch_pluto(session, query):
             return out
     return []
 
+async def _asearch_anitaku(session, base):
+    url = f"https://anitaku.com.ro/category/{base}"
+    if await _averify_title(session, url, base):
+        return [('Anitaku', url, f"Anitaku (series): {base.replace('-', ' ').title()}")]
+    return []
+
 async def _arun(query, site_filter, fast, hint, timeout):
     base, season_slug, year = _parse_query(query)
     conn = aiohttp.TCPConnector(limit=_async_conn_limit(20), limit_per_host=6, ssl=False)
@@ -787,7 +793,7 @@ async def _arun(query, site_filter, fast, hint, timeout):
         tasks = []
 
         # NKiri: slug probe + RSS search
-        if site_filter not in ('dramakey', 'plutomovies', 'asianc'):
+        if site_filter not in ('dramakey', 'plutomovies', 'asianc', 'anitaku'):
             nkiri_pat = list(NKIRI_WAVE1) + ([] if fast else list(NKIRI_WAVE2))
             tasks.append(('slug', _aprobe_slug(session, 'https://thenkiri.com', nkiri_pat,
                           base, season_slug, year, 'NKiri', cancel_event)))
@@ -796,7 +802,7 @@ async def _arun(query, site_filter, fast, hint, timeout):
                 'NKiri', query)))
 
         # DramaKey.com + .cc + DramaRain: slug probe only (no server search)
-        if site_filter not in ('nkiri', 'plutomovies', 'asianc'):
+        if site_filter not in ('nkiri', 'plutomovies', 'asianc', 'anitaku'):
             dk_pat = list(DRAMAKEY_WAVE1) + ([] if fast else list(DRAMAKEY_WAVE2))
             tasks.append(('slug', _aprobe_slug(session, 'https://dramakey.com', dk_pat,
                           base, season_slug, year, 'DramaKey', cancel_event)))
@@ -807,7 +813,7 @@ async def _arun(query, site_filter, fast, hint, timeout):
                           base, season_slug, year, 'DramaRain', cancel_event)))
 
         # Search-only sources — skipped in fast mode (slug-probe only)
-        if not fast and site_filter not in ('nkiri', 'dramakey', 'asianc'):
+        if not fast and site_filter not in ('nkiri', 'dramakey', 'asianc', 'anitaku'):
             tasks.append(('pluto', _asearch_pluto(session, query)))
             tasks.append(('search', _asearch_rss(
                 session, f"https://9jarocks.com/search/{quote(query)}/feed/rss2/",
@@ -818,8 +824,12 @@ async def _arun(query, site_filter, fast, hint, timeout):
             tasks.append(('search', _asearch_naijavault(session, query)))
 
         # AsianC (Dramacool) — real JSON search, HLS-backed episodes
-        if site_filter not in ('nkiri', 'dramakey', 'plutomovies'):
+        if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'anitaku'):
             tasks.append(('search', _asearch_asianc(session, query)))
+
+        # Anitaku (Gogoanime) — exact match by URL category/slug
+        if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'asianc'):
+            tasks.append(('search', _asearch_anitaku(session, base)))
 
         kinds = [k for k, _ in tasks]
         coros = [c for _, c in tasks]
