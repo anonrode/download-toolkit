@@ -48,11 +48,49 @@ except ImportError:
     UA_DESKTOP = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 # Helper to find video files in HTML/scripts
+_MEDIA_EXTS = ('.m3u8', '.mp4', '.mkv')
+# Extensions that mean "this is a web page", never a media stream.
+_PAGE_EXTS = ('.html', '.htm', '.php', '.asp', '.aspx', '.jsp')
+
+
+def _is_media_path(candidate):
+    """True if this URL plausibly points at media rather than an embed page.
+
+    The naive "`.mp4` appears anywhere in the URL" test also matches embed PAGES
+    that merely mention a media name in their HOSTNAME -- vidb.top's dead-mirror
+    page yields `https://www.mp4upload.com/embed-bw0vvtzc7ywp.html`, whose host
+    contains ".mp4". That URL serves 16 bytes of the literal text "File was
+    deleted", which aria2c happily saves as `<episode>.html.mp4` and reports OK.
+
+    So: a path ending in a page extension is never media, and the extension has
+    to show up in the path or query -- a mention in the host alone doesn't count.
+    Token-signed streams (`...master.m3u8?t=abc`) and redirector endpoints
+    (`/dl?file=video.mp4`) both still pass, which the stricter
+    "path must END in media ext" rule would have wrongly rejected."""
+    try:
+        p = urlparse(candidate)
+    except Exception:
+        return False
+    path = (p.path or '').lower()
+    query = (p.query or '').lower()
+    if path.endswith(_PAGE_EXTS):
+        return False
+    if path.endswith(_MEDIA_EXTS):
+        return True
+    return any(e in path or e in query for e in _MEDIA_EXTS)
+
+
 def find_direct_video(text):
+    """Pull the first real direct-media URL out of player JS/HTML.
+
+    Every candidate must pass `_is_media_path` -- a bare substring match happily
+    returns embed pages (see that helper). Preference order keeps HLS first."""
     for ext in [r'\.m3u8', r'\.mp4', r'\.mkv']:
         found = re.findall(r'https?://[^\s"\'<>,\\]+' + ext + r'[^\s"\'<>,\\]*', text)
-        if found:
-            return found[0].rstrip('.,;)')
+        for cand in found:
+            cand = cand.rstrip('.,;)')
+            if _is_media_path(cand):
+                return cand
     return None
 
 def _exc_chain(exc):
@@ -646,7 +684,13 @@ class KisskhMegaplayResolver(BaseResolver):
                 'Sec-Fetch-Site': 'cross-site',
             }
             r = session.get(url, timeout=20, headers=headers)
-            if not r or r.status_code not in (200, 404):
+            # NB: `not r` is truthy for any 4xx/5xx (requests.Response.__bool__
+            # returns .ok), so it would swallow the 404s we explicitly want to
+            # allow here. tamilembed.lol serves its real player page (with the
+            # Blogger iframe) under a 404 status, so gate on `is None` and check
+            # the code separately -- otherwise every 404-served embed dies before
+            # we ever read the body.
+            if r is None or r.status_code not in (200, 404):
                 return None
 
             # 0) tamilembed.lol / player wrapper layout: check for inner nested <iframe>
@@ -1676,5 +1720,40 @@ class ResolverRegistry:
         # Direct passthrough fallback
         if 'nkiserv.com' in url or 'cdn' in url:
             return url
+
+        # Nothing claimed this host. Before handing it back as if it were a
+        # direct stream, catch the specific case that silently corrupts a
+        # download: an embed PAGE or dead-upload tombstone. This is how a
+        # 16-byte "File was deleted" page from mp4upload became a 141 B/s
+        # "successful" episode -- no resolver claims mp4upload, so it fell
+        # straight through and aria2c saved the error body as `<episode>.mp4`.
+        #
+        # Deliberately narrow: only URLs whose path looks like a web page
+        # (.html/.php/...) are probed. Real CDN streams are frequently
+        # extensionless (googlevideo `/videoplayback?...` is the common one) and
+        # can answer a probe with an HTML challenge/redirect while still being
+        # perfectly downloadable -- probing those cost us working episodes, so
+        # they are passed through untouched and the downloader's Ghost-file
+        # check remains the backstop.
+        if urlparse(url).path.lower().endswith(_PAGE_EXTS):
+            try:
+                probe = session.get(url, timeout=10,
+                                    headers={'Range': 'bytes=0-2047'})
+                body = (probe.text or '')[:2048]
+                if _looks_dead(body):
+                    safe_print("      [!] Dead upload (tombstone page): "
+                               f"{urlparse(url).netloc}")
+                    return None
+                # A page that isn't a tombstone may still embed the real media.
+                inner = find_direct_video(body)
+                if inner and inner != url:
+                    return cls.resolve(inner, session, _depth=_depth + 1)
+                safe_print("      [!] Unresolved embed page, not a media URL: "
+                           f"{urlparse(url).netloc}")
+                return None
+            except Exception:
+                # Probe failure is not proof of death -- fall through and let
+                # the downloader (and its Ghost-file check) have the final say.
+                pass
 
         return url

@@ -19,16 +19,26 @@ def extract_anitaku(url, session, ctx=None):
     os.makedirs(folder, exist_ok=True)
     summary = DownloadSummary()
 
-    def download_episode(ep_url, ep_name):
+    def _resolve_ep(ep_url):
+        """Fetch the episode page, walk its server list and resolve the first
+        embed that cracks to a direct stream. Returns (direct_url, tried_hosts)
+        -- tried_hosts feeds the failure message so we can name the culprit.
+
+        Split out of download_episode so it can run in the Prefetcher's
+        background thread while the PREVIOUS episode is still downloading. Every
+        other multi-episode extractor (myasiantv, dramarain, plutomovies,
+        naijaprey, jarocks, naijavault) already does this; anitaku resolving
+        serially is why there was a long stall between episodes.
+
+        Uses its own requests.Session -- the shared `session` is touched by the
+        main thread, and this runs concurrently with it."""
         s = requests.Session()
         s.headers['User-Agent'] = session.headers.get('User-Agent', UA_DESKTOP)
         s.headers['Referer'] = ep_url
-        
+
         r = safe_get(s, ep_url, referer=ANITAKU_BASE + '/', timeout=15)
         if r is None:
-            safe_print(f"  [X] Could not fetch episode page: {ep_name}")
-            summary.add_failed(ep_name)
-            return
+            return None, set()
 
         soup = BeautifulSoup(r.text, 'html.parser')
         embed_links = []
@@ -45,7 +55,6 @@ def extract_anitaku(url, session, ctx=None):
         for iframe in soup.find_all('iframe', src=True):
             embed_links.append(urljoin(ep_url, iframe['src']))
 
-        resolved_stream = None
         seen = set()
         for embed_url in embed_links:
             if embed_url in seen or embed_url.startswith('javascript:'):
@@ -55,8 +64,15 @@ def extract_anitaku(url, session, ctx=None):
             safe_print(f"  [*] Resolving embed: {embed_url[:60]}...")
             direct_url = ResolverRegistry.resolve(embed_url, s)
             if direct_url and direct_url != embed_url:
-                resolved_stream = direct_url
-                break
+                return direct_url, seen
+        return None, seen
+
+    def download_episode(ep_url, ep_name, resolved=None):
+        """Download one episode. `resolved` is the (url, hosts) tuple the
+        prefetcher already produced; when absent we resolve inline."""
+        if resolved is None:
+            resolved = _resolve_ep(ep_url)
+        resolved_stream, seen = resolved
 
         if resolved_stream:
             safe_print(f"  [*] Downloading stream: {resolved_stream[:70]}...")
@@ -163,18 +179,44 @@ def extract_anitaku(url, session, ctx=None):
         safe_print(f"[*] Found {len(ep_links)} episode(s) - saving to: {folder}")
         _notify_start(name, len(ep_links))
 
+        # Build the work-list first — the skip checks are local (disk + resume
+        # state, no network), so the prefetcher never burns an embed resolve on
+        # an episode we were going to skip anyway.
+        work = []
         for i, (ep_url, ep_text) in enumerate(ep_links, 1):
-            if _stopped(ctx):
-                break
-            _wait(ctx)
             ep_name = safe_filename(ep_url.rstrip('/').split('/')[-1])
-            safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
             done, _ = already_downloaded(folder, safe_filename(f"{ep_name}.mp4"), series_url=url)
             if done:
+                safe_print(f"\n[{i}/{len(ep_links)}] {ep_name}")
                 safe_print(render_message('already_saved'))
                 summary.add_skipped()
                 continue
-            download_episode(ep_url, ep_name)
+            work.append((ep_name, ep_url))
+
+        # Resolve episode N+1's embed while episode N downloads. The resolve is
+        # the slow part here (episode page fetch + embed crack, often several
+        # seconds), so overlapping it with the download removes the stall the
+        # user sees between episodes.
+        prefetcher = Prefetcher(_resolve_ep)
+        if work:
+            prefetcher.prefetch(work[0][1])
+
+        for i, (ep_name, ep_url) in enumerate(work, 1):
+            if _stopped(ctx):
+                break
+            _wait(ctx)
+            safe_print(f"\n[{i}/{len(work)}] {ep_name}")
+
+            resolved = prefetcher.get(timeout=45)
+            if i < len(work):
+                prefetcher.prefetch(work[i][1])
+
+            # Prefetch is an optimization, not the source of truth: a background
+            # network blip yields None, and these embed links are short-lived, so
+            # fall back to a fresh inline resolve rather than failing the episode.
+            if not resolved or not resolved[0]:
+                resolved = None
+            download_episode(ep_url, ep_name, resolved=resolved)
             time.sleep(1)
 
     if summary.failed == 0 and not _stopped(ctx):

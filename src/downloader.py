@@ -1655,10 +1655,34 @@ def safe_filename(name):
     return stem[:240].rstrip() or 'file'
 
 def find_direct_video(text):
+    """Pull the first real direct-media URL out of player JS/HTML.
+
+    Candidates must end in a media extension on the URL *path* -- a bare
+    substring test also matches embed pages that merely mention a media name in
+    the host/query (e.g. `https://www.mp4upload.com/embed-XXXX.html`, which
+    serves the 16-byte body "File was deleted" and would otherwise be saved as
+    `<episode>.html.mp4` and reported OK). Mirrors resolvers.find_direct_video;
+    urlparse is imported locally because resolvers.py imports from this module,
+    so a top-level dependency here would be circular."""
+    from urllib.parse import urlparse as _urlparse
+
+    def _is_media(cand):
+        try:
+            p = _urlparse(cand)
+        except Exception:
+            return False
+        path, query = (p.path or '').lower(), (p.query or '').lower()
+        if path.endswith(('.html', '.htm', '.php', '.asp', '.aspx', '.jsp')):
+            return False
+        exts = ('.m3u8', '.mp4', '.mkv')
+        return path.endswith(exts) or any(e in path or e in query for e in exts)
+
     for ext in [r'\.m3u8', r'\.mp4', r'\.mkv']:
         found = re.findall(r'https?://[^\s"\'<>,\\]+' + ext + r'[^\s"\'<>,\\]*', text)
-        if found:
-            return found[0].rstrip('.,;)')
+        for cand in found:
+            cand = cand.rstrip('.,;)')
+            if _is_media(cand):
+                return cand
     return None
 
 def make_session():
@@ -2921,7 +2945,18 @@ def _purge_stale_fragments(out_dir, base):
     fragment on live streams, so that sibling would die with FileNotFoundError
     and be recorded failed. Requiring a literal `.` after the base plus an
     ext/format-id shape rules the neighbour out: after `Episode 1` the
-    neighbour has `2`, not `.`."""
+    neighbour has `2`, not `.`.
+
+    Only *incomplete* fragments are deleted. With `--concurrent-fragments N`,
+    fragments finish out of order but can only be appended to the main `.part`
+    IN order, so a completed fragment whose predecessors are still in flight
+    sits on disk as `<base>.mp4.part-FragN` (no trailing `.part`), while ones
+    still downloading are `...-FragN.part`. Deleting the finished ones threw
+    away whole megabytes of good data on every pause -- measured on a real
+    stop: Frag3 (1.6MB) and Frag4 (2.6MB) complete, 4.2MB re-downloaded for
+    nothing. yt-dlp reuses a completed `-FragN` file as-is on relaunch, so
+    keeping it is both safe and strictly faster. Only the `.part`-suffixed
+    fragments carry the 416-triggering partial bytes we actually need gone."""
     if not out_dir or not base:
         return 0
     removed = 0
@@ -2929,11 +2964,12 @@ def _purge_stale_fragments(out_dir, base):
         import glob as _glob
         # `base.` prefix keeps `Episode 12` out of `Episode 1`'s sweep; the regex
         # then confirms the middle really is `[.fFMT].EXT[.part]` so an episode
-        # legitimately named "Episode 1.5" isn't caught either.
+        # legitimately named "Episode 1.5" isn't caught either. The trailing
+        # `\.part$` is what limits this to INCOMPLETE fragments.
         pattern = os.path.join(out_dir, _glob.escape(base) + '.*-Frag*')
         frag_re = re.compile(
             r'^' + re.escape(base) + r'\.(?:f[\w.-]+\.)?[A-Za-z0-9]{2,5}'
-            r'(?:\.part)?-Frag\d+', re.IGNORECASE)
+            r'(?:\.part)?-Frag\d+\.part$', re.IGNORECASE)
         for p in _glob.glob(pattern):
             if not frag_re.match(os.path.basename(p)):
                 continue
@@ -2947,19 +2983,57 @@ def _purge_stale_fragments(out_dir, base):
     return removed
 
 
+def _hls_fingerprint(url):
+    """Stable identity of an HLS manifest, ignoring its signing token.
+
+    These CDNs hand out a fresh signed URL every resolve:
+        https://<edge>/hls2/01/01031/ix8j6v6n7mmc_o/master.m3u8?t=<tok>&s=..&e=..
+    The `?t=` token and even the `<edge>` hostname rotate, but the media path
+    (`/hls2/01/01031/ix8j6v6n7mmc_o/master.m3u8`) is the actual video. Comparing
+    paths tells us whether a freshly resolved manifest is the SAME content as the
+    one a leftover `.part` was built from -- which is what makes it safe to
+    continue rather than restart. Returns '' when there's nothing usable."""
+    if not url:
+        return ''
+    try:
+        from urllib.parse import urlparse as _up
+        return (_up(url).path or '').lower()
+    except Exception:
+        return ''
+
+
+def _hls_fp_path(out_dir, base):
+    return os.path.join(out_dir, base + '.srcid')
+
+
+def _read_hls_fingerprint(out_dir, base):
+    try:
+        with open(_hls_fp_path(out_dir, base), 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except Exception:
+        return ''
+
+
+def _write_hls_fingerprint(out_dir, base, url):
+    """Record which manifest the current partial belongs to."""
+    fp = _hls_fingerprint(url)
+    if not fp:
+        return
+    try:
+        with open(_hls_fp_path(out_dir, base), 'w', encoding='utf-8') as f:
+            f.write(fp)
+    except Exception:
+        pass
+
+
 def _purge_hls_partial(out_dir, base):
     """Delete a partial HLS download so it restarts cleanly from fragment 0.
 
-    Unlike `_purge_stale_fragments` (which keeps the `.part`/`.ytdl` so an
-    in-process Ctrl+P resume continues against the SAME manifest), this drops the
-    partial entirely. It is called when re-entering download_with_ytdlp with a
-    FRESHLY RE-RESOLVED manifest -- e.g. the `resume` command picking a stopped
-    series back up. Those premilkyway/streamwish manifests are token-signed
-    (`?t=&s=&e=`): the resume mints a brand-new signed URL whose segment URLs no
-    longer match the bytes already in the old `.part`, so yt-dlp's `-c` tries to
-    continue against segments that now 403/416 and the episode wedges. Restarting
-    the one episode from scratch is the robust fix -- we lose only that episode's
-    partial progress, and it always completes.
+    Unlike `_purge_stale_fragments` (which keeps the `.part`/`.ytdl` so a resume
+    continues), this drops the partial entirely. It is the FALLBACK for when a
+    freshly resolved manifest is a *different* stream than the one on disk (see
+    `_resume_or_purge_hls`) -- continuing then would splice two different videos
+    into one file, so starting the episode over is the only safe option.
 
     Scoped exactly like _purge_stale_fragments: an anchored `base.` prefix plus a
     shape check so a parallel sibling ("Episode 12" vs "Episode 1") is never hit.
@@ -2979,7 +3053,8 @@ def _purge_hls_partial(out_dir, base):
                 continue
             # yt-dlp's partials: `<base>[.fID].<ext>.part`, the `.ytdl` resume
             # sidecar, and per-fragment `...-FragN(.part)` temps.
-            if (fn.endswith('.part') or fn.endswith('.ytdl') or '-Frag' in fn):
+            if (fn.endswith('.part') or fn.endswith('.ytdl') or '-Frag' in fn
+                    or fn.endswith('.srcid')):
                 try:
                     os.remove(p)
                     removed += 1
@@ -2989,6 +3064,73 @@ def _purge_hls_partial(out_dir, base):
         pass
     return removed
 
+
+def _resume_or_purge_hls(out_dir, base, url):
+    """Decide whether a leftover HLS partial can be resumed, and prepare it.
+
+    Called on every entry to download_with_ytdlp with the manifest just resolved.
+    Previously this ALWAYS purged the partial, on the assumption that a freshly
+    signed manifest can't continue old bytes. Measured against the live CDN, that
+    assumption is wrong: the `?t=` token and edge hostname rotate, but the media
+    path is stable, and yt-dlp resumes cleanly with a brand-new token -- 0
+    HTTP/416/403 errors, and already-completed fragments are reused untouched.
+    Purging unconditionally therefore threw away every megabyte on each stop, so
+    a 40-minute episode restarted from 0% no matter how far it had got.
+
+    So: resume when the fresh manifest is the SAME media path recorded alongside
+    the partial, and only fall back to a full purge when it's genuinely a
+    different stream (a re-resolve that landed on another server/quality), where
+    continuing would splice two videos together. When no fingerprint was ever
+    recorded (partial from an older build) we also purge, since we can't prove
+    the bytes match.
+
+    Returns 'resume' or 'restart' -- for the caller's log line."""
+    if not out_dir or not base:
+        return 'restart'
+    import glob as _glob
+    esc = _glob.escape(base)
+    has_partial = bool(_glob.glob(os.path.join(out_dir, esc + '.*.part'))
+                       or _glob.glob(os.path.join(out_dir, esc + '.*-Frag*')))
+    fresh_fp = _hls_fingerprint(url)
+    old_fp = _read_hls_fingerprint(out_dir, base)
+
+    if has_partial and fresh_fp and old_fp and fresh_fp == old_fp:
+        # Same video, new token: keep the banked bytes, drop only the fragments
+        # that were mid-flight (their partial bytes are what trigger 416).
+        _purge_stale_fragments(out_dir, base)
+        _write_hls_fingerprint(out_dir, base, url)
+        return 'resume'
+
+    if has_partial:
+        _purge_hls_partial(out_dir, base)
+    _write_hls_fingerprint(out_dir, base, url)
+    return 'restart'
+
+
+
+def _frag_error_index(tail):
+    """Fragment number from a yt-dlp 'fragment N not found' abort, else None.
+
+    With `--abort-on-unavailable-fragments` (set deliberately -- see the flag's
+    comment) yt-dlp gives up the moment one segment 404s, printing:
+
+        ERROR: fragment 57 not found, unable to continue
+
+    That is often transient on these HLS CDNs -- a token-signed segment that
+    expired mid-download, or one flaky edge node -- so the whole episode dying is
+    an over-reaction. Recovering it needs the fragment index, which only exists
+    in this message, hence parsing the captured tail rather than the exit code.
+    Also matches 'fragment N not found' variants without the trailing clause."""
+    if not tail:
+        return None
+    for line in reversed(list(tail)):
+        m = re.search(r'fragment\s+(\d+)\s+not found', str(line), re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                return None
+    return None
 
 
 def _run_ytdlp_with_live_progress(cmd, progress, stop_flag=None, pause_flag=None,
@@ -3228,14 +3370,14 @@ def download_with_ytdlp(url, folder, filename, summary,
         config = {}
     base        = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
     out_template = os.path.join(folder, base + '.%(ext)s')
-    # This function is entered once per episode attempt with the manifest that was
-    # JUST resolved. On a cross-session `resume` the manifest is freshly
-    # token-signed, so any `.part`/`.ytdl`/`-Frag*` left from the previous signed
-    # URL can't be continued (its segment URLs 403/416) -- drop them so the
-    # episode restarts cleanly rather than wedging. The in-process Ctrl+P resume
-    # never re-enters here (it relaunches inside _run_ytdlp_with_live_progress
-    # against the SAME manifest), so its partial progress is untouched.
-    _purge_hls_partial(folder, base)
+    # This function is entered once per episode attempt with the manifest that
+    # was JUST resolved. A leftover partial is now RESUMED when the fresh
+    # manifest points at the same media path (verified against the live CDN: a
+    # new signing token continues old bytes with no 416/403 and reuses completed
+    # fragments), and only restarted when the re-resolve landed on a genuinely
+    # different stream. See _resume_or_purge_hls.
+    if _resume_or_purge_hls(folder, base, url) == 'resume':
+        ui_emit('hls_resuming_partial')
     quality_str  = quality or 'bestvideo[height<=360]+bestaudio/best[height<=360]'
     # Always leave a bare `/best` at the end so HLS streams whose variants are
     # muxed-only (no separate video+audio to merge) or don't report a height
@@ -3374,6 +3516,51 @@ def download_with_ytdlp(url, folder, filename, summary,
             frag_dir=folder, frag_base=base,
         )
 
+        # ── Unavailable-fragment recovery ───────────────────────────────
+        # `--abort-on-unavailable-fragments` kills the episode on the first 404
+        # segment. yt-dlp's own --fragment-retries can't save it: those retries
+        # happen inside the run, and once it aborts the leftover `-FragN` temp is
+        # what makes a plain relaunch fail the same way (a partial fragment file
+        # makes yt-dlp resume it with a Range the CDN answers 416/403).
+        #
+        # Deleting just that fragment's temp file is the surgical fix -- every
+        # COMPLETED fragment is already appended to the main `.part` and the
+        # `.ytdl` sidecar holds the fragment index, so the relaunch resumes at
+        # the same place instead of restarting a 40-minute episode. That is
+        # exactly what _purge_stale_fragments does, and it is already trusted on
+        # the Ctrl+P pause path; this reuses it for the abort path.
+        _FRAG_ATTEMPTS = 3
+        frag_try = 0
+        while (code != 0 and not _is_stopped(stop_flag)
+               and not _is_paused(pause_flag) and frag_try < _FRAG_ATTEMPTS):
+            bad_frag = _frag_error_index(tail)
+            if bad_frag is None:
+                break                      # a different failure -- don't loop
+            frag_try += 1
+            ui_emit('ytdlp_frag_recover', frag=bad_frag,
+                    attempt=frag_try, total=_FRAG_ATTEMPTS)
+            _purge_stale_fragments(folder, base)
+            # Give a token-signed / rate-limited edge node a moment to recover,
+            # and back off a little further each try.
+            time.sleep(3 * frag_try)
+            if _is_stopped(stop_flag):
+                break
+            # No progress reset needed: fail()/done() were not called on this
+            # run, so `progress` is still live and the relaunch keeps painting
+            # the same row (the fragment index resumes, so the bar moves on
+            # from where it stopped rather than restarting at 0%).
+            code, tail = _run_ytdlp_with_live_progress(
+                cmd, progress,
+                stop_flag=stop_flag, pause_flag=pause_flag,
+                current_process=current_process,
+                on_pause=_on_pause, on_resume=_on_resume, on_timeout=_on_timeout,
+                frag_dir=folder, frag_base=base,
+            )
+        if code != 0 and frag_try >= _FRAG_ATTEMPTS:
+            still = _frag_error_index(tail)
+            if still is not None:
+                ui_emit('ytdlp_frag_gave_up', frag=still, total=_FRAG_ATTEMPTS)
+
         if _is_stopped(stop_flag):
             progress.stopped_for_resume()
             ui_emit('ytdlp_stopped')
@@ -3401,6 +3588,12 @@ def download_with_ytdlp(url, folder, filename, summary,
             for p in cands:
                 if os.path.exists(p):
                     size_mb = os.path.getsize(p) / (1024 * 1024)
+                    # Episode is complete -- drop the resume fingerprint so it
+                    # can't be mistaken for a live partial later.
+                    try:
+                        os.remove(_hls_fp_path(folder, base))
+                    except OSError:
+                        pass
                     progress.done(size_mb)
                     if series_url:
                         ep_key = f"{series_url}:{filename}"
