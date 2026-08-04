@@ -903,6 +903,63 @@ async def _asearch_anitaku(session, query):
         pass
     return out
 
+def _fit_status_line(frame, totals, waiting, width):
+    """Build the live search line at the richest form that fits `width`.
+
+    Phone terminals are ~50-60 columns and the full form wants ~100, so the
+    line has to shed detail rather than be chopped -- a blind slice cuts
+    mid-word ("pending: DramaKey, Dram") and buries the counts, which are the
+    part actually worth reading. Degrade in this order:
+
+        [/] searching... pending: NKiri, DramaKey, Pluto            (full, start)
+        [/] searching... +5 pending                                 (start, narrow)
+        [/] searching... NKiri:10 +3 | pending: DramaKey, Pluto     (rich, +drops)
+        [/] searching... NKiri:10 +3 | +2 pending                   (narrow, pending)
+        [/] searching... NKiri:10 AsianC:1                          (counts only)
+
+    Counts outrank the pending list when space is scarce: "who answered and
+    with how much" matters more than "who hasn't answered yet."
+    """
+    prefix = f"  [{frame}] searching..."
+    if width <= len(prefix):
+        return prefix[:max(1, width)]
+
+    count_parts = [f"{n}:{c}" for n, c in totals.items()]
+
+    # Trim counts from the right until they fit, leaving a "+N" marker for
+    # dropped ones so a big result set never silently looks smaller than it is.
+    shown = list(count_parts)
+    while shown:
+        dropped = len(count_parts) - len(shown)
+        body = f"{prefix} {' '.join(shown)}" + (f" +{dropped}" if dropped else '')
+        if len(body) <= width:
+            break
+        shown.pop()
+    else:
+        # No counts have landed yet (start of search), or every single one
+        # overflows. Fall through to the pending list below.
+        body = prefix
+
+    # Spend what's left on the pending list -- but only when counts are fully
+    # shown (no "+N" truncation). If counts are trimmed, space already ran out.
+    pending_names = ', '.join(waiting)
+    if waiting and len(shown) == len(count_parts):
+        sep = ' |' if shown else ''
+        # Full list, then progressively fewer names with a "+N" tail, then a
+        # bare count. The middle tier is what makes a 50-80 column phone
+        # useful: "NKiri, DramaKey +4" beats both the chopped full list and a
+        # contentless "+6 pending".
+        cands = [f"{body}{sep} pending: {pending_names}",
+                 f"{body}{sep} {pending_names}"]
+        cands += [f"{body}{sep} {', '.join(waiting[:k])} +{len(waiting) - k}"
+                  for k in range(len(waiting) - 1, 0, -1)]
+        cands.append(f"{body}{sep} +{len(waiting)} pending")
+        for cand in cands:
+            if len(cand) <= width:
+                return cand
+        # Even "+N pending" didn't fit. Bare counts.
+    return body[:width]
+
 async def _arun(query, site_filter, fast, hint, timeout):
     base, season_slug, year = _parse_query(query)
     conn = aiohttp.TCPConnector(limit=_async_conn_limit(20), limit_per_host=6, ssl=False)
@@ -993,7 +1050,6 @@ async def _arun(query, site_filter, fast, hint, timeout):
                     for n, c in landed:
                         if c:
                             totals[n] = totals.get(n, 0) + c
-                    got = ' '.join(f"{n}:{c}" for n, c in totals.items()) or '...'
                     # A site can own two tasks (NKiri = slug probe + RSS), so
                     # dedupe by name or the line reads "NKiri, NKiri".
                     waiting, seen = [], set()
@@ -1002,10 +1058,8 @@ async def _arun(query, site_filter, fast, hint, timeout):
                             continue
                         seen.add(names[j])
                         waiting.append(names[j])
-                    line = f"  [{frame}] searching... {got}"
-                    if waiting:
-                        line += f" | pending: {', '.join(waiting)}"
-                    SURFACE.set_live(line[:max(20, _term_width() - 1)])
+                    SURFACE.set_live(
+                        _fit_status_line(frame, totals, waiting, _term_width() - 1))
             except asyncio.CancelledError:
                 pass
 
