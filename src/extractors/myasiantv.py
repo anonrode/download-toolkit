@@ -129,7 +129,10 @@ def extract_myasiantv(url, session, ctx=None):
         if not direct or (not ('.m3u8' in direct.lower() or 'manifest' in direct.lower()) and not _cdn_alive(direct, ep_url)):
             if direct:
                 safe_print(f"  [*] Link expired - re-resolving...")
-            direct = resolve_with_retry(_resolve_ep, ep_url, ctx)
+            # Inline (non-prefetch) resolve: seconds of silence otherwise, and
+            # resolve_with_retry can also sit waiting for the network to return.
+            with working_spinner(f"Resolving {ep_name}"):
+                direct = resolve_with_retry(_resolve_ep, ep_url, ctx)
             if not direct:
                 if _stopped(ctx):
                     break

@@ -15,6 +15,7 @@ import tempfile
 import hashlib
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 
 # Lazy `requests`: importing it (+ urllib3 + charset_normalizer) costs ~790ms
 # and nothing needs it to draw the banner or run the REPL prompt -- only an
@@ -357,6 +358,55 @@ class TerminalSurface:
 
 
 SURFACE = TerminalSurface()
+
+# Shared spinner frames. Prefetcher.get() animates its own copy inline; keeping
+# the frames in one place means every "still working" line ticks identically.
+SPINNER_FRAMES = ('|', '/', '-', '\\')
+SPINNER_TICK = 0.15
+
+
+@contextmanager
+def working_spinner(label, tick=SPINNER_TICK):
+    """Animate one live line while a blocking call runs.
+
+    Several operations take seconds with nothing on screen -- resolving an
+    embed, fetching a long episode list, enriching search rows. Silence there
+    reads as a hang, so anything that can block for more than about a second
+    should be wrapped in this.
+
+    A daemon thread owns the animation because the wrapped call is synchronous
+    and cannot yield to repaint. Everything goes through SURFACE, so this is a
+    no-op off-TTY (pipe, web UI, log) rather than spraying \\r escapes, and a
+    concurrent warning erases the line cleanly instead of landing on top of it.
+
+    The line is always cleared -- including when the body raises -- so a failure
+    can never strand a spinner frame on the user's cursor row.
+    """
+    if not _is_tty():
+        # Nothing would be drawn anyway; skip the thread entirely.
+        yield
+        return
+
+    stop = threading.Event()
+
+    def _spin():
+        i = 0
+        while not stop.wait(tick):
+            frame = SPINNER_FRAMES[i % len(SPINNER_FRAMES)]
+            text = f"  [{frame}] {label}"
+            # Clamp so a long label can't wrap; a wrapped line breaks the
+            # single-row invariant SURFACE depends on to erase itself.
+            SURFACE.set_live(text[:max(20, _term_width() - 1)])
+            i += 1
+
+    t = threading.Thread(target=_spin, name='working-spinner', daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join(timeout=1.0)
+        SURFACE.clear_live()
 
 
 def safe_print(*args, **kwargs):

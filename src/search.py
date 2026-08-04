@@ -103,7 +103,9 @@ def ensure_async():
 
     threading.Thread(target=_install, daemon=True, name='aiohttp-bootstrap').start()
 
-from .downloader import safe_print, UA_DESKTOP, BASE_DIR, CONFIG_DIR
+from .downloader import (safe_print, UA_DESKTOP, BASE_DIR, CONFIG_DIR,
+                         SURFACE, _term_width, working_spinner,
+                         SPINNER_FRAMES, SPINNER_TICK)
 from .messages import render as render_message
 
 # ─── CACHE ────────────────────────────────────────────────────
@@ -658,7 +660,14 @@ async def _aprobe_slug(session, base_url, patterns, base, season_slug, year,
     """Probe all slug patterns CONCURRENTLY; return the highest-priority 200.
     Priority = pattern order (wave1 before wave2), so we keep the pattern index
     and pick the lowest-index 200, matching legacy behavior. When verify_title
-    is set, a 200 must also pass a <title> relevance check (soft-404 guard)."""
+    is set, a 200 must also pass a <title> relevance check (soft-404 guard).
+
+    Returns as soon as the answer is DECIDED rather than when every probe has
+    landed. Once the settled prefix reaches a 200, no later pattern can outrank
+    it, so the remaining probes are cancelled -- their answers could not change
+    the result. Waiting for them was pure latency: a wave-1 hit answered in
+    ~0.7s still blocked on 15 siblings (measured 3.0s healthy, 10.5s when the
+    host throttles), and that probe dominated the whole search."""
     if cancel_event.is_set():
         return None
     domain = base_url.rstrip('/')
@@ -666,22 +675,43 @@ async def _aprobe_slug(session, base_url, patterns, base, season_slug, year,
     for p in patterns:
         path = p.replace('{base}', base).replace('{season}', season_slug).replace('{year}', year)
         urls.append(domain + '/' + path.strip('/') + '/')
-    results = await asyncio.gather(*[_ahead(session, u) for u in urls],
-                                   return_exceptions=True)
-    status_by_url = {}
-    for res in results:
-        if isinstance(res, Exception):
-            continue
-        url, status, final = res
-        status_by_url[url] = (status, final)
-    # Walk in priority order — first 200 wins (mirrors legacy _probe_patterns).
-    for u in urls:
-        status, final = status_by_url.get(u, (0, u))
-        if status == 200:
-            if verify_title and not await _averify_title(session, final, base):
-                continue  # soft-404: 200 but page isn't the series we asked for
-            return (site_name, final)
-    return None
+
+    tasks = [asyncio.ensure_future(_ahead(session, u)) for u in urls]
+    idx_of = {t: i for i, t in enumerate(tasks)}
+    settled = {}          # pattern index -> (status, final_url)
+    pending = set(tasks)
+    next_needed = 0       # lowest index whose verdict we still don't know
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                i = idx_of[t]
+                try:
+                    _u, status, final = t.result()
+                except Exception:
+                    # Same treatment as the old gather(return_exceptions=True)
+                    # path: a failed probe is simply "not a 200".
+                    status, final = 0, urls[i]
+                settled[i] = (status, final)
+
+            # Walk the contiguous settled prefix in priority order. Anything
+            # past a gap is undecidable yet, so we stop and wait for more.
+            while next_needed < len(urls) and next_needed in settled:
+                status, final = settled[next_needed]
+                if status == 200:
+                    if verify_title and not await _averify_title(session, final, base):
+                        next_needed += 1   # soft-404: 200 but not our series
+                        continue
+                    return (site_name, final)
+                next_needed += 1
+            if next_needed >= len(urls):
+                return None
+        return None
+    finally:
+        # Whatever is still in flight can no longer affect the answer.
+        for t in pending:
+            t.cancel()
 
 async def _asearch_rss(session, feed_url, site_name, query, url_fixup=None):
     """Fetch a WordPress RSS search feed, return scored (site, url, title) list."""
@@ -892,44 +922,45 @@ async def _arun(query, site_filter, fast, hint, timeout):
         # NKiri: slug probe + RSS search
         if site_filter not in ('dramakey', 'plutomovies', 'asianc', 'anitaku'):
             nkiri_pat = list(NKIRI_WAVE1) + ([] if fast else list(NKIRI_WAVE2))
-            tasks.append(('slug', _aprobe_slug(session, 'https://thenkiri.com', nkiri_pat,
+            tasks.append(('slug', 'NKiri', _aprobe_slug(session, 'https://thenkiri.com', nkiri_pat,
                           base, season_slug, year, 'NKiri', cancel_event)))
-            tasks.append(('search', _asearch_rss(
+            tasks.append(('search', 'NKiri', _asearch_rss(
                 session, f"https://thenkiri.com/search/{quote(query)}/feed/rss2/",
                 'NKiri', query)))
 
         # DramaKey.com + .cc + DramaRain: slug probe only (no server search)
         if site_filter not in ('nkiri', 'plutomovies', 'asianc', 'anitaku'):
             dk_pat = list(DRAMAKEY_WAVE1) + ([] if fast else list(DRAMAKEY_WAVE2))
-            tasks.append(('slug', _aprobe_slug(session, 'https://dramakey.com', dk_pat,
+            tasks.append(('slug', 'DramaKey', _aprobe_slug(session, 'https://dramakey.com', dk_pat,
                           base, season_slug, year, 'DramaKey', cancel_event)))
-            tasks.append(('slug', _aprobe_slug(session, 'https://dramakey.cc',
+            tasks.append(('slug', 'DramaKey.cc', _aprobe_slug(session, 'https://dramakey.cc',
                           DRAMAKEY_CC_PATTERNS, base, season_slug, year,
                           'DramaKey.cc', cancel_event, verify_title=True)))
-            tasks.append(('slug', _aprobe_slug(session, 'https://dramarain.com', dk_pat,
+            tasks.append(('slug', 'DramaRain', _aprobe_slug(session, 'https://dramarain.com', dk_pat,
                           base, season_slug, year, 'DramaRain', cancel_event)))
 
         # Search-only sources — skipped in fast mode (slug-probe only)
         if not fast and site_filter not in ('nkiri', 'dramakey', 'asianc', 'anitaku'):
-            tasks.append(('pluto', _asearch_pluto(session, query)))
-            tasks.append(('search', _asearch_rss(
+            tasks.append(('pluto', 'Pluto', _asearch_pluto(session, query)))
+            tasks.append(('search', '9jaRocks', _asearch_rss(
                 session, f"https://9jarocks.com/search/{quote(query)}/feed/rss2/",
                 '9jaRocks', query, url_fixup=_normalize_9jarocks)))
-            tasks.append(('search', _asearch_rss(
+            tasks.append(('search', 'NaijaPrey', _asearch_rss(
                 session, f"https://www.naijaprey.tv/search/{quote(query)}/feed/rss2/",
                 'NaijaPrey', query)))
-            tasks.append(('search', _asearch_naijavault(session, query)))
+            tasks.append(('search', 'NaijaVault', _asearch_naijavault(session, query)))
 
         # AsianC (Dramacool) — real JSON search, HLS-backed episodes
         if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'anitaku'):
-            tasks.append(('search', _asearch_asianc(session, query)))
+            tasks.append(('search', 'AsianC', _asearch_asianc(session, query)))
 
         # Anitaku (Gogoanime) — real HTML search
         if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'asianc'):
-            tasks.append(('anitaku', _asearch_anitaku(session, query)))
+            tasks.append(('anitaku', 'Anitaku', _asearch_anitaku(session, query)))
 
-        kinds = [k for k, _ in tasks]
-        coros = [c for _, c in tasks]
+        kinds = [k for k, _, _ in tasks]
+        names = [n for _, n, _ in tasks]
+        coros = [c for _, _, c in tasks]
 
         async def _guard(coro):
             # Per-task deadline so ONE slow source can't discard the others'
@@ -940,8 +971,84 @@ async def _arun(query, site_filter, fast, hint, timeout):
             except (asyncio.TimeoutError, Exception):
                 return None
 
-        done = await asyncio.gather(*[_guard(c) for c in coros],
-                                    return_exceptions=True)
+        # Run them concurrently but report as each one lands. The results are
+        # still bucketed in TASK order below, not completion order -- ranking
+        # and dedupe are unchanged; only the on-screen feedback is live.
+        futs = [asyncio.ensure_future(_guard(c)) for c in coros]
+        idx_of = {f: i for i, f in enumerate(futs)}
+        done_by_idx = {}
+        landed = []          # (name, count) in completion order, for display
+
+        async def _ticker():
+            """Animate one line so a slow source never looks like a hang."""
+            i = 0
+            try:
+                while True:
+                    await asyncio.sleep(SPINNER_TICK)
+                    frame = SPINNER_FRAMES[i % len(SPINNER_FRAMES)]
+                    i += 1
+                    # Merge counts per site for the same reason -- NKiri's slug
+                    # hit and its RSS rows are one source to the user.
+                    totals = {}
+                    for n, c in landed:
+                        if c:
+                            totals[n] = totals.get(n, 0) + c
+                    got = ' '.join(f"{n}:{c}" for n, c in totals.items()) or '...'
+                    # A site can own two tasks (NKiri = slug probe + RSS), so
+                    # dedupe by name or the line reads "NKiri, NKiri".
+                    waiting, seen = [], set()
+                    for j in range(len(futs)):
+                        if j in done_by_idx or names[j] in seen:
+                            continue
+                        seen.add(names[j])
+                        waiting.append(names[j])
+                    line = f"  [{frame}] searching... {got}"
+                    if waiting:
+                        line += f" | pending: {', '.join(waiting)}"
+                    SURFACE.set_live(line[:max(20, _term_width() - 1)])
+            except asyncio.CancelledError:
+                pass
+
+        ticker = asyncio.ensure_future(_ticker())
+        try:
+            for fut in asyncio.as_completed(futs):
+                res = await fut
+                # as_completed yields wrappers, so find which task settled.
+                for f, i in idx_of.items():
+                    if f.done() and i not in done_by_idx:
+                        done_by_idx[i] = f
+                        try:
+                            r = f.result()
+                        except Exception:
+                            r = None
+                        landed.append((names[i], len(r) if isinstance(r, list)
+                                       else (1 if r else 0)))
+        finally:
+            ticker.cancel()
+            try:
+                await ticker
+            except (asyncio.CancelledError, Exception):
+                pass
+            SURFACE.clear_live()
+            # On the normal path every fut is already done and this is a no-op.
+            # On Ctrl+C it is not: gather() used to propagate cancellation to
+            # its children for free, and as_completed does not. Without this,
+            # the in-flight source tasks outlive us and keep running against
+            # the session this function's exit is about to close -- which
+            # surfaces as "Task was destroyed but it is pending" noise on the
+            # user's terminal right after they hit Ctrl+C.
+            stragglers = [f for f in futs if not f.done()]
+            for f in stragglers:
+                f.cancel()
+            if stragglers:
+                await asyncio.gather(*stragglers, return_exceptions=True)
+
+        done = []
+        for i in range(len(futs)):
+            try:
+                done.append(futs[i].result())
+            except Exception as e:
+                done.append(e)
 
         anitaku_results = []
         for kind, res in zip(kinds, done):
@@ -958,7 +1065,8 @@ async def _arun(query, site_filter, fast, hint, timeout):
             elif kind == 'pluto' and res:
                 pluto_results.extend(res)
 
-    # Stream "found on X" for each exact slug hit as we finish (UI feedback).
+    # Summarize the exact slug hits. (The live per-source line above is the
+    # in-flight feedback; these are the permanent "found on X" confirmations.)
     for site, _ in slug_results:
         safe_print("  " + render_message('search_found_on', site=site))
 
@@ -1151,20 +1259,23 @@ def _enrich_anitaku_counts(display_results):
     if not targets:
         return {}
     out = {}
-    try:
-        with ThreadPoolExecutor(max_workers=min(4, len(targets))) as ex:
-            futs = {ex.submit(_anitaku_episode_count, u): u for u in targets}
-            for fut in as_completed(futs, timeout=8):
-                u = futs[fut]
-                try:
-                    n = fut.result()
-                except Exception:
-                    n = None
-                if n is None:
-                    continue
-                out[u] = 'Movie/Special' if n == 0 else f'{n} eps'
-    except Exception:
-        pass  # timeout or pool error -> partial/empty, that's fine
+    # Up to an 8s deadline, and it runs AFTER the search looks finished -- the
+    # worst place to go quiet, so keep a live line up while it works.
+    with working_spinner("Checking episode counts"):
+        try:
+            with ThreadPoolExecutor(max_workers=min(4, len(targets))) as ex:
+                futs = {ex.submit(_anitaku_episode_count, u): u for u in targets}
+                for fut in as_completed(futs, timeout=8):
+                    u = futs[fut]
+                    try:
+                        n = fut.result()
+                    except Exception:
+                        n = None
+                    if n is None:
+                        continue
+                    out[u] = 'Movie/Special' if n == 0 else f'{n} eps'
+        except Exception:
+            pass  # timeout or pool error -> partial/empty, that's fine
     return out
 
 

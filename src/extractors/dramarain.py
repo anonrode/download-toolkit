@@ -134,7 +134,8 @@ def extract_dramarain(url, session, ctx=None):
             if not direct or not _cdn_alive(direct):
                 if direct:
                     safe_print(f"  [*] CDN link expired - re-resolving...")
-                direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
+                with working_spinner(f"Resolving {fbase}"):
+                    direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
                 if not direct:
                     if _stopped(ctx):
                         break

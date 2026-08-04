@@ -32,7 +32,7 @@ from ..downloader import (
     mark_series_complete, already_downloaded, BASE_DIR, DIAG_LOG, UA_DESKTOP,
     _notify_start, register_process, unregister_process, finish_process,
     update_status, _drain_futures_interruptible, make_session,
-    mark_episode_failed, check_connection, wait_for_network,
+    mark_episode_failed, check_connection, wait_for_network, working_spinner,
 )
 
 # ─── SITE DOMAIN CONSTANTS ────────────────────────────────────

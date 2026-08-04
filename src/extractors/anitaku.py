@@ -71,7 +71,11 @@ def extract_anitaku(url, session, ctx=None):
         """Download one episode. `resolved` is the (url, hosts) tuple the
         prefetcher already produced; when absent we resolve inline."""
         if resolved is None:
-            resolved = _resolve_ep(ep_url)
+            # Only the inline path gets a spinner -- the prefetch path already
+            # animates one in Prefetcher.get(), and two threads driving the
+            # single live row would flicker against each other.
+            with working_spinner(f"Resolving {ep_name}"):
+                resolved = _resolve_ep(ep_url)
         resolved_stream, seen = resolved
 
         if resolved_stream:
@@ -100,7 +104,8 @@ def extract_anitaku(url, session, ctx=None):
         download_episode(url, safe_filename(slug))
     else:
         safe_print(render_message('fetching_episode_list'))
-        r = safe_get(session, url, referer=ANITAKU_BASE + '/', timeout=30)
+        with working_spinner("Fetching episode list"):
+            r = safe_get(session, url, referer=ANITAKU_BASE + '/', timeout=30)
         if r is None:
             safe_print(render_message('page_fetch_failed'))
             return
