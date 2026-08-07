@@ -1776,17 +1776,41 @@ def cmd_torrent(query, session, cfg):
         return
 
     # ── Search flow ────────────────────────────────────────────
-    print()
-    ui_emit('torrent_searching', query=query)
+    best_mode = False
+    clean_query = query.strip()
+    if clean_query.lower().startswith('--best '):
+        best_mode = True
+        clean_query = clean_query[7:].strip()
+    elif clean_query.lower().startswith('best '):
+        best_mode = True
+        clean_query = clean_query[5:].strip()
 
-    results, blocked_count, error, intent = search_tpb(query)
+    print()
+    ui_emit('torrent_searching', query=clean_query)
+
+    results, blocked_count, error, intent = search_tpb(clean_query, best_mode=best_mode)
 
     if error:
         ui_emit('torrent_search_failed', error=error)
         return
 
     if not results:
-        ui_emit('torrent_nothing_found', query=query)
+        ui_emit('torrent_nothing_found', query=clean_query)
+        return
+
+    if best_mode:
+        selected = results[0]
+        name = selected.get('name', 'torrent_download')
+        info_hash = selected.get('info_hash', '')
+        from src.security import sanitize_magnet
+        magnet, reason = sanitize_magnet(info_hash, name)
+        if not magnet:
+            print(f'  [X] Best match security block: {reason}')
+            return
+        print(f"  [*] Best match auto-selected: {name}")
+        _run_torrent_download(magnet, name, info_hash, folder, cfg,
+                              record_torrent_start, mark_torrent_complete,
+                              mark_torrent_stopped, download_file, DownloadSummary)
         return
 
     print()

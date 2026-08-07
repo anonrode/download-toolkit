@@ -63,6 +63,88 @@ _TPB_HEADERS = {
 _SEARCH_CACHE = {}
 _SEARCH_CACHE_MAX = 32
 
+# Trusted release groups known for high quality, safety, and proper encoding
+TRUSTED_GROUPS = {
+    'PSA': 0.5,
+    'QxR': 0.5,
+    'Tigole': 0.4,
+    'MeGusta': 0.3,
+    'RARBG': 0.3,
+    'GalaxyTV': 0.2,
+    'EZTV': 0.2,
+}
+
+def _get_group_bonus(name):
+    """Return confidence bonus for trusted release groups."""
+    if not name:
+        return 0.0
+    for group, bonus in TRUSTED_GROUPS.items():
+        if re.search(r'(?i)\b' + re.escape(group) + r'\b', name):
+            return bonus
+    return 0.0
+
+def _get_codec_bonus(codec_name):
+    """Bonus for efficient modern codecs."""
+    return 0.2 if codec_name == 'x265/HEVC' else 0.0
+
+def _fetch_yts(query):
+    """Fetch movie encodes from YTS API mirrors, returning normalized dicts."""
+    cache_key = 'yts_' + query.strip().lower()
+    if cache_key in _SEARCH_CACHE:
+        return _SEARCH_CACHE[cache_key]
+
+    urls = [
+        f'https://yts.lt/api/v2/list_movies.json?query_term={urllib.parse.quote(query)}&limit=15',
+        f'https://yts.mx/api/v2/list_movies.json?query_term={urllib.parse.quote(query)}&limit=15',
+    ]
+
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+    }
+
+    results = []
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=3, headers=headers)
+            if not resp.ok:
+                continue
+            data = resp.json()
+            movies = data.get('data', {}).get('movies', [])
+            if not movies:
+                continue
+            for m in movies:
+                title = m.get('title_long') or m.get('title', 'Movie')
+                torrents = m.get('torrents', [])
+                for t in torrents:
+                    h = t.get('hash', '')
+                    if not h:
+                        continue
+                    q = t.get('quality', '')
+                    codec = t.get('video_codec', '')
+                    item = {
+                        'name': f"{title} [{q}] [{codec}] [YTS]",
+                        'info_hash': h,
+                        'seeders': int(t.get('seeds', 1)),
+                        'leechers': int(t.get('peers', 0)),
+                        'size': int(t.get('size_bytes', 0)),
+                        'username': 'YTS',
+                        'status': 'trusted',
+                        '_engine': 'yts',
+                    }
+                    results.append(item)
+            if results:
+                break
+        except Exception:
+            continue
+
+    if len(_SEARCH_CACHE) >= _SEARCH_CACHE_MAX:
+        _SEARCH_CACHE.pop(next(iter(_SEARCH_CACHE)), None)
+    _SEARCH_CACHE[cache_key] = results
+    return results
+
 
 def _is_video_category(cat):
     """TPB category 200-299 = Video (movies, TV, HD, 4K, etc.)."""
@@ -357,45 +439,40 @@ def _fetch_tpb(query):
     return (data, None)
 
 
-def search_tpb(query):
-    """Search The Pirate Bay via apibay.org.
+def search_tpb(query, best_mode=False):
+    """Search TPB and multi-source indexers (YTS).
 
     Returns:
         (results: list[dict], blocked_count: int, error: str or None, intent)
-        Each result dict has: name, info_hash, seeders, leechers, size,
-        username, status, _trust_tier, _scope, _quality_tier, _quality_label,
-        _codec, _audio, _source, _size_str, _health_pct, _health_bar.
     """
-    # Parse intent first so we search apibay with the clean title (no S01/E03
-    # markers) — "silo s1" → search "silo", "the last of us s1e1" → "the last of us".
-    # Markers in the raw query confuse apibay's index and return zero results.
     intent = _parse_query_intent(query)
     search_term = intent['title'] if intent['title'] else query
 
-    data, error = _fetch_tpb(search_term)
-    if error:
-        return ([], 0, error, None)
-    if not data:
-        return ([], 0, None, None)
+    tpb_data, error = _fetch_tpb(search_term)
+    yts_data = _fetch_yts(search_term)
 
-    # Keep only Video-category torrents (200-299). Drops ebooks (601),
-    # audiobooks (102), music, games, etc. that match the title text.
-    # Also drop 0-byte entries — apibay sometimes returns size=0 for
-    # incomplete/fake releases; they're not worth showing.
-    data = [d for d in data if _is_video_category(d.get('category', ''))
-            and int(d.get('size', 0)) > 0]
-    if not data:
-        return ([], 0, None, None)
+    # Filter TPB to video categories
+    tpb_data = [d for d in tpb_data if _is_video_category(d.get('category', ''))
+                and int(d.get('size', 0)) > 0]
 
-    # Security filter (layers 1-4)
-    safe, blocked_count, block_reasons = filter_results(data)
+    # Combine and deduplicate by info_hash
+    seen_hashes = set()
+    combined = []
 
-    # Relevance filter. Parse season/episode intent out of the query first so
-    # markers like 's1', 'season 1', 'silos01' don't sink the title match —
-    # relevance scores only against the stripped title. Score everything, take
-    # the strict set; if empty, fall back to a looser threshold so a real
-    # search never returns a blank screen just because release names are messy.
-    intent = _parse_query_intent(query)
+    for d in tpb_data + yts_data:
+        h = str(d.get('info_hash', '')).lower().strip()
+        if not h or h in seen_hashes:
+            continue
+        seen_hashes.add(h)
+        combined.append(d)
+
+    if not combined:
+        return ([], 0, error if not tpb_data and error else None, None)
+
+    # Security & anti-fake filter (layers 1-6)
+    safe, blocked_count, block_reasons = filter_results(combined, user_query=query)
+
+    # Relevance filter
     query_phrase = intent['title']
     scored = []
     for r in safe:
@@ -410,13 +487,13 @@ def search_tpb(query):
     for r in relevant:
         _enrich_result(r)
 
-    # Sort within the flat list; grouping/season-priority happens at display.
-    # Keys, most-significant first:
-    #   relevance bucket (loose fallback can't outrank a solid hit)
-    #   season match      (asked-for season floats up; None intent = neutral)
-    #   quality tier      (1080p over 720p, etc. — your main ask)
-    #   episode ascending (E01, E02, E03 within a season/quality run)
-    #   seeders           (final tiebreak)
+    # Weighted ranking:
+    # 1. Relevance bucket
+    # 2. Season match
+    # 3. Quality tier (4K > 1080p > 720p)
+    # 4. Group bonus + Codec bonus
+    # 5. Episode order
+    # 6. Seeder count
     want_season = intent['season']
 
     def _season_rank(r):
@@ -425,7 +502,6 @@ def search_tpb(query):
         return 1 if r.get('_season_num') == want_season else -1
 
     def _episode_key(r):
-        # Ascending episode order, but sort() is reverse=True below, so negate.
         ep = r.get('_episode_num')
         return -(ep if ep is not None else 9999)
 
@@ -433,11 +509,17 @@ def search_tpb(query):
         key=lambda r: (round(r.get('_relevance', 0) / 0.15),
                        _season_rank(r),
                        r.get('_quality_tier', 0),
+                       _get_group_bonus(r.get('name', '')) + _get_codec_bonus(r.get('_codec', '')),
                        _episode_key(r),
                        int(r.get('seeders', 0))),
         reverse=True)
 
+    if best_mode and relevant:
+        return ([relevant[0]], blocked_count, None, intent)
+
     return (relevant, blocked_count, None, intent)
+
+search_torrents = search_tpb  # alias for search_torrents
 
 
 # ─── RESULT ENRICHMENT ──────────────────────────────────────────

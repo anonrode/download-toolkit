@@ -369,14 +369,87 @@ def _safe_delete(filepath):
         pass
 
 
+# Negative filter patterns: CAM/TS rips and password/compressed scams
+_CAM_RE = re.compile(r'(?i)\b(?:CAM|HDTS|TELESYNC|TS[\-\.]?RIP|HDCAM)\b')
+_SUSPICIOUS_CONTENT_RE = re.compile(r'(?i)\b(?:password|passcode|pass\s*in\s*txt)\b|\.(?:rar|zip|7z)\b')
+
+# Minimum plausible sizes (bytes)
+_MIN_SIZE_MOVIE = {
+    4: 3 * 1024**3,      # 4K movie / pack: 3GB+
+    3: 900 * 1024**2,    # 1080p movie / pack: 900MB+
+    2: 500 * 1024**2,    # 720p movie / pack: 500MB+
+}
+_MIN_SIZE_EPISODE = {
+    4: 600 * 1024**2,    # 4K single episode: 600MB+
+    3: 180 * 1024**2,    # 1080p single episode: 180MB+
+    2: 90 * 1024**2,     # 720p single episode: 90MB+
+}
+
+def check_negative_filters(name, user_query=''):
+    """Filter out CAM/TS rips and passworded/archive scams.
+
+    If user explicitly searched for "cam", CAM releases are allowed.
+    """
+    if not name:
+        return (True, '')
+    
+    # Exclude CAM unless query explicitly asks for cam
+    if 'cam' not in (user_query or '').lower():
+        if _CAM_RE.search(name):
+            return (False, 'excluded low-quality CAM/TS release')
+
+    if _SUSPICIOUS_CONTENT_RE.search(name):
+        return (False, 'excluded passworded/archive media release')
+
+    return (True, '')
+
+
+def check_size_plausible(result):
+    """Scope-aware size validation to catch impossible/fake sizes.
+
+    Allows 180MB+ for 1080p single episodes while requiring 900MB+ for movies.
+    """
+    try:
+        size = int(result.get('size', 0))
+    except (ValueError, TypeError):
+        return (True, '')
+
+    if size <= 0:
+        return (False, 'zero or negative file size')
+
+    quality_tier = result.get('_quality_tier', 0)
+    if not quality_tier:
+        name = result.get('name', '')
+        if re.search(r'(?i)(?:2160p|4K|UHD)', name):
+            quality_tier = 4
+        elif re.search(r'(?i)(?:1080p|FHD)', name):
+            quality_tier = 3
+        elif re.search(r'(?i)(?:720p|HD)', name):
+            quality_tier = 2
+
+    # Check if single episode vs movie/pack
+    name = result.get('name', '')
+    is_ep = result.get('_scope') == 'episode' or bool(re.search(r'(?i)(?:S\d{1,2}E\d{1,3}|\d{1,2}x\d{2,3}|episode\s*\d+)', name))
+
+    min_map = _MIN_SIZE_EPISODE if is_ep else _MIN_SIZE_MOVIE
+    min_bytes = min_map.get(quality_tier, 0)
+
+    if min_bytes > 0 and size < min_bytes:
+        tier_label = {4: '4K', 3: '1080p', 2: '720p'}.get(quality_tier, '')
+        return (False, f'size too small for claimed quality {tier_label} ({size // (1024*1024)}MB < {min_bytes // (1024*1024)}MB)')
+
+    return (True, '')
+
+
 # ─── FULL PIPELINE ──────────────────────────────────────────────
 
-def filter_result(result):
-    """Run layers 1-4 on a single TPB API result dict.
+def filter_result(result, user_query=''):
+    """Run pre-download security layers on a single API result dict.
 
     Args:
         result: dict with keys: name, info_hash, seeders, leechers,
                 status, username, size.
+        user_query: optional user search string for intent checks.
 
     Returns:
         (passed: bool, reasons: list[str], trust_tier: str)
@@ -400,20 +473,30 @@ def filter_result(result):
     if not passed:
         reasons.append(f'[Layer 3] {reason}')
 
-    # Layer 4 — we don't build the magnet yet, but check the name
-    #           for shell metacharacters
+    # Layer 4 — shell metacharacters in release name
     name = result.get('name', '')
     if _SHELL_DANGER.search(name):
         reasons.append(f'[Layer 4] shell metacharacters in release name')
 
+    # Layer 5 — negative filters (CAM/password/archive)
+    passed, reason = check_negative_filters(name, user_query=user_query)
+    if not passed:
+        reasons.append(f'[Layer 5] {reason}')
+
+    # Layer 6 — plausible size guard
+    passed, reason = check_size_plausible(result)
+    if not passed:
+        reasons.append(f'[Layer 6] {reason}')
+
     return (len(reasons) == 0, reasons, trust_tier)
 
 
-def filter_results(results):
-    """Filter a list of TPB results through all pre-download layers.
+def filter_results(results, user_query=''):
+    """Filter a list of results through all pre-download layers.
 
     Args:
-        results: list of dicts from apibay.org.
+        results: list of dicts from search engines (apibay/yts/eztv).
+        user_query: optional original search query string.
 
     Returns:
         (safe: list[dict], blocked_count: int, block_reasons: dict)
@@ -424,7 +507,7 @@ def filter_results(results):
     block_reasons = {}
 
     for r in results:
-        passed, reasons, tier = filter_result(r)
+        passed, reasons, tier = filter_result(r, user_query=user_query)
         if passed:
             r['_trust_tier'] = tier
             safe.append(r)
