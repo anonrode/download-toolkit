@@ -372,6 +372,18 @@ def _safe_delete(filepath):
 # Negative filter patterns: CAM/TS rips and password/compressed scams
 _CAM_RE = re.compile(r'(?i)\b(?:CAM|HDTS|TELESYNC|TS[\-\.]?RIP|HDCAM)\b')
 _SUSPICIOUS_CONTENT_RE = re.compile(r'(?i)\b(?:password|passcode|pass\s*in\s*txt)\b|\.(?:rar|zip|7z)\b')
+# Dangerous executable extensions that should never appear in video torrents.
+_EXECUTABLE_RE = re.compile(r'(?i)\.(?:exe|bat|cmd|scr|msi|ps1|vbs|js|com|pif)(?:\b|$)')
+# Opt-in marker: only a standalone "cam" in the query allows CAM releases.
+_CAM_INTENT_RE = re.compile(r'(?i)\bcam\b')
+
+# x265/HEVC reaches the same quality at roughly half the bitrate of x264, so the
+# thresholds below (which assume x264) reject perfectly good HEVC encodes -- a
+# 1080p x265 movie at 750-800MB is exactly what QxR and Tigole ship. Scale the
+# floor down for HEVC rather than lowering it for everything, which would let
+# genuine fakes through.
+_HEVC_RE = re.compile(r'(?i)(?:x265|h\.?265|HEVC)')
+_HEVC_SIZE_FACTOR = 0.6
 
 # Minimum plausible sizes (bytes)
 _MIN_SIZE_MOVIE = {
@@ -384,6 +396,49 @@ _MIN_SIZE_EPISODE = {
     3: 180 * 1024**2,    # 1080p single episode: 180MB+
     2: 90 * 1024**2,     # 720p single episode: 90MB+
 }
+# Maximum plausible sizes — catches absurdly oversized fakes.
+_MAX_SIZE_MOVIE = {
+    4: 90 * 1024**3,     # 4K movie: 90GB ceiling (covers large remuxes)
+    3: 40 * 1024**3,     # 1080p movie: 40GB ceiling
+    2: 25 * 1024**3,     # 720p movie: 25GB ceiling
+}
+_MAX_SIZE_EPISODE = {
+    4: 50 * 1024**3,     # 4K episode: 50GB ceiling
+    3: 25 * 1024**3,     # 1080p episode: 25GB ceiling
+    2: 15 * 1024**3,     # 720p episode: 15GB ceiling
+}
+# Season / multi-season packs hold dozens of episodes, so a per-item ceiling
+# would throw away exactly the releases people want most. A 9-season 1080p pack
+# legitimately runs into the hundreds of GB. Rather than guess an episode count
+# we cannot see at filter time, cap packs only where the size stops being
+# physically plausible for any real release.
+_MAX_SIZE_PACK = {
+    4: 2000 * 1024**3,   # 4K pack: 2TB
+    3: 1000 * 1024**3,   # 1080p pack: 1TB
+    2: 600 * 1024**3,    # 720p pack: 600GB
+}
+# Pack detection by NAME, because _scope is not available here: filter_results
+# runs from search_tpb BEFORE _enrich_result assigns _scope, so result['_scope']
+# is absent on this path and cannot be relied on.
+#
+# Match pack STRUCTURE, not pack vocabulary. Bare words are title text as often
+# as they are release metadata -- "Season of the Witch", "A Complete Unknown"
+# and "Four Seasons" are all movies, and treating them as packs would hand them
+# the 1TB ceiling and let real fakes through. So every alternative below needs
+# a season NUMBER or an explicit range/complete-series phrase.
+_PACK_RE = re.compile(
+    r'(?i)(?:\bS\d{1,2}\s*-\s*S?\d{1,2}\b'          # S01-S05, S01-5
+    # S01 with no episode after it. The \b is load-bearing: without it the
+    # greedy \d{1,2} backtracks on "S01E03" and matches a bare "S0", leaving
+    # "1E03" ahead so the lookahead never sees the E and every episode reads
+    # as a pack.
+    r'|\bS\d{1,2}\b(?![\s\.\-_]*E\d)'
+    # Season 1, Seasons.1-10. The (?!\d) stops the year in "Four Seasons 2018"
+    # from being read as season 20 -- that would give a movie the pack ceiling.
+    r'|\bseasons?[\s\.\-_]*\d{1,2}(?!\d)'
+    r'|\bcomplete[\s\.\-_]*(?:series|collection|seasons?)\b'      # Complete Series
+    r'|\b(?:full|entire)[\s\.\-_]*series\b'
+    r'|\bbox[\s\.\-_]?set\b)')
 
 def check_negative_filters(name, user_query=''):
     """Filter out CAM/TS rips and passworded/archive scams.
@@ -392,14 +447,19 @@ def check_negative_filters(name, user_query=''):
     """
     if not name:
         return (True, '')
-    
-    # Exclude CAM unless query explicitly asks for cam
-    if 'cam' not in (user_query or '').lower():
+
+    # Exclude CAM unless the query explicitly asks for cam. Word-boundary, not
+    # substring: a plain `'cam' in query` silently disabled this whole filter
+    # for any title containing those letters ("Camelot", "Cameron", "camp").
+    if not _CAM_INTENT_RE.search(user_query or ''):
         if _CAM_RE.search(name):
             return (False, 'excluded low-quality CAM/TS release')
 
     if _SUSPICIOUS_CONTENT_RE.search(name):
         return (False, 'excluded passworded/archive media release')
+
+    if _EXECUTABLE_RE.search(name):
+        return (False, 'excluded dangerous executable extension')
 
     return (True, '')
 
@@ -427,16 +487,37 @@ def check_size_plausible(result):
         elif re.search(r'(?i)(?:720p|HD)', name):
             quality_tier = 2
 
-    # Check if single episode vs movie/pack
+    # Check if single episode vs movie/pack. Compare case-insensitively:
+    # _enrich_result writes '_scope' as 'EPISODE', so testing for lowercase
+    # 'episode' never matched and every single episode was judged against the
+    # movie thresholds -- which threw out legitimate sub-900MB 1080p rips.
     name = result.get('name', '')
-    is_ep = result.get('_scope') == 'episode' or bool(re.search(r'(?i)(?:S\d{1,2}E\d{1,3}|\d{1,2}x\d{2,3}|episode\s*\d+)', name))
+    scope = str(result.get('_scope') or '').upper()
+    is_ep = scope == 'EPISODE' or bool(re.search(r'(?i)(?:S\d{1,2}E\d{1,3}|\d{1,2}x\d{2,3}|episode\s*\d+)', name))
+    # A pack is the not-an-episode case: "S01E03" wins over "S01", so check
+    # is_ep first or every episode also looks like a pack.
+    is_pack = not is_ep and (scope == 'SEASON_PACK' or bool(_PACK_RE.search(name)))
 
     min_map = _MIN_SIZE_EPISODE if is_ep else _MIN_SIZE_MOVIE
     min_bytes = min_map.get(quality_tier, 0)
 
+    if min_bytes > 0 and _HEVC_RE.search(name):
+        min_bytes = int(min_bytes * _HEVC_SIZE_FACTOR)
+
     if min_bytes > 0 and size < min_bytes:
         tier_label = {4: '4K', 3: '1080p', 2: '720p'}.get(quality_tier, '')
         return (False, f'size too small for claimed quality {tier_label} ({size // (1024*1024)}MB < {min_bytes // (1024*1024)}MB)')
+
+    # Upper bound — catches absurdly oversized fakes. Packs get their own, far
+    # higher ceiling: judged as movies they were all rejected (a 45GB single
+    # season read as a 45GB "movie" and blew the 40GB cap), which silently
+    # deleted every season pack from results.
+    max_map = (_MAX_SIZE_PACK if is_pack
+               else _MAX_SIZE_EPISODE if is_ep else _MAX_SIZE_MOVIE)
+    max_bytes = max_map.get(quality_tier, 0)
+    if max_bytes > 0 and size > max_bytes:
+        tier_label = {4: '4K', 3: '1080p', 2: '720p'}.get(quality_tier, '')
+        return (False, f'size too large for claimed quality {tier_label} ({size // (1024**3)}GB > {max_bytes // (1024**3)}GB)')
 
     return (True, '')
 

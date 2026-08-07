@@ -11,13 +11,15 @@ Incomplete torrents are tracked in a small JSON file so `torrent resume`
 import os
 import re
 import json
+import random
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
 from .security import (
     filter_results, sanitize_magnet, check_infohash,
     TRUST_VIP, TRUST_TRUSTED, TRUST_MEMBER,
 )
-from .downloader import CONFIG_DIR
+from .downloader import CONFIG_DIR, working_spinner
 from .messages import render as render_message, paint
 
 # Lazy requests — only loaded when actually searching
@@ -94,8 +96,9 @@ def _fetch_yts(query):
         return _SEARCH_CACHE[cache_key]
 
     urls = [
+        f'https://yts.gg/api/v2/list_movies.json?query_term={urllib.parse.quote(query)}&limit=15',
+        f'https://movies-api.accel.li/api/v2/list_movies.json?query_term={urllib.parse.quote(query)}&limit=15',
         f'https://yts.lt/api/v2/list_movies.json?query_term={urllib.parse.quote(query)}&limit=15',
-        f'https://yts.mx/api/v2/list_movies.json?query_term={urllib.parse.quote(query)}&limit=15',
     ]
 
     headers = {
@@ -108,7 +111,7 @@ def _fetch_yts(query):
     results = []
     for url in urls:
         try:
-            resp = requests.get(url, timeout=3, headers=headers)
+            resp = requests.get(url, timeout=5, headers=headers)
             if not resp.ok:
                 continue
             data = resp.json()
@@ -425,7 +428,7 @@ def _fetch_tpb(query):
             last_err = f'search failed: {e}'
         # Empty or errored — back off briefly and try again (skip after last).
         if attempt < TPB_RETRIES - 1:
-            _time.sleep(0.8 * (attempt + 1))
+            _time.sleep(0.8 * (attempt + 1) + random.uniform(0, 0.5))
 
     if last_err and _looks_empty(data):
         return ([], last_err)
@@ -445,11 +448,29 @@ def search_tpb(query, best_mode=False):
     Returns:
         (results: list[dict], blocked_count: int, error: str or None, intent)
     """
+    if not query or not query.strip():
+        return ([], 0, 'empty query', None)
+
     intent = _parse_query_intent(query)
     search_term = intent['title'] if intent['title'] else query
 
-    tpb_data, error = _fetch_tpb(search_term)
-    yts_data = _fetch_yts(search_term)
+    # Fetch both engines at once. Run serially these add up: _fetch_tpb retries
+    # with backoff, and _fetch_yts walks up to three hosts at 5s each, so a bad
+    # network could stack ~15s of YTS on top of TPB's retries. They share
+    # nothing, so overlapping them makes the wait the slower engine rather than
+    # the sum -- and the spinner means the wait never looks like a hang.
+    with working_spinner(f"Searching torrents for {search_term}"):
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_tpb = ex.submit(_fetch_tpb, search_term)
+            f_yts = ex.submit(_fetch_yts, search_term)
+            try:
+                tpb_data, error = f_tpb.result()
+            except Exception as e:
+                tpb_data, error = [], f'search failed: {e}'
+            try:
+                yts_data = f_yts.result()
+            except Exception:
+                yts_data = []   # YTS is a bonus source; TPB alone is still useful
 
     # Filter TPB to video categories
     tpb_data = [d for d in tpb_data if _is_video_category(d.get('category', ''))
@@ -495,6 +516,7 @@ def search_tpb(query, best_mode=False):
     # 5. Episode order
     # 6. Seeder count
     want_season = intent['season']
+    want_episode = intent['episode']
 
     def _season_rank(r):
         if want_season is None:
@@ -503,23 +525,31 @@ def search_tpb(query, best_mode=False):
 
     def _episode_key(r):
         ep = r.get('_episode_num')
+        if ep is None:
+            return -9999
+        if want_episode is not None:
+            # Exact match gets highest score; others ranked by proximity
+            return -abs(ep - want_episode)
+        # No specific episode requested: ascending order
         return -(ep if ep is not None else 9999)
 
     relevant.sort(
         key=lambda r: (round(r.get('_relevance', 0) / 0.15),
                        _season_rank(r),
+                       _episode_key(r),
                        r.get('_quality_tier', 0),
                        _get_group_bonus(r.get('name', '')) + _get_codec_bonus(r.get('_codec', '')),
-                       _episode_key(r),
                        int(r.get('seeders', 0))),
         reverse=True)
+
+    # Store rank score for inspectability
+    for rank, r in enumerate(relevant, 1):
+        r['_rank'] = rank
 
     if best_mode and relevant:
         return ([relevant[0]], blocked_count, None, intent)
 
     return (relevant, blocked_count, None, intent)
-
-search_torrents = search_tpb  # alias for search_torrents
 
 
 # ─── RESULT ENRICHMENT ──────────────────────────────────────────
