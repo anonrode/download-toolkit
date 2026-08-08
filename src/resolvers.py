@@ -2,6 +2,9 @@ import re
 import sys
 import time
 import base64
+import struct
+import tempfile
+import subprocess
 from html import unescape
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, quote
@@ -1636,6 +1639,374 @@ class BloggerResolver(BaseResolver):
             safe_print(f"      [!] Blogger: Resolution error: {e}")
             return None
 
+
+class _WasmInterpreter:
+    def __init__(self, wasm_bytes):
+        self.bytes = wasm_bytes
+        self.memory = bytearray(128 * 65536)
+        self.globals = [0] * 16
+        self.functions = []
+        self._parse()
+
+    def _read_leb128_u(self, data, offset):
+        val = 0; shift = 0
+        while True:
+            b = data[offset]; offset += 1
+            val |= (b & 0x7f) << shift; shift += 7
+            if not (b & 0x80): break
+        return val, offset
+
+    def _read_leb128_s(self, data, offset):
+        val = 0; shift = 0
+        while True:
+            b = data[offset]; offset += 1
+            val |= (b & 0x7f) << shift; shift += 7
+            if not (b & 0x80): break
+        if shift < 32 and (b & 0x40):
+            val |= (~0 << shift)
+        return val, offset
+
+    def _parse(self):
+        pos = 8
+        sections = {}
+        while pos < len(self.bytes):
+            sec_id = self.bytes[pos]; pos += 1
+            size, pos = self._read_leb128_u(self.bytes, pos)
+            sections[sec_id] = self.bytes[pos:pos+size]
+            pos += size
+
+        if 11 in sections:
+            raw = sections[11]
+            idx = 0
+            count, idx = self._read_leb128_u(raw, idx)
+            for _ in range(count):
+                flags = raw[idx]; idx += 1
+                mem_offset = 0
+                if flags == 0:
+                    idx += 1
+                    mem_offset, idx = self._read_leb128_s(raw, idx)
+                    idx += 1
+                data_len, idx = self._read_leb128_u(raw, idx)
+                self.memory[mem_offset:mem_offset+data_len] = raw[idx:idx+data_len]
+                idx += data_len
+
+        if 10 in sections:
+            raw = sections[10]
+            idx = 0
+            count, idx = self._read_leb128_u(raw, idx)
+            for _ in range(count):
+                fn_size, idx = self._read_leb128_u(raw, idx)
+                fn_body = raw[idx:idx+fn_size]
+                idx += fn_size
+                self.functions.append(fn_body)
+
+    def decrypt(self, ptr, length):
+        return self.call_func(4, [ptr, length])
+
+    def call_func(self, fn_idx, args):
+        body = self.functions[fn_idx]
+        idx = 0
+        local_groups, idx = self._read_leb128_u(body, idx)
+        num_locals = len(args)
+        locals_list = list(args)
+        for _ in range(local_groups):
+            cnt, idx = self._read_leb128_u(body, idx)
+            t = body[idx]; idx += 1
+            num_locals += cnt
+            locals_list.extend([0] * cnt)
+
+        op_bytes = body[idx:]
+        stack = []
+        return self._exec_block(op_bytes, 0, locals_list, stack)
+
+    def _exec_block(self, code, pc, locals_val, stack):
+        def i32(val): return val & 0xffffffff
+        def s32(val):
+            val = val & 0xffffffff
+            return val if val < 0x80000000 else val - 0x100000000
+        def rotr32(val, count):
+            count %= 32
+            return ((val >> count) | (val << (32 - count))) & 0xffffffff
+        def rotl32(val, count):
+            count %= 32
+            return ((val << count) | (val >> (32 - count))) & 0xffffffff
+
+        blocks = []
+        while pc < len(code):
+            op = code[pc]; pc += 1
+            if op in (0x00, 0x01):
+                pass
+            elif op == 0x02:
+                pc += 1
+                blocks.append(('block', pc))
+            elif op == 0x03:
+                pc += 1
+                blocks.append(('loop', pc))
+            elif op == 0x04:
+                pc += 1
+                cond = stack.pop()
+                if cond != 0:
+                    blocks.append(('if_true', pc))
+                else:
+                    depth = 1
+                    while pc < len(code) and depth > 0:
+                        b = code[pc]; pc += 1
+                        if b in (0x02, 0x03, 0x04): depth += 1
+                        elif b == 0x05 and depth == 1: break
+                        elif b == 0x0b: depth -= 1
+                    blocks.append(('if_false', pc))
+            elif op == 0x05:
+                depth = 1
+                while pc < len(code) and depth > 0:
+                    b = code[pc]; pc += 1
+                    if b in (0x02, 0x03, 0x04): depth += 1
+                    elif b == 0x0b: depth -= 1
+            elif op == 0x0b:
+                if blocks:
+                    blocks.pop()
+                else:
+                    break
+            elif op == 0x0c:
+                target_depth, pc = self._read_leb128_u(code, pc)
+                for _ in range(target_depth + 1):
+                    btype, bpc = blocks.pop()
+                    if btype == 'loop':
+                        pc = bpc
+                        blocks.append(('loop', bpc))
+                        break
+            elif op == 0x0d:
+                target_depth, pc = self._read_leb128_u(code, pc)
+                cond = stack.pop()
+                if cond != 0:
+                    for _ in range(target_depth + 1):
+                        btype, bpc = blocks.pop()
+                        if btype == 'loop':
+                            pc = bpc
+                            blocks.append(('loop', bpc))
+                            break
+            elif op == 0x10:
+                callee, pc = self._read_leb128_u(code, pc)
+                param_counts = {0: 2, 1: 2, 2: 2, 3: 1, 4: 2}
+                num_p = param_counts.get(callee, 0)
+                call_args = [stack.pop() for _ in range(num_p)][::-1]
+                ret = self.call_func(callee, call_args)
+                if ret is not None:
+                    stack.append(ret)
+            elif op == 0x1a:
+                if stack: stack.pop()
+            elif op == 0x20:
+                lidx, pc = self._read_leb128_u(code, pc)
+                stack.append(locals_val[lidx])
+            elif op == 0x21:
+                lidx, pc = self._read_leb128_u(code, pc)
+                locals_val[lidx] = stack.pop()
+            elif op == 0x22:
+                lidx, pc = self._read_leb128_u(code, pc)
+                locals_val[lidx] = stack[-1]
+            elif op == 0x23:
+                gidx, pc = self._read_leb128_u(code, pc)
+                stack.append(self.globals[gidx])
+            elif op == 0x24:
+                gidx, pc = self._read_leb128_u(code, pc)
+                self.globals[gidx] = stack.pop()
+            elif op == 0x28:
+                align, pc = self._read_leb128_u(code, pc)
+                offset, pc = self._read_leb128_u(code, pc)
+                base_addr = stack.pop() + offset
+                val = struct.unpack('<i', self.memory[base_addr:base_addr+4])[0]
+                stack.append(val)
+            elif op == 0x2d:
+                align, pc = self._read_leb128_u(code, pc)
+                offset, pc = self._read_leb128_u(code, pc)
+                base_addr = stack.pop() + offset
+                stack.append(self.memory[base_addr])
+            elif op == 0x36:
+                align, pc = self._read_leb128_u(code, pc)
+                offset, pc = self._read_leb128_u(code, pc)
+                val = stack.pop()
+                base_addr = stack.pop() + offset
+                self.memory[base_addr:base_addr+4] = struct.pack('<I', i32(val))
+            elif op == 0x3a:
+                align, pc = self._read_leb128_u(code, pc)
+                offset, pc = self._read_leb128_u(code, pc)
+                val = stack.pop()
+                base_addr = stack.pop() + offset
+                self.memory[base_addr] = val & 0xff
+            elif op == 0x3f:
+                pc += 1
+                stack.append(len(self.memory) // 65536)
+            elif op == 0x40:
+                pc += 1
+                if stack: stack.pop()
+                stack.append(128)
+            elif op == 0x41:
+                val, pc = self._read_leb128_s(code, pc)
+                stack.append(val)
+            elif op == 0x45:
+                a = stack.pop(); stack.append(1 if a == 0 else 0)
+            elif op == 0x46:
+                b = stack.pop(); a = stack.pop(); stack.append(1 if a == b else 0)
+            elif op == 0x47:
+                b = stack.pop(); a = stack.pop(); stack.append(1 if a != b else 0)
+            elif op == 0x48:
+                b = s32(stack.pop()); a = s32(stack.pop()); stack.append(1 if a < b else 0)
+            elif op == 0x49:
+                b = i32(stack.pop()); a = i32(stack.pop()); stack.append(1 if a < b else 0)
+            elif op == 0x4a:
+                b = s32(stack.pop()); a = s32(stack.pop()); stack.append(1 if a > b else 0)
+            elif op == 0x4b:
+                b = i32(stack.pop()); a = i32(stack.pop()); stack.append(1 if a > b else 0)
+            elif op == 0x4c:
+                b = s32(stack.pop()); a = s32(stack.pop()); stack.append(1 if a <= b else 0)
+            elif op == 0x4d:
+                b = i32(stack.pop()); a = i32(stack.pop()); stack.append(1 if a <= b else 0)
+            elif op == 0x4e:
+                b = s32(stack.pop()); a = s32(stack.pop()); stack.append(1 if a >= b else 0)
+            elif op == 0x4f:
+                b = i32(stack.pop()); a = i32(stack.pop()); stack.append(1 if a >= b else 0)
+            elif op == 0x6a:
+                b = stack.pop(); a = stack.pop(); stack.append(s32(a + b))
+            elif op == 0x6b:
+                b = stack.pop(); a = stack.pop(); stack.append(s32(a - b))
+            elif op == 0x6c:
+                b = stack.pop(); a = stack.pop(); stack.append(s32(a * b))
+            elif op == 0x6e:
+                b = i32(stack.pop()); a = i32(stack.pop()); stack.append(i32(a // b) if b != 0 else 0)
+            elif op == 0x71:
+                b = stack.pop(); a = stack.pop(); stack.append(a & b)
+            elif op == 0x72:
+                b = stack.pop(); a = stack.pop(); stack.append(a | b)
+            elif op == 0x73:
+                b = stack.pop(); a = stack.pop(); stack.append(a ^ b)
+            elif op == 0x74:
+                b = stack.pop() & 31; a = stack.pop(); stack.append(s32((a & 0xffffffff) << b))
+            elif op == 0x75:
+                b = stack.pop() & 31; a = s32(stack.pop()); stack.append(a >> b)
+            elif op == 0x76:
+                b = stack.pop() & 31; a = i32(stack.pop()); stack.append(a >> b)
+            elif op == 0x77:
+                b = stack.pop(); a = i32(stack.pop()); stack.append(rotl32(a, b))
+            elif op == 0x78:
+                b = stack.pop(); a = i32(stack.pop()); stack.append(rotr32(a, b))
+
+        return stack[-1] if stack else None
+
+
+class VidsrcResolver(BaseResolver):
+    """
+    Resolves Vidsrc stream embeds (vidsrc.mov, vsembed.ru, cloudorchestranova.com,
+    data.vidsrcme.ru, nepu.gd/watch/...) into raw .m3u8 HLS master playlist URLs.
+    Supports Node.js fast-path with an embedded pure-Python WASM fallback.
+    """
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        low = (url or '').lower()
+        return any(dom in low for dom in [
+            'vidsrc.mov', 'vidsrc.me', 'vidsrc.cc', 'vsembed.ru',
+            'cloudorchestranova.com', 'data.vidsrcme.ru', 'nepu.gd/watch', 'nepu.to/watch'
+        ])
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        if 'nepu.' in url:
+            try:
+                url = url.replace('nepu.to', 'nepu.gd')
+                headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://nepu.gd/'}
+                r = session.get(url, headers=headers, timeout=10)
+                if r and r.status_code == 200:
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    iframe = soup.find('iframe', id='playerFrame') or soup.find('iframe', src=re.compile(r'vidsrc'))
+                    if iframe and iframe.get('src'):
+                        url = iframe['src']
+            except Exception:
+                pass
+
+        m_type = 'tv' if '/tv/' in url else 'movie'
+        m = re.search(r'/(?:movie|tv)/(\d+)(?:/(\d+)/(\d+))?', url)
+        if not m:
+            return None
+
+        tmdb_id = m.group(1)
+        season = m.group(2)
+        episode = m.group(3)
+
+        if m_type == 'tv' and season and episode:
+            api_url = f"https://data.vidsrcme.ru/api.php?type=tv&tmdb={tmdb_id}&season={season}&episode={episode}&stream_urls"
+        else:
+            api_url = f"https://data.vidsrcme.ru/api.php?type=movie&tmdb={tmdb_id}&stream_urls"
+
+        headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://cloudorchestranova.com/'}
+        try:
+            r = session.get(api_url, headers=headers, timeout=10)
+            data = r.json()
+        except Exception:
+            return None
+
+        stream_data = data.get('data', {}).get('stream_urls')
+        if not stream_data:
+            return None
+
+        if isinstance(stream_data, list):
+            return stream_data[0] if stream_data else None
+
+        enc_b64 = stream_data
+        wasm_url = data.get('vs', {}).get('wasm_url')
+        if not wasm_url:
+            return None
+
+        try:
+            wasm_bytes = session.get(wasm_url, headers=headers, timeout=10).content
+        except Exception:
+            return None
+
+        # Strategy 1: Node.js fast path (if node is installed)
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wasm', delete=False) as f:
+                f.write(wasm_bytes)
+                wasm_path = f.name
+
+            js_code = (
+                "const fs=require('fs');"
+                "const enc=Buffer.from(process.argv[2],'base64');"
+                "const wasm=fs.readFileSync(process.argv[3]);"
+                "WebAssembly.instantiate(wasm,{}).then(i=>{"
+                "const {alloc,decrypt,memory}=i.instance.exports;"
+                "const p=alloc(enc.length);"
+                "new Uint8Array(memory.buffer,p,enc.length).set(enc);"
+                "const l=decrypt(p,enc.length);"
+                "process.stdout.write(new TextDecoder().decode(new Uint8Array(memory.buffer,p+12,l)));"
+                "}).catch(()=>{process.exit(1);});"
+            )
+
+            res = subprocess.run(
+                ['node', '-e', js_code, enc_b64, wasm_path],
+                capture_output=True, text=True, timeout=10
+            )
+            os.unlink(wasm_path)
+            if res.returncode == 0 and res.stdout.strip():
+                urls = [u.strip() for u in res.stdout.split('\n') if u.strip().startswith('http')]
+                if urls:
+                    return urls[0]
+        except Exception:
+            pass
+
+        # Strategy 2: Pure Python WASM interpreter fallback (no node required)
+        try:
+            interp = _WasmInterpreter(wasm_bytes)
+            enc = base64.b64decode(enc_b64)
+            ptr = 16384
+            interp.memory[ptr:ptr+len(enc)] = enc
+            out_len = interp.decrypt(ptr, len(enc))
+            decrypted = bytes(interp.memory[ptr+12:ptr+12+out_len]).decode('utf-8', errors='ignore')
+            urls = [u.strip() for u in decrypted.split('\n') if u.strip().startswith('http')]
+            if urls:
+                return urls[0]
+        except Exception:
+            pass
+
+        return None
+
+
 # --- REGISTRY ---
 
 class ResolverRegistry:
@@ -1663,6 +2034,7 @@ class ResolverRegistry:
         NaijaVaultGatewayResolver,
         PlutoMoviesResolver,
         PixelDrainResolver,
+        VidsrcResolver,
     ]
 
     @classmethod

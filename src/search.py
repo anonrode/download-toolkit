@@ -846,24 +846,30 @@ async def _asearch_anitaku(session, query):
     NUL-delimited "{type · status · sub}" meta tail, so _present_results needs
     no changes.
     """
-    ajax = "https://anitaku.com.ro/wp-admin/admin-ajax.php"
+    hosts = [
+        ("https://anitaku.com.ro/wp-admin/admin-ajax.php", "https://anitaku.com.ro/"),
+        ("https://gogoanime.or.at/wp-admin/admin-ajax.php", "https://gogoanime.or.at/"),
+    ]
     body = None
-    for variant in _anitaku_query_variants(query):
-        try:
-            async with session.post(
-                ajax,
-                data={'action': 'ts_ac_do_search', 'ts_ac_query': variant},
-                headers={'X-Requested-With': 'XMLHttpRequest',
-                         'Referer': 'https://anitaku.com.ro/'},
-                timeout=aiohttp.ClientTimeout(total=12),
-            ) as r:
-                if r.status == 200:
-                    txt = await r.text()
-                    if txt and '"post_link"' in txt:
-                        body = txt
-                        break
-        except Exception:
-            continue
+    for ajax_url, referer in hosts:
+        if body:
+            break
+        for variant in _anitaku_query_variants(query):
+            try:
+                async with session.post(
+                    ajax_url,
+                    data={'action': 'ts_ac_do_search', 'ts_ac_query': variant},
+                    headers={'X-Requested-With': 'XMLHttpRequest',
+                             'Referer': referer},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    if r.status == 200:
+                        txt = await r.text()
+                        if txt and '"post_link"' in txt:
+                            body = txt
+                            break
+            except Exception:
+                continue
     if not body:
         return []
 
@@ -884,7 +890,7 @@ async def _asearch_anitaku(session, query):
             title = (it.get('post_title') or '').strip()
             if not href or not title or href in seen:
                 continue
-            if 'anitaku.com.ro/' not in href:
+            if not any(dom in href for dom in ['anitaku.', 'gogoanime.']):
                 continue
             seen.add(href)
             # Badges, in the same order the old scrape produced: type / status /
@@ -902,6 +908,35 @@ async def _asearch_anitaku(session, query):
     except Exception:
         pass
     return out
+
+
+async def _asearch_nepu(session, query):
+    """Search Nepu (nepu.gd) JSON API — returns structured (site, url, title) list."""
+    url = f"https://nepu.gd/api/search?q={quote(query)}"
+    status, _, text = await _afetch(session, url)
+    if status != 200 or not text:
+        return []
+    out = []
+    try:
+        data = json.loads(text)
+        results = data.get('results', []) if isinstance(data, dict) else []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            tmdb_id = item.get('id')
+            media_type = item.get('media_type', 'movie')
+            title = item.get('title') or item.get('name') or ''
+            if not tmdb_id or not title:
+                continue
+            date = item.get('release_date') or item.get('first_air_date') or ''
+            year = date.split('-')[0] if date else ''
+            display_title = f"{title} ({year})" if year else title
+            full_url = f"https://nepu.gd/watch/{media_type}/{tmdb_id}"
+            out.append(('Nepu', full_url, display_title))
+    except Exception:
+        pass
+    return out
+
 
 def _fit_status_line(frame, totals, waiting, width):
     """Build the live search line at the richest form that fits `width`.
@@ -1014,6 +1049,10 @@ async def _arun(query, site_filter, fast, hint, timeout):
         # Anitaku (Gogoanime) — real HTML search
         if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'asianc'):
             tasks.append(('anitaku', 'Anitaku', _asearch_anitaku(session, query)))
+
+        # Nepu (nepu.gd) — real JSON search
+        if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'asianc', 'anitaku'):
+            tasks.append(('search', 'Nepu', _asearch_nepu(session, query)))
 
         kinds = [k for k, _, _ in tasks]
         names = [n for _, n, _ in tasks]
@@ -1359,7 +1398,10 @@ def _present_results(results, raw_query):
             shown = title.strip() + (f"   ({meta.strip()})" if meta else "")
             print(f"\n  Found: {shown}")
         else:
-            print(f"\n  Found on {site}:")
+            slug = url.rstrip('/').split('/')[-1]
+            clean_slug = re.sub(r'-id\d+.*$', '', slug, flags=re.I)
+            title = clean_slug.replace('-', ' ').title()
+            print(f"\n  Found on [{site}]: {title}")
         print(f"  {url}")
         try:
             ans = input("\n  Download this? [Y/n]: ").strip().lower()

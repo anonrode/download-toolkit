@@ -49,6 +49,8 @@ ANITAKU_DOMAIN    = 'anitaku.com.ro'
 ASIANC_DOMAIN     = 'asianc.id'  # Dramacool/AsianC — reuses the MyAsianTV episode layout
 PLUTO_DOMAIN      = 'plutomovies.com'
 PLUTO_BASE        = f'https://{PLUTO_DOMAIN}'
+NEPU_DOMAIN       = 'nepu.gd'            # canonical; nepu.to is CF-blocked
+NEPU_BASE         = f'https://{NEPU_DOMAIN}'
 ANITAKU_BASE      = f'https://{ANITAKU_DOMAIN}'
 
 WAFFI_CLOUD_RE = re.compile(r'https?://[a-z0-9-]+\.waffi\.cloud/\S+', re.IGNORECASE)
