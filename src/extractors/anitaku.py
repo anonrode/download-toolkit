@@ -32,7 +32,7 @@ def extract_anitaku(url, session, ctx=None):
 
         Uses its own requests.Session -- the shared `session` is touched by the
         main thread, and this runs concurrently with it."""
-        s = requests.Session()
+        s = make_session()
         s.headers['User-Agent'] = session.headers.get('User-Agent', UA_DESKTOP)
         s.headers['Referer'] = ep_url
 
