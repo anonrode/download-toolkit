@@ -1394,13 +1394,19 @@ def _present_results(results, raw_query):
     # Limit each site/platform to at most 3 results to ensure search results diversity
     counts = {}
     balanced = []
+    # 3-per-source keeps a broad search balanced across many sites. But a narrow
+    # search (e.g. "naruto ani" -> only Gogo + Anitaku) has just one or two
+    # sources, and capping them at 3 hides the very hits the user asked for. When
+    # the whole result set spans <=2 base sites, lift the cap so those slots fill.
+    base_sites = {(_s.split(' (')[0].split(':')[0]) for _s, _ in results}
+    per_site_cap = 8 if len(base_sites) <= 2 else 3
     for site, url in results:
         base_site = site.split(' (')[0] if ' (' in site else site
         base_site = base_site.split(':')[0] if ':' in base_site else base_site
         counts[base_site] = counts.get(base_site, 0) + 1
-        if counts[base_site] <= 3:
+        if counts[base_site] <= per_site_cap:
             balanced.append((site, url))
-    
+
     display_results = balanced[:8]
 
     if len(display_results) == 1:
