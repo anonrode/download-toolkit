@@ -696,6 +696,7 @@ class KisskhMegaplayResolver(BaseResolver):
             # the code separately -- otherwise every 404-served embed dies before
             # we ever read the body.
             if r is None or r.status_code not in (200, 404):
+                safe_print(f"      [!] KisskhMegaplay: embed fetch status={getattr(r, 'status_code', 'None')}")
                 return None
 
             # 0) tamilembed.lol / player wrapper layout: check for inner nested <iframe>
@@ -710,9 +711,11 @@ class KisskhMegaplayResolver(BaseResolver):
                         if 'blogger.com' in nested_src:
                             return nested_src
                         if urlparse(nested_src).netloc != urlparse(url).netloc:
+                            safe_print(f"      [>] Following inner iframe: {nested_src[:80]}...")
                             sub_res = ResolverRegistry.resolve(nested_src, session, _depth=1)
                             if sub_res:
                                 return sub_res
+                            safe_print(f"      [!] Inner iframe resolution returned None")
 
             # 1) animesama.se layout: const STREAM = "..."
             sm_m = re.search(r'''const\s+STREAM\s*=\s*["']([^"']+)["']''', r.text)
@@ -761,8 +764,13 @@ class KisskhMegaplayResolver(BaseResolver):
                             file_url = data.get('sources', {}).get('file')
                             if file_url:
                                 return file_url
-                    except Exception:
-                        pass
+                            safe_print(f"      [!] getSources returned no file: {data}")
+                        else:
+                            safe_print(f"      [!] getSources status={getattr(r_api, 'status_code', 'None')}")
+                    except Exception as e:
+                        safe_print(f"      [!] getSources error: {e}")
+                else:
+                    safe_print(f"      [!] megaplay: no stream_id found in URL or page")
 
             # 5) Standard source tag
             m = re.search(r'"source"\s*:\s*"([^"]+\.m3u8[^"]*)"', r.text)
