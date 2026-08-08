@@ -667,7 +667,8 @@ class KissasianResolver(BaseResolver):
 
 class KisskhMegaplayResolver(BaseResolver):
     _HOSTS = ('kisskh.megaplay.', 'megaplays.se', 'embtaku.', 'takuembed.',
-              'anihdplay.', 'gogohd.', 'megaplay.', 'animesama.', 'tamilembed.')
+              'anihdplay.', 'gogohd.', 'megaplay.', 'animesama.', 'tamilembed.',
+              'gogoanime.me.uk')
 
     @staticmethod
     def can_resolve(url: str) -> bool:
@@ -739,7 +740,30 @@ class KisskhMegaplayResolver(BaseResolver):
                 except Exception:
                     pass
 
-            # 4) Standard source tag
+            # 4) megaplay.buzz layout: getSources JSON endpoint
+            # e.g. https://megaplay.buzz/stream/s-2/31069/sub -> data-realid="31069"
+            if 'megaplay.buzz' in url.lower() or 'megaplay' in url.lower():
+                real_id_m = re.search(r'data-realid=["\'](\d+)["\']', r.text)
+                ep_id_m = re.search(r'/stream/(?:s-\d+/)?(\d+)', url)
+                stream_id = real_id_m.group(1) if real_id_m else (ep_id_m.group(1) if ep_id_m else None)
+                if stream_id:
+                    api_url = f"https://megaplay.buzz/stream/getSources?id={stream_id}"
+                    try:
+                        api_h = {
+                            'User-Agent': UA_DESKTOP,
+                            'Referer': url,
+                            'X-Requested-With': 'XMLHttpRequest'
+                        }
+                        r_api = session.get(api_url, headers=api_h, timeout=10)
+                        if r_api and r_api.status_code == 200:
+                            data = r_api.json()
+                            file_url = data.get('sources', {}).get('file')
+                            if file_url:
+                                return file_url
+                    except Exception:
+                        pass
+
+            # 5) Standard source tag
             m = re.search(r'"source"\s*:\s*"([^"]+\.m3u8[^"]*)"', r.text)
             if m:
                 return m.group(1)
