@@ -1598,6 +1598,14 @@ def get_referer_for_url(url):
     # real browser sends, so pin it here.
     if 'vidbasic' in url or 'jisooido' in url:
         return 'https://vidb.top/'
+    # Megaplay (megaplay.buzz embed -> getSources JSON -> HLS on a rotating CDN:
+    # megap.norami.top, megap.shiora.top, megap.mikora.top, megap.akirax.buzz...).
+    # Every host carries the megap. prefix and allowlists ONLY the player origin
+    # as Referer -- master and child playlists both 403 to anything else,
+    # including the CDN's own domain (the base_domain fallback). So the resolve
+    # succeeds but every download 403s. Pin the player origin here.
+    if 'megap.' in url:
+        return 'https://megaplay.buzz/'
     return base_domain(url) + '/'
 
 def is_streaming_link(url):
