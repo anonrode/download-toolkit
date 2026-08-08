@@ -877,7 +877,9 @@ async def _asearch_anitaku(session, query):
                 typez  = (it.get('post_type') or '').strip()
                 status = (it.get('post_status') or '').strip()
                 subdub = (it.get('post_sub') or '').strip()
-                meta = ' · '.join(p for p in (typez, status, subdub) if p)
+                latest = (it.get('post_latest') or '').strip()
+                eps_str = f"{latest} eps" if latest.isdigit() else (latest if latest != '?' else '')
+                meta = ' · '.join(p for p in (typez, status, subdub, eps_str) if p)
                 label = f"{source} (anime): {title}"
                 if meta:
                     label += f"\x00{meta}"   # NUL-delimited; stripped at display
@@ -1357,32 +1359,9 @@ def _anitaku_episode_count(url, timeout=6):
 
 
 def _enrich_anitaku_counts(display_results):
-    """Fetch episode counts for the Anitaku rows in the display set, in
-    parallel with a shared short deadline. Returns {url: count_str}. Never
-    raises; missing entries just don't get annotated."""
-    targets = [url for site, url in display_results
-               if " (anime): " in site]
-    if not targets:
-        return {}
-    out = {}
-    # Up to an 8s deadline, and it runs AFTER the search looks finished -- the
-    # worst place to go quiet, so keep a live line up while it works.
-    with working_spinner("Checking episode counts"):
-        try:
-            with ThreadPoolExecutor(max_workers=min(4, len(targets))) as ex:
-                futs = {ex.submit(_anitaku_episode_count, u): u for u in targets}
-                for fut in as_completed(futs, timeout=8):
-                    u = futs[fut]
-                    try:
-                        n = fut.result()
-                    except Exception:
-                        n = None
-                    if n is None:
-                        continue
-                    out[u] = 'Movie/Special' if n == 0 else f'{n} eps'
-        except Exception:
-            pass  # timeout or pool error -> partial/empty, that's fine
-    return out
+    """Episode counts are now parsed directly from post_latest in search JSON
+    for instant rendering. Returns empty dict to bypass network calls."""
+    return {}
 
 
 def _present_results(results, raw_query):

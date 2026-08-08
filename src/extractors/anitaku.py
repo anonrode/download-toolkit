@@ -103,9 +103,11 @@ def extract_anitaku(url, session, ctx=None):
         safe_print(f"[*] Single episode - saving to: {folder}")
         download_episode(url, safe_filename(slug))
     else:
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
         safe_print(render_message('fetching_episode_list'))
         with working_spinner("Fetching episode list"):
-            r = safe_get(session, url, referer=ANITAKU_BASE + '/', timeout=30)
+            r = safe_get(session, url, referer=base_url + '/', timeout=30)
         if r is None:
             safe_print(render_message('page_fetch_failed'))
             return
@@ -137,16 +139,16 @@ def extract_anitaku(url, session, ctx=None):
         ep_links = []
         search_root = container
 
-        # Prefer the list-item anchors (the site renders each episode as one
-        # <li><a>), falling back to any anchor in the container if the markup
-        # ever drops the <li> wrapper.
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+
         anchors = search_root.select('li a[href]') or search_root.find_all('a', href=True)
         for a in anchors:
             href = a['href']
             if href in seen or not href or href.startswith(('javascript:', '#')):
                 continue
-            full = urljoin(ANITAKU_BASE, href)
-            if 'anitaku.com.ro/' not in full:
+            full = urljoin(base_url, href)
+            if not any(dom in full.lower() for dom in ['anitaku.', 'gogoanime.']):
                 continue
             child = full.rstrip('/').split('/')[-1]
             # Not the series page itself, and not share/nav junk that sometimes
