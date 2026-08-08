@@ -1485,16 +1485,9 @@ def already_downloaded(folder, filename, min_mb=1.0, series_url=None, url=None):
     base = re.sub(r'\.(mp4|mkv|m3u8|webm)$', '', filename)
 
     def _resolve_expected(filepath):
-        """Get expected size: stored state first, HEAD request if needed."""
+        """Get expected size from stored state."""
         if series_url:
-            stored = get_episode_size(series_url, filename)
-            if stored:
-                return stored
-        if url:
-            fetched = fetch_expected_size(url)
-            if fetched and series_url:
-                save_episode_size(series_url, filename, fetched)
-            return fetched
+            return get_episode_size(series_url, filename)
         return None
 
     # First try exact filename match
@@ -4032,21 +4025,12 @@ def download_file(url, folder, filename, summary,
     if series_url:
         mark_episode_current(series_url, series_name or folder, filename)
 
-    # Fetch and store expected file size before download starts
-    # so resume checks can verify completeness precisely
     expected = 0
     if not is_streaming_link(url):
         if series_url:
-            expected = get_episode_size(series_url, filename)
-        if not expected:
-            expected = fetch_expected_size(url)
-            if expected and series_url:
-                save_episode_size(series_url, filename, expected)
-        expected = expected or 0
+            expected = get_episode_size(series_url, filename) or 0
         if expected > 0:
             safe_print(f'  [*] File size: {expected / (1024 * 1024):.1f} MB')
-        else:
-            safe_print('  [*] File size: unknown')
 
     if is_streaming_link(url):
         result = download_with_ytdlp(url, folder, filename, summary,
