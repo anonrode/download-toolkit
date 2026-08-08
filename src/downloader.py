@@ -3436,21 +3436,22 @@ def download_with_ytdlp(url, folder, filename, summary,
     # different stream. See _resume_or_purge_hls.
     if _resume_or_purge_hls(folder, base, url) == 'resume':
         ui_emit('hls_resuming_partial')
-    quality_str  = quality or 'bestvideo[height<=360]+bestaudio/best[height<=360]'
-    # Always leave a bare `/best` at the end so HLS streams whose variants are
-    # muxed-only (no separate video+audio to merge) or don't report a height
-    # still download instead of erroring with "Requested format is not
-    # available". Without this, a height-filtered format string can match
-    # nothing and yt-dlp aborts.
-    if not quality_str.rstrip().endswith('best'):
-        quality_str += '/best'
-    # Data-saver sort: ALWAYS ascending (+height,+size,+br). This makes yt-dlp
-    # pick the LOWEST rendition that the -f filter allows. When the height cap
-    # (e.g. 360p) matches nothing and the /best fallback fires, ascending sort
-    # still grabs the smallest available stream instead of silently upgrading to
-    # 1080p. The height cap in -f already limits *what* can be selected; the
-    # sort controls *which* of those matches wins.
-    _sort_args = ['-S', '+height,+size,+br']
+    # ── Quality: proximity-based selection ──────────────────────────
+    # `quality` is now a label like '360p', '720p', 'best' (from _quality_str).
+    # Build the yt-dlp -f format and -S sort to pick the exact height requested,
+    # falling back to the nearest available quality. On equidistant ties, prefer
+    # the lower resolution (+size tiebreak) to save data.
+    _requested_label = quality or '360p'
+    import re as _re
+    _height_m = _re.search(r'(\d+)', _requested_label)
+    if _height_m and _requested_label.lower() != 'best':
+        _target_h = int(_height_m.group(1))
+        quality_str = f'bestvideo+bestaudio/best'
+        _sort_args = ['-S', f'height~{_target_h},+size,+br']
+    else:
+        # 'best' — no height filter, pick the highest quality
+        quality_str = 'bestvideo+bestaudio/best'
+        _sort_args = ['-S', 'height,size,br']
 
     # ── Quality probe (Option A) ─────────────────────────────────
     # Fetch ONLY the manifest (few KB) to discover which resolution yt-dlp will
@@ -3476,7 +3477,16 @@ def download_with_ytdlp(url, folder, filename, summary,
             _h = _probe.stdout.strip().split('\n')[0].strip()
             if _h.isdigit() and int(_h) > 0:
                 _probed_quality = f'{_h}p'
-                safe_print(f'  [*] Stream quality: {_probed_quality} (lowest available)')
+                if _requested_label.lower() == 'best':
+                    safe_print(f'  [*] Stream quality: {_probed_quality} (best available)')
+                elif _height_m:
+                    _req_h = int(_height_m.group(1))
+                    if int(_h) == _req_h:
+                        safe_print(f'  [*] Stream quality: {_probed_quality}')
+                    else:
+                        safe_print(f'  [*] Stream quality: {_probed_quality} ({_requested_label} unavailable, nearest match)')
+                else:
+                    safe_print(f'  [*] Stream quality: {_probed_quality}')
     except Exception:
         pass  # probe failed — proceed with download, quality unknown
 
@@ -3524,8 +3534,8 @@ def download_with_ytdlp(url, folder, filename, summary,
             # path needs is already on the command line, so refuse outside config.
             '--ignore-config',
             '-f', quality_str,
-            # Data-saver: always ascending — lowest rendition first, never
-            # silently upgrades to 1080p when the height cap matches nothing.
+            # Proximity sort: pick the closest resolution to the user's setting,
+            # with +size tiebreak so equidistant picks favour smaller files.
             *_sort_args,
             '--merge-output-format', 'mp4',
             '-o', out_template,
@@ -3851,6 +3861,12 @@ def download_social_ytdlp(url, folder, filename, summary, current_process=None,
             'best',
         ]
 
+    # Display selected quality before download starts
+    if selected_label:
+        safe_print(f'  [*] Stream quality: {selected_label}')
+    else:
+        safe_print(f'  [*] Stream quality: {preferred_quality or "720p"} (social default)')
+
     progress = LiveProgress(filename)
 
     # Sentinel progress-template (identical to the HLS/myasiantv path): the
@@ -4062,6 +4078,10 @@ def download_file(url, folder, filename, summary,
             if expected and series_url:
                 save_episode_size(series_url, filename, expected)
         expected = expected or 0
+        if expected > 0:
+            safe_print(f'  [*] File size: {expected / (1024 * 1024):.1f} MB')
+        else:
+            safe_print('  [*] File size: unknown')
 
     if is_streaming_link(url):
         result = download_with_ytdlp(url, folder, filename, summary,

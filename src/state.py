@@ -3,14 +3,19 @@ from .downloader import ProcessContainer
 
 
 def _quality_str(q):
-    q = str(q).lower()
-    if '2160' in q or '4k' in q: return 'bestvideo[height<=2160]+bestaudio/best[height<=2160]'
-    if '1080' in q: return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
-    if '720'  in q: return 'bestvideo[height<=720]+bestaudio/best[height<=720]'
-    if '480'  in q: return 'bestvideo[height<=480]+bestaudio/best[height<=480]'
-    if '360'  in q: return 'bestvideo[height<=360]+bestaudio/best[height<=360]'
-    if 'best' in q: return 'bestvideo+bestaudio/best'
-    return 'bestvideo[height<=360]+bestaudio/best[height<=360]'
+    """Return a normalised quality label (e.g. '360p', '720p', 'best').
+
+    The actual yt-dlp format string and sort order are now built inside
+    download_with_ytdlp() so it can use proximity-based quality selection.
+    """
+    q = str(q).lower().strip()
+    if '2160' in q or '4k' in q: return '2160p'
+    if '1080' in q: return '1080p'
+    if '720'  in q: return '720p'
+    if '480'  in q: return '480p'
+    if '360'  in q: return '360p'
+    if 'best' in q: return 'best'
+    return '360p'
 
 
 class AppState:
