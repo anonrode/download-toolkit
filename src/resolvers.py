@@ -668,7 +668,8 @@ class KissasianResolver(BaseResolver):
 class KisskhMegaplayResolver(BaseResolver):
     _HOSTS = ('kisskh.megaplay.', 'megaplays.se', 'embtaku.', 'takuembed.',
               'anihdplay.', 'gogohd.', 'megaplay.', 'animesama.', 'tamilembed.',
-              'gogoanime.me.uk')
+              'gogoanime.me.uk', 'vidmoly.biz', 'vidmoly.me', 'vidmoly.to',
+              'vidmoly.net', 'vkspeed.com')
 
     @staticmethod
     def can_resolve(url: str) -> bool:
@@ -767,6 +768,19 @@ class KisskhMegaplayResolver(BaseResolver):
             m = re.search(r'"source"\s*:\s*"([^"]+\.m3u8[^"]*)"', r.text)
             if m:
                 return m.group(1)
+
+            # 6) Packed JS payload (e.g. vkspeed.com)
+            unpacked = _unpack_packed_js(r.text)
+            if unpacked:
+                direct = find_direct_video(unpacked)
+                if direct:
+                    return direct
+
+            # 7) Raw .m3u8 URL in page body (e.g. vidmoly.biz)
+            m3u8_m = re.search(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', r.text)
+            if m3u8_m:
+                return m3u8_m.group(0)
+
             return find_direct_video(r.text)
         except _http_exc_bases() as e:
             if _is_network_error(e):
