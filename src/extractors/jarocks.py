@@ -1,4 +1,5 @@
 from .base import *
+from bs4 import Tag
 
 def extract_9jarocks(url, session, ctx=None):
     ctx = ctx or {}
