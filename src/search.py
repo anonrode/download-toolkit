@@ -842,18 +842,57 @@ async def _asearch_anitaku(session, query):
     out of result-card CSS selectors, delivered first-party, so it survives
     layout changes and drops the whole soft-404 / sidebar-pollution problem.
 
-    Label contract is unchanged: "Anitaku (anime): {title}" with an optional
-    NUL-delimited "{type · status · sub}" meta tail, so _present_results needs
-    no changes.
+    Label contract: "{Source} (anime): {title}" where Source is Gogo or
+    Anitaku, with an optional NUL-delimited "{type · status · sub}" meta tail.
+    Both sites run the same theme and route to extract_anitaku, so the only
+    difference the picker cares about is which URL streams -- gogo's player
+    (megaplay) resolves, so gogo is preferred and listed first.
     """
     hosts = [
-        ("https://anitaku.com.ro/wp-admin/admin-ajax.php", "https://anitaku.com.ro/"),
-        ("https://gogoanime.or.at/wp-admin/admin-ajax.php", "https://gogoanime.or.at/"),
+        # gogo FIRST: measured richer, English titles, and its megaplay player
+        # resolves. anitaku is the fallback/supplement, not the primary.
+        ("https://gogoanime.or.at/wp-admin/admin-ajax.php", "https://gogoanime.or.at/", "Gogo"),
+        ("https://anitaku.com.ro/wp-admin/admin-ajax.php", "https://anitaku.com.ro/", "Anitaku"),
     ]
-    body = None
-    for ajax_url, referer in hosts:
-        if body:
-            break
+
+    def _parse(body, source):
+        """JSON body -> [(label, href, title_key)] for one site."""
+        rows = []
+        try:
+            data = json.loads(body)
+            items = []
+            for group in data.values():
+                if not isinstance(group, list):
+                    continue
+                for block in group:
+                    if isinstance(block, dict) and isinstance(block.get('all'), list):
+                        items.extend(block['all'])
+            for it in items:
+                href = (it.get('post_link') or '').strip()
+                title = (it.get('post_title') or '').strip()
+                if not href or not title:
+                    continue
+                if not any(dom in href for dom in ['anitaku.', 'gogoanime.']):
+                    continue
+                typez  = (it.get('post_type') or '').strip()
+                status = (it.get('post_status') or '').strip()
+                subdub = (it.get('post_sub') or '').strip()
+                meta = ' · '.join(p for p in (typez, status, subdub) if p)
+                label = f"{source} (anime): {title}"
+                if meta:
+                    label += f"\x00{meta}"   # NUL-delimited; stripped at display
+                rows.append((label, href, title.lower()))
+        except Exception:
+            pass
+        return rows
+
+    # Fetch each site once (first query variant that returns data wins for that
+    # site), then merge gogo's rows first and append only the anitaku titles gogo
+    # didn't already cover -- so you never see fewer results than either site
+    # alone, with gogo's copy winning any duplicate.
+    out, seen_href, seen_title = [], set(), set()
+    for ajax_url, referer, source in hosts:
+        body = None
         for variant in _anitaku_query_variants(query):
             try:
                 async with session.post(
@@ -870,44 +909,18 @@ async def _asearch_anitaku(session, query):
                             break
             except Exception:
                 continue
-    if not body:
-        return []
-
-    out = []
-    try:
-        data = json.loads(body)
-        # Flatten {"series":[{"all":[...]}, ...], ...} -> list of item dicts.
-        items = []
-        for group in data.values():
-            if not isinstance(group, list):
+        if not body:
+            continue
+        for label, href, tkey in _parse(body, source):
+            # Dedupe within a site by href, and across sites by title so the
+            # same show from anitaku doesn't repeat gogo's entry.
+            if href in seen_href or tkey in seen_title:
                 continue
-            for block in group:
-                if isinstance(block, dict) and isinstance(block.get('all'), list):
-                    items.extend(block['all'])
-        seen = set()
-        for it in items:
-            href = (it.get('post_link') or '').strip()
-            title = (it.get('post_title') or '').strip()
-            if not href or not title or href in seen:
-                continue
-            if not any(dom in href for dom in ['anitaku.', 'gogoanime.']):
-                continue
-            seen.add(href)
-            # Badges, in the same order the old scrape produced: type / status /
-            # sub-dub. post_latest ("Ep 1171", "Movie", "22") is a useful hint
-            # but _enrich_anitaku_counts fetches a live count for the shown rows,
-            # so keep the badge tail to the three stable descriptors here.
-            typez  = (it.get('post_type') or '').strip()    # Anime / Movie / Special / OVA
-            status = (it.get('post_status') or '').strip()  # Completed / Ongoing
-            subdub = (it.get('post_sub') or '').strip()      # Sub / Dub
-            meta = ' · '.join(p for p in (typez, status, subdub) if p)
-            label = f"Anitaku (anime): {title}"
-            if meta:
-                label += f"\x00{meta}"   # NUL-delimited; stripped at display
+            seen_href.add(href)
+            seen_title.add(tkey)
             out.append((label, href))
-    except Exception:
-        pass
     return out
+
 
 
 async def _asearch_nepu(session, query):
@@ -1348,7 +1361,7 @@ def _enrich_anitaku_counts(display_results):
     parallel with a shared short deadline. Returns {url: count_str}. Never
     raises; missing entries just don't get annotated."""
     targets = [url for site, url in display_results
-               if site.startswith("Anitaku (anime): ")]
+               if " (anime): " in site]
     if not targets:
         return {}
     out = {}
@@ -1392,17 +1405,17 @@ def _present_results(results, raw_query):
 
     if len(display_results) == 1:
         site, url = display_results[0]
-        if site.startswith("Anitaku (anime): "):
-            label = site[len("Anitaku (anime): "):]
+        if " (anime): " in site:
+            label = site.split(" (anime): ", 1)[1]
             title, _, meta = label.partition('\x00')
             shown = title.strip() + (f"   ({meta.strip()})" if meta else "")
-            print(f"\n  Found: {shown}")
+            safe_print(f"\n  Found: {shown}")
         else:
             slug = url.rstrip('/').split('/')[-1]
             clean_slug = re.sub(r'-id\d+.*$', '', slug, flags=re.I)
             title = clean_slug.replace('-', ' ').title()
-            print(f"\n  Found on [{site}]: {title}")
-        print(f"  {url}")
+            safe_print(f"\n  Found on [{site}]: {title}")
+        safe_print(f"  {url}")
         try:
             ans = input("\n  Download this? [Y/n]: ").strip().lower()
         except (KeyboardInterrupt, EOFError):
@@ -1420,12 +1433,15 @@ def _present_results(results, raw_query):
     for i, (site, url) in enumerate(display_results, 1):
         if site.startswith("PlutoMovies "):
             source = site.replace("PlutoMovies ", "Pluto")
-            print(f"  [{i}] [{source}]")
-        elif site.startswith("Anitaku (anime): "):
-            # Anitaku carries its real title (and optional NUL-delimited badges
-            # like "Anime · Completed · Sub"). Show the title once, badges dimmed
-            # to the side -- no redundant slugified copy.
-            label = site[len("Anitaku (anime): "):]
+            safe_print(f"  [{i}] [{source}]")
+        elif " (anime): " in site:
+            # Gogo/Anitaku carry the real title (and optional NUL-delimited
+            # badges like "Anime · Completed · Sub"). Show the title once, badges
+            # dimmed to the side -- no redundant slugified copy. safe_print, not
+            # print: gogo's English titles routinely carry curly quotes / en-
+            # dashes, and a raw print() crashes the whole picker mid-list under
+            # an ASCII/Termux locale.
+            label = site.split(" (anime): ", 1)[1]
             title, _, meta = label.partition('\x00')
             parts = [meta.strip()] if meta else []
             if url in ep_counts:
@@ -1433,12 +1449,12 @@ def _present_results(results, raw_query):
             line = f"  [{i}] {title.strip()}"
             if parts:
                 line += f"   ({' · '.join(parts)})"
-            print(line)
+            safe_print(line)
         else:
             # NKiri / DramaKey / DramaRain
             slug = url.rstrip('/').split('/')[-1]
             title = slug.replace('-', ' ').title()
-            print(f"  [{i}] [{site}] {title}")
+            safe_print(f"  [{i}] [{site}] {title}")
     print(f"  {'-'*55}")
     try:
         choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(display_results)).strip())
