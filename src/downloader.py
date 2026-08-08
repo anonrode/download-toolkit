@@ -3456,39 +3456,35 @@ def download_with_ytdlp(url, folder, filename, summary,
     # ── Quality probe (Option A) ─────────────────────────────────
     # Fetch ONLY the manifest (few KB) to discover which resolution yt-dlp will
     # actually select, and print it before the video bytes start flowing.
-    # Wrapped in try/except so a probe failure never blocks the real download.
+    # Skip probe when quality is default ('best') to eliminate 5-10s startup delay.
     _probed_quality = None
-    try:
-        _probe_cmd = [
-            'yt-dlp', '--ignore-config',
-            '-f', quality_str, *_sort_args,
-            '--print', '%(height)s',
-            '--no-download',
-            '--user-agent', UA_DESKTOP,
-            '--referer', get_referer_for_url(url),
-            '--no-warnings',
-            url,
-        ]
-        _probe = subprocess.run(
-            _probe_cmd, capture_output=True, text=True, timeout=15,
-            stdin=subprocess.DEVNULL,
-        )
-        if _probe.returncode == 0 and _probe.stdout.strip():
-            _h = _probe.stdout.strip().split('\n')[0].strip()
-            if _h.isdigit() and int(_h) > 0:
-                _probed_quality = f'{_h}p'
-                if _requested_label.lower() == 'best':
-                    safe_print(f'  [*] Stream quality: {_probed_quality} (best available)')
-                elif _height_m:
+    if _height_m and _requested_label.lower() != 'best':
+        try:
+            _probe_cmd = [
+                'yt-dlp', '--ignore-config',
+                '-f', quality_str, *_sort_args,
+                '--print', '%(height)s',
+                '--no-download',
+                '--user-agent', UA_DESKTOP,
+                '--referer', get_referer_for_url(url),
+                '--no-warnings',
+                url,
+            ]
+            _probe = subprocess.run(
+                _probe_cmd, capture_output=True, text=True, timeout=10,
+                stdin=subprocess.DEVNULL,
+            )
+            if _probe.returncode == 0 and _probe.stdout.strip():
+                _h = _probe.stdout.strip().split('\n')[0].strip()
+                if _h.isdigit() and int(_h) > 0:
+                    _probed_quality = f'{_h}p'
                     _req_h = int(_height_m.group(1))
                     if int(_h) == _req_h:
                         safe_print(f'  [*] Stream quality: {_probed_quality}')
                     else:
                         safe_print(f'  [*] Stream quality: {_probed_quality} ({_requested_label} unavailable, nearest match)')
-                else:
-                    safe_print(f'  [*] Stream quality: {_probed_quality}')
-    except Exception:
-        pass  # probe failed — proceed with download, quality unknown
+        except Exception:
+            pass  # probe failed — proceed with download, quality unknown
 
     progress = LiveProgress(filename, parallel=parallel_mode)
     try:
