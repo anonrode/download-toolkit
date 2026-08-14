@@ -23,12 +23,12 @@ def extract_plutomovies(url, session, ctx=None):
     if is_movie or dl_link:
         if dl_link:
             safe_print(f"[*] Direct link found - saving to: {folder}")
-            direct = ResolverRegistry.resolve(dl_link, session)
+            direct = ResolverRegistry.resolve(dl_link, session, quality=quality)
             if direct:
                 ext = 'mkv' if 'mkv' in direct.lower() else 'mp4'
                 download_file(direct, folder, safe_filename(f"{name}.{ext}"), summary,
                               series_url=url, series_name=name,
-                              bandwidth_limit=bw, current_process=cur_proc,
+                              bandwidth_limit=bw, quality=quality, current_process=cur_proc,
                               stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
             else:
                 safe_print(render_message('no_download_link'))
@@ -67,7 +67,7 @@ def extract_plutomovies(url, session, ctx=None):
                         if f'dl.{PLUTO_DOMAIN}' in a['href']), None)
         if not dl_link:
             return None, None
-        direct = ResolverRegistry.resolve(dl_link, session)
+        direct = ResolverRegistry.resolve(dl_link, session, quality=quality)
         return dl_link, direct
 
     def _cdn_alive(cdn_url):

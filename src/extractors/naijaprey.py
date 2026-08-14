@@ -74,7 +74,7 @@ def extract_naijaprey(url, session, ctx=None):
                                        if 'wildshare.net' in a['href']), None)
             if not ws_url:
                 return None, None
-            return ws_url, ResolverRegistry.resolve(ws_url, session)
+            return ws_url, ResolverRegistry.resolve(ws_url, session, quality=quality)
         except Exception:
             return None, None
 

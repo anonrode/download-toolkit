@@ -118,7 +118,7 @@ def extract_9jarocks(url, session, ctx=None):
     summary = DownloadSummary()
 
     def _resolve_ep(lf_url):
-        return ResolverRegistry.resolve(lf_url, session)
+        return ResolverRegistry.resolve(lf_url, session, quality=quality)
 
     def _cdn_alive(cdn_url):
         try:
@@ -169,7 +169,7 @@ def extract_9jarocks(url, session, ctx=None):
         if not direct or not _cdn_alive(direct):
             if direct:
                 safe_print(f"  [*] CDN link expired - re-resolving...")
-            direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), lf_url, ctx)
+            direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session, quality=quality), lf_url, ctx)
             if not direct:
                 if _stopped(ctx):
                     break

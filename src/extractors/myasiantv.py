@@ -33,52 +33,14 @@ def extract_myasiantv(url, session, ctx=None):
             return
         ep_links.sort(key=lambda u: int(m.group(1)) if (m := re.search(r'episode-(\d+)', u)) else 0)
         
-        # YouTube-style interactive selector for Dramacool series
-        total = len(ep_links)
-        safe_print(f"\n  Series detected - {total} episodes")
-        safe_print(f"  [1] Download all")
-        safe_print(f"  [2] Range      (e.g. 5-10)")
-        safe_print(f"  [3] Specific   (e.g. 1,3,7)")
-        safe_print(f"  [0] Cancel")
-        try:
-            choice = input("\n  Pick: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            return
-        if choice == '0' or not choice:
-            return
-        
-        selected_eps = None
-        if choice == '1':
-            selected_eps = ep_links
-        elif choice == '2':
-            try:
-                r = input("  Range (e.g. 5-10): ").strip()
-                parts = r.split('-')
-                if len(parts) != 2:
-                    raise ValueError()
-                start, end = int(parts[0]), int(parts[1])
-                if start > end or start < 1 or end > total:
-                    raise ValueError()
-                selected_eps = ep_links[start-1:end]
-            except Exception:
-                safe_print(render_message('invalid_range'))
-                return
-        elif choice == '3':
-            try:
-                items = input("  Items (e.g. 1,3,7): ").strip()
-                indices = [int(x) for x in items.split(',')]
-                selected_eps = [ep_links[idx-1] for idx in indices if 1 <= idx <= total]
-            except Exception:
-                safe_print(render_message('invalid_items'))
-                return
-        else:
-            return
-            
-        ep_links = selected_eps
-        ep_links = _filter_by_episode_range(ep_links, ctx)
-        if not ep_links:
+        # Interactive preview & range filtering
+        pairs = [(u, f"Episode {m.group(1)}" if (m := re.search(r'episode-(\d+)', u)) else u.rstrip('/').split('/')[-1]) for u in ep_links]
+        pairs = _interactive_episode_preview(pairs, ctx, title=name)
+        pairs = _filter_by_episode_range(pairs, ctx)
+        if not pairs:
             safe_print(render_message('no_episodes_in_range'))
             return
+        ep_links = [u for u, _ in pairs]
         safe_print(f"[*] Found {len(ep_links)} episode(s) - saving to: {folder}")
     _notify_start(name, len(ep_links))
 
@@ -115,7 +77,7 @@ def extract_myasiantv(url, session, ctx=None):
         old_referer = session.headers.get('Referer')
         session.headers['Referer'] = ep_url
         try:
-            return ResolverRegistry.resolve(src, session)
+            return ResolverRegistry.resolve(src, session, quality=quality)
         finally:
             if old_referer is not None:
                 session.headers['Referer'] = old_referer

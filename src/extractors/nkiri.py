@@ -62,7 +62,7 @@ def extract_nkiri(url, session, ctx=None):
                 ep_url, ep_name = to_process[0]
                 # Network-aware resolve: a dropped connection waits (up to the
                 # 2-min ceiling) and retries the SAME link instead of failing it.
-                direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
+                direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session, quality=quality), ep_url, ctx)
                 if _stopped(ctx):
                     break
                 if direct:
@@ -81,7 +81,7 @@ def extract_nkiri(url, session, ctx=None):
                 safe_print(f"\n  [*] Resolving {len(to_process)} link(s)...")
                 resolved = {}
                 def _resolve_with_own_session(ep_url):
-                    return ResolverRegistry.resolve(ep_url, make_session())
+                    return ResolverRegistry.resolve(ep_url, make_session(), quality=quality)
                 with ThreadPoolExecutor(max_workers=min(len(to_process), 8)) as ex:
                     futures = {
                         ex.submit(_resolve_with_own_session, ep_url): (ep_url, ep_name)
@@ -151,14 +151,14 @@ def extract_nkiri(url, session, ctx=None):
                 if not ep_url:
                     retry_summary.add_failed(failed_fname)
                     continue
-                direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
+                direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session, quality=quality), ep_url, ctx)
                 if _stopped(ctx):
                     break
                 if direct:
                     ext = 'mkv' if '.mkv' in direct else 'mp4'
                     download_file(direct, folder, safe_filename(f"{stem}.{ext}"),
                                   retry_summary, series_url=url, series_name=name,
-                                  bandwidth_limit=bw, current_process=cur_proc,
+                                  bandwidth_limit=bw, quality=quality, current_process=cur_proc,
                                   source_url=ep_url,
                                   stop_flag=stop, pause_flag=pause, wait_fn=ctx.get('wait'))
                 else:

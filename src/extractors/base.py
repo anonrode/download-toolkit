@@ -207,11 +207,45 @@ def _dedup_by_href(pairs):
     return list(seen.values())
 
 
+def _parse_episode_spec(spec):
+    if not spec:
+        return None
+    if isinstance(spec, (set, list, tuple, range)):
+        return set(spec)
+    if isinstance(spec, str):
+        wanted = set()
+        for part in spec.replace(' ', '').split(','):
+            if not part:
+                continue
+            if '-' in part:
+                try:
+                    a, b = part.split('-', 1)
+                    a, b = int(a), int(b)
+                    if a > b:
+                        a, b = b, a
+                    wanted.update(range(a, b + 1))
+                except ValueError:
+                    pass
+            else:
+                try:
+                    wanted.add(int(part))
+                except ValueError:
+                    pass
+        return wanted
+    return None
+
+
 def _filter_by_episode_range(items, ctx):
-    selected = ctx.get('episode_filter') if ctx else None
+    spec = ctx.get('episode_filter') if ctx else None
+    selected = _parse_episode_spec(spec)
     if not selected:
         return items
-    filtered = [item for idx, item in enumerate(items, 1) if idx in selected]
+    filtered = []
+    for idx, item in enumerate(items, 1):
+        n = _episode_num_of(item)
+        key = n if n is not None else idx
+        if key in selected or idx in selected:
+            filtered.append(item)
     safe_print(f"[*] Episode range selected: {len(filtered)} of {len(items)}")
     return filtered
 

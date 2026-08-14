@@ -74,7 +74,7 @@ def extract_dramarain(url, session, ctx=None):
         """Resolve an intermediate link (loadedfiles / downloadwella / /download)
         to a direct CDN url. Runs in the prefetch thread while the previous
         episode downloads."""
-        return ResolverRegistry.resolve(ep_url, session)
+        return ResolverRegistry.resolve(ep_url, session, quality=quality)
 
     def _cdn_alive(cdn_url):
         """Ranged GET to confirm the CDN link is still live before download —
@@ -135,7 +135,7 @@ def extract_dramarain(url, session, ctx=None):
                 if direct:
                     safe_print(f"  [*] CDN link expired - re-resolving...")
                 with working_spinner(f"Resolving {fbase}"):
-                    direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session), ep_url, ctx)
+                    direct = resolve_with_retry(lambda u: ResolverRegistry.resolve(u, session, quality=quality), ep_url, ctx)
                 if not direct:
                     if _stopped(ctx):
                         break

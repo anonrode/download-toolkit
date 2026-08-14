@@ -93,40 +93,52 @@ def extract_nepu(url, session, ctx=None):
             seen_eps.add(key)
             ep_label = f"S{s_num:02d}E{ep_num:02d}"
             ep_filename = safe_filename(f"{title_text} {ep_label}.mp4")
-            all_eps.append((s_num, ep_num, ep_url, ep_label, ep_filename))
+            all_eps.append((ep_url, ep_filename, ep_label, s_num, ep_num))
 
-    all_eps.sort(key=lambda x: (x[0], x[1]))
-    all_eps_filtered = _filter_by_episode_range([(u, fn) for _, _, u, _, fn in all_eps], ctx)
+    all_eps.sort(key=lambda x: (x[3], x[4]))
+    filtered_pairs = _filter_by_episode_range([(u, fn) for u, fn, _, _, _ in all_eps], ctx)
+    if not filtered_pairs:
+        safe_print(render_message('no_episodes_in_range'))
+        return
 
-    safe_print(f"[*] Found {len(all_eps)} episode(s)")
+    filtered_urls = {u for u, _ in filtered_pairs}
+    all_eps = [item for item in all_eps if item[0] in filtered_urls]
+
+    safe_print(f"[*] Found {len(all_eps)} episode(s) - saving to: {folder}")
     _notify_start(title_text, len(all_eps))
+
+    # Build work-list with early skip checks
+    work = []
+    for i, (ep_url, ep_filename, ep_label, s_num, ep_num) in enumerate(all_eps, 1):
+        done, _ = already_downloaded(folder, ep_filename, series_url=url)
+        if not done:
+            done, _ = already_downloaded(folder, safe_filename(f"{title_text} {ep_label}.mkv"), series_url=url)
+        if done:
+            safe_print(f"\n  [{i}/{len(all_eps)}] {ep_label} - {title_text}")
+            safe_print(render_message('already_saved'))
+            summary.add_skipped()
+            continue
+        work.append((ep_url, ep_filename, ep_label, s_num, ep_num))
 
     def _resolve_ep(ep_url):
         return ResolverRegistry.resolve(ep_url, session, quality=quality)
 
     prefetcher = Prefetcher(_resolve_ep)
-    if all_eps:
-        prefetcher.prefetch(all_eps[0][2])
+    if work:
+        prefetcher.prefetch(work[0][0])
 
-    for i, (s_num, ep_num, ep_url, ep_label, ep_filename) in enumerate(all_eps, 1):
+    for i, (ep_url, ep_filename, ep_label, s_num, ep_num) in enumerate(work, 1):
         if _stopped(ctx):
             break
         _wait(ctx)
-        safe_print(f"\n  [{i}/{len(all_eps)}] {ep_label} - {title_text}")
+        safe_print(f"\n  [{i}/{len(work)}] {ep_label} - {title_text}")
 
         direct = prefetcher.get(timeout=30)
-
-        if i < len(all_eps):
-            prefetcher.prefetch(all_eps[i][2])
-
-        done, _ = already_downloaded(folder, ep_filename, series_url=url)
-        if done:
-            safe_print(render_message('already_saved'))
-            summary.add_skipped()
-            continue
+        if i < len(work):
+            prefetcher.prefetch(work[i][0])
 
         if not direct:
-            direct = ResolverRegistry.resolve(ep_url, session)
+            direct = ResolverRegistry.resolve(ep_url, session, quality=quality)
 
         if not direct:
             safe_print(f"  [X] Could not resolve stream link")
