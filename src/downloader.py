@@ -1593,10 +1593,8 @@ def get_referer_for_url(url):
         return 'https://vidb.top/'
     # Megaplay (megaplay.buzz embed -> getSources JSON -> HLS on a rotating CDN:
     # megap.norami.top, megap.shiora.top, megap.mikora.top, megap.akirax.buzz...).
-    # Every host carries the megap. prefix and allowlists ONLY the player origin
-    # as Referer -- master and child playlists both 403 to anything else,
-    # including the CDN's own domain (the base_domain fallback). So the resolve
-    # succeeds but every download 403s. Pin the player origin here.
+    if 'workerforcloud' in url or 'animixplaycors' in url or 'workers.dev' in url:
+        return 'https://gogoanime.or.at/'
     if 'megap.' in url:
         return 'https://megaplay.buzz/'
     return base_domain(url) + '/'
@@ -3439,7 +3437,8 @@ def download_with_ytdlp(url, folder, filename, summary,
     _height_m = _re.search(r'(\d+)', _requested_label)
     if _height_m and _requested_label.lower() != 'best':
         _target_h = int(_height_m.group(1))
-        quality_str = f'bestvideo+bestaudio/best'
+        _max_h = _target_h + 20
+        quality_str = f'bestvideo[height<={_max_h}]+bestaudio/best[height<={_max_h}]/best'
         _sort_args = ['-S', f'height~{_target_h},+size,+br']
     else:
         # 'best' — no height filter, pick the highest quality

@@ -41,6 +41,49 @@ def extract_anitaku(url, session, ctx=None):
             return None, set()
 
         soup = BeautifulSoup(r.text, 'html.parser')
+
+        # 0. Check Gogoanime direct download links API for quality variants
+        mal_m = re.search(r'malId\s*=\s*[\'"](\d+)[\'"]', r.text)
+        ep_m = re.search(r'ep\s*=\s*[\'"](\d+)[\'"]', r.text)
+        if mal_m and ep_m:
+            try:
+                ajax_h = {
+                    'User-Agent': session.headers.get('User-Agent', UA_DESKTOP),
+                    'Referer': ep_url,
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+                base_host = urlparse(ep_url).netloc or 'gogoanime.or.at'
+                ajax_url = f"https://{base_host}/wp-admin/admin-ajax.php"
+                res = s.post(ajax_url, data={
+                    'action': 'fetch_download_links',
+                    'mal_id': mal_m.group(1),
+                    'ep': ep_m.group(1)
+                }, headers=ajax_h, timeout=10)
+                if res and res.status_code == 200:
+                    data = res.json()
+                    dl_html = data.get('data', {}).get('result', '')
+                    if dl_html:
+                        dl_soup = BeautifulSoup(dl_html, 'html.parser')
+                        dl_map = {}
+                        for a in dl_soup.find_all('a', href=True):
+                            label = a.text.strip().lower()
+                            h_m = re.search(r'(\d+)p?', label)
+                            h_val = int(h_m.group(1)) if h_m else 720
+                            dl_map[h_val] = a['href']
+                        if dl_map:
+                            req_q = quality or '480p'
+                            h_req_m = re.search(r'(\d+)', req_q)
+                            target_h = int(h_req_m.group(1)) if h_req_m else 480
+                            # Pick nearest available quality from the direct download map
+                            best_h = min(dl_map.keys(), key=lambda h: (abs(h - target_h), h > target_h))
+                            dl_link = dl_map[best_h]
+                            safe_print(f"  [*] Selected direct download link ({best_h}p): {dl_link[:60]}...")
+                            resolved_dl = ResolverRegistry.resolve(dl_link, s, quality=quality)
+                            if resolved_dl:
+                                return resolved_dl, {dl_link}
+            except Exception:
+                pass
+
         embed_links = []
 
         # 1. Check server buttons in div.anime_muti_link
@@ -62,7 +105,7 @@ def extract_anitaku(url, session, ctx=None):
             seen.add(embed_url)
 
             safe_print(f"  [*] Resolving embed: {embed_url[:60]}...")
-            direct_url = ResolverRegistry.resolve(embed_url, s)
+            direct_url = ResolverRegistry.resolve(embed_url, s, quality=quality)
             if direct_url and direct_url != embed_url:
                 return direct_url, seen
         return None, seen

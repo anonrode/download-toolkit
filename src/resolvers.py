@@ -679,7 +679,7 @@ class KisskhMegaplayResolver(BaseResolver):
         return any(h in netloc for h in KisskhMegaplayResolver._HOSTS) or '/kisskh/' in url
 
     @staticmethod
-    def resolve(url: str, session) -> str:
+    def resolve(url: str, session, quality=None) -> str:
         try:
             headers = {
                 'User-Agent': UA_DESKTOP,
@@ -712,7 +712,7 @@ class KisskhMegaplayResolver(BaseResolver):
                             return nested_src
                         if urlparse(nested_src).netloc != urlparse(url).netloc:
                             safe_print(f"      [>] Following inner iframe: {nested_src[:80]}...")
-                            sub_res = ResolverRegistry.resolve(nested_src, session, _depth=1)
+                            sub_res = ResolverRegistry.resolve(nested_src, session, quality=quality, _depth=1)
                             if sub_res:
                                 return sub_res
                             safe_print(f"      [!] Inner iframe resolution returned None")
@@ -738,7 +738,10 @@ class KisskhMegaplayResolver(BaseResolver):
                 try:
                     import json
                     q_dict = json.loads(q_m.group(1))
-                    target = q_dict.get('360p') or q_dict.get('480p') or q_dict.get('720p') or next(iter(q_dict.values()), None)
+                    q_lbl = (quality or '').lower()
+                    target = (q_dict.get(q_lbl) or q_dict.get(q_lbl + 'p')
+                              or q_dict.get('480p') or q_dict.get('360p') or q_dict.get('720p')
+                              or next(iter(q_dict.values()), None))
                     if target:
                         return pb_m.group(1) + quote(target.replace('\\/', '/'), safe='')
                 except Exception:
@@ -2094,7 +2097,7 @@ class ResolverRegistry:
         return None
 
     @classmethod
-    def resolve(cls, url: str, session, _depth=0) -> str:
+    def resolve(cls, url: str, session, quality=None, _depth=0) -> str:
         if _depth > 5:
             safe_print(f"      [!] Resolver depth limit reached — returning: {url[:60]}")
             return url
@@ -2118,7 +2121,11 @@ class ResolverRegistry:
                 res = None
                 for attempt in range(3):
                     try:
-                        res = resolver.resolve(url, session)
+                        # Try calling resolve with quality parameter, falling back to 2-arg call if resolver signature doesn't take quality
+                        try:
+                            res = resolver.resolve(url, session, quality=quality)
+                        except TypeError:
+                            res = resolver.resolve(url, session)
                         break
                     except Exception as e:
                         if _is_network_error(e) and attempt < 2:
@@ -2132,7 +2139,7 @@ class ResolverRegistry:
                         res = None
                         break
                 if res and res != url:
-                    return cls.resolve(res, session, _depth=_depth + 1)
+                    return cls.resolve(res, session, quality=quality, _depth=_depth + 1)
                 return res
 
         # Direct passthrough fallback

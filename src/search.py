@@ -542,12 +542,19 @@ def _filter_by_relevance(query, scored_results):
     """scored_results: list of (site, url, title). Drops zero-overlap items,
     sorts best-first, returns [(site, url), ...]."""
     ranked = []
-    for site, url, title in scored_results:
-        score = _relevance_score(query, title)
+    for item in scored_results:
+        if len(item) == 3:
+            site, url, title = item
+        elif len(item) == 2:
+            site, url = item
+            title = ''
+        else:
+            continue
+        score = _relevance_score(query, title or site)
         if score >= _RELEVANCE_MIN:
-            ranked.append((score, site, url))
+            ranked.append((score, site, url, title))
     ranked.sort(key=lambda x: x[0], reverse=True)
-    return [(site, url) for _, site, url in ranked]
+    return [(f"{site}: {title}", url) if (title and not ':' in site) else (site, url) for _, site, url, title in ranked]
 
 # ─── FRANCHISE ORDERING ───────────────────────────────────────
 # Franchise searches ("fast and furious") return parts jumbled (7 before 1) and
@@ -928,8 +935,13 @@ async def _asearch_anitaku(session, query):
 async def _asearch_nepu(session, query):
     """Search Nepu (nepu.gd) JSON API — returns structured (site, url, title) list."""
     url = f"https://nepu.gd/api/search?q={quote(query)}"
-    status, _, text = await _afetch(session, url)
-    if status != 200 or not text:
+    try:
+        async with session.get(url, headers={'User-Agent': UA_DESKTOP},
+                                timeout=aiohttp.ClientTimeout(total=12)) as r:
+            if r.status != 200:
+                return []
+            text = await r.text()
+    except Exception:
         return []
     out = []
     try:
@@ -1026,8 +1038,12 @@ async def _arun(query, site_filter, fast, hint, timeout):
     async with aiohttp.ClientSession(connector=conn, headers=headers) as session:
         tasks = []
 
+        sf = (site_filter or '').lower()
+        def _match(name):
+            return not sf or sf == name.lower() or (sf in ('anime', 'ani') and name.lower() == 'anitaku')
+
         # NKiri: slug probe + RSS search
-        if site_filter not in ('dramakey', 'plutomovies', 'asianc', 'anitaku'):
+        if _match('nkiri'):
             nkiri_pat = list(NKIRI_WAVE1) + ([] if fast else list(NKIRI_WAVE2))
             tasks.append(('slug', 'NKiri', _aprobe_slug(session, 'https://thenkiri.com', nkiri_pat,
                           base, season_slug, year, 'NKiri', cancel_event)))
@@ -1036,7 +1052,7 @@ async def _arun(query, site_filter, fast, hint, timeout):
                 'NKiri', query)))
 
         # DramaKey.com + .cc + DramaRain: slug probe only (no server search)
-        if site_filter not in ('nkiri', 'plutomovies', 'asianc', 'anitaku'):
+        if _match('dramakey') or _match('dramarain'):
             dk_pat = list(DRAMAKEY_WAVE1) + ([] if fast else list(DRAMAKEY_WAVE2))
             tasks.append(('slug', 'DramaKey', _aprobe_slug(session, 'https://dramakey.com', dk_pat,
                           base, season_slug, year, 'DramaKey', cancel_event)))
@@ -1047,26 +1063,30 @@ async def _arun(query, site_filter, fast, hint, timeout):
                           base, season_slug, year, 'DramaRain', cancel_event)))
 
         # Search-only sources — skipped in fast mode (slug-probe only)
-        if not fast and site_filter not in ('nkiri', 'dramakey', 'asianc', 'anitaku'):
-            tasks.append(('pluto', 'Pluto', _asearch_pluto(session, query)))
-            tasks.append(('search', '9jaRocks', _asearch_rss(
-                session, f"https://9jarocks.com/search/{quote(query)}/feed/rss2/",
-                '9jaRocks', query, url_fixup=_normalize_9jarocks)))
-            tasks.append(('search', 'NaijaPrey', _asearch_rss(
-                session, f"https://www.naijaprey.tv/search/{quote(query)}/feed/rss2/",
-                'NaijaPrey', query)))
-            tasks.append(('search', 'NaijaVault', _asearch_naijavault(session, query)))
+        if not fast:
+            if _match('plutomovies') or _match('pluto'):
+                tasks.append(('pluto', 'Pluto', _asearch_pluto(session, query)))
+            if _match('9jarocks'):
+                tasks.append(('search', '9jaRocks', _asearch_rss(
+                    session, f"https://9jarocks.com/search/{quote(query)}/feed/rss2/",
+                    '9jaRocks', query, url_fixup=_normalize_9jarocks)))
+            if _match('naijaprey'):
+                tasks.append(('search', 'NaijaPrey', _asearch_rss(
+                    session, f"https://www.naijaprey.tv/search/{quote(query)}/feed/rss2/",
+                    'NaijaPrey', query)))
+            if _match('naijavault'):
+                tasks.append(('search', 'NaijaVault', _asearch_naijavault(session, query)))
 
         # AsianC (Dramacool) — real JSON search, HLS-backed episodes
-        if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'anitaku'):
+        if _match('asianc'):
             tasks.append(('search', 'AsianC', _asearch_asianc(session, query)))
 
         # Anitaku (Gogoanime) — real HTML search
-        if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'asianc'):
+        if _match('anitaku'):
             tasks.append(('anitaku', 'Anitaku', _asearch_anitaku(session, query)))
 
         # Nepu (nepu.gd) — real JSON search
-        if site_filter not in ('nkiri', 'dramakey', 'plutomovies', 'asianc', 'anitaku'):
+        if _match('nepu'):
             tasks.append(('search', 'Nepu', _asearch_nepu(session, query)))
 
         kinds = [k for k, _, _ in tasks]
@@ -1409,45 +1429,74 @@ def _present_results(results, raw_query):
             return url
         return None
 
-    print()
-    print(f"  {'-'*55}")
-    # Enrich the Anitaku rows with a live episode count so the picker can tell a
-    # 1000+ ep series from a same-named movie/special. Best-effort and time-
-    # boxed; if it comes back empty we just show the badges.
-    ep_counts = _enrich_anitaku_counts(display_results)
-    for i, (site, url) in enumerate(display_results, 1):
-        if site.startswith("PlutoMovies "):
-            source = site.replace("PlutoMovies ", "Pluto")
-            safe_print(f"  [{i}] [{source}]")
-        elif " (anime): " in site:
-            # Gogo/Anitaku carry the real title (and optional NUL-delimited
-            # badges like "Anime · Completed · Sub"). Show the title once, badges
-            # dimmed to the side -- no redundant slugified copy. safe_print, not
-            # print: gogo's English titles routinely carry curly quotes / en-
-            # dashes, and a raw print() crashes the whole picker mid-list under
-            # an ASCII/Termux locale.
-            label = site.split(" (anime): ", 1)[1]
-            title, _, meta = label.partition('\x00')
-            parts = [meta.strip()] if meta else []
-            if url in ep_counts:
-                parts.append(ep_counts[url])
-            line = f"  [{i}] {title.strip()}"
-            if parts:
-                line += f"   ({' · '.join(parts)})"
-            safe_print(line)
-        else:
-            # NKiri / DramaKey / DramaRain
-            slug = url.rstrip('/').split('/')[-1]
-            title = slug.replace('-', ' ').title()
-            safe_print(f"  [{i}] [{site}] {title}")
-    print(f"  {'-'*55}")
-    try:
-        choice = int(input("  Pick (1-%d) or 0 to cancel: " % len(display_results)).strip())
-    except (ValueError, EOFError, KeyboardInterrupt):
-        return None
-    if 1 <= choice <= len(display_results):
-        return display_results[choice - 1][1]
-    return None
+    page = 0
+    page_size = 8
+    total_results = len(balanced)
+
+    ep_counts = _enrich_anitaku_counts(balanced)
+
+    while True:
+        start_idx = page * page_size
+        end_idx = min(start_idx + page_size, total_results)
+        page_items = balanced[start_idx:end_idx]
+
+        if not page_items:
+            return None
+
+        print()
+        print(f"  {'-'*55}")
+        for idx_in_page, (site, url) in enumerate(page_items, 1):
+            i = start_idx + idx_in_page
+            if site.startswith("PlutoMovies "):
+                source = site.replace("PlutoMovies ", "Pluto")
+                safe_print(f"  [{i}] [{source}]")
+            elif site.startswith("Nepu: "):
+                title = site.replace("Nepu: ", "")
+                safe_print(f"  [{i}] [Nepu] {title}")
+            elif " (anime): " in site:
+                label = site.split(" (anime): ", 1)[1]
+                title, _, meta = label.partition('\x00')
+                parts = [meta.strip()] if meta else []
+                if url in ep_counts:
+                    parts.append(ep_counts[url])
+                line = f"  [{i}] {title.strip()}"
+                if parts:
+                    line += f"   ({' · '.join(parts)})"
+                safe_print(line)
+            else:
+                # NKiri / DramaKey / DramaRain / 9jaRocks / AsianC
+                slug = url.rstrip('/').split('/')[-1]
+                title = slug.replace('-', ' ').title()
+                safe_print(f"  [{i}] [{site}] {title}")
+        print(f"  {'-'*55}")
+
+        has_more = end_idx < total_results
+        prompt_parts = [f"Pick ({start_idx+1}-{end_idx})"]
+        if has_more:
+            prompt_parts.append("'m' for more")
+        prompt_parts.append("or 0 to cancel")
+        prompt_str = f"  {', '.join(prompt_parts)}: "
+
+        try:
+            raw_in = input(prompt_str).strip().lower()
+        except (ValueError, EOFError, KeyboardInterrupt):
+            return None
+
+        if not raw_in or raw_in == '0':
+            return None
+
+        if has_more and raw_in in ('m', 'more', '+', '>'):
+            page += 1
+            continue
+
+        try:
+            choice = int(raw_in)
+            if start_idx + 1 <= choice <= end_idx:
+                return page_items[choice - start_idx - 1][1]
+            elif 1 <= choice <= total_results:
+                return balanced[choice - 1][1]
+        except ValueError:
+            return None
 
 def search(raw_query, session=None):
     """Normal search — all patterns, both sites, full timeout."""
@@ -1474,6 +1523,9 @@ def search(raw_query, session=None):
     elif query.lower().endswith(' asianc'):
         site_filter = 'asianc'
         query = query[:-7].strip()
+    elif query.lower().endswith(' nepu'):
+        site_filter = 'nepu'
+        query = query[:-5].strip()
 
     timeout = _search_timeout(45)
     safe_print("\n" + render_message('search_running', query=query))
@@ -1498,9 +1550,21 @@ def fsearch(raw_query, session=None):
     elif query.lower().endswith(' plutomovies'):
         site_filter = 'plutomovies'
         query = query[:-12].strip()
+    elif query.lower().endswith(' anitaku'):
+        site_filter = 'anitaku'
+        query = query[:-8].strip()
+    elif query.lower().endswith(' anime'):
+        site_filter = 'anitaku'
+        query = query[:-6].strip()
+    elif query.lower().endswith(' ani'):
+        site_filter = 'anitaku'
+        query = query[:-4].strip()
     elif query.lower().endswith(' asianc'):
         site_filter = 'asianc'
         query = query[:-7].strip()
+    elif query.lower().endswith(' nepu'):
+        site_filter = 'nepu'
+        query = query[:-5].strip()
 
     if hint:
         safe_print("\n" + render_message('fast_search_running_hint', hint=hint, query=query))

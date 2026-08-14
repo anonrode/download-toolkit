@@ -40,7 +40,7 @@ def extract_nepu(url, session, ctx=None):
     # ─── MOVIE PATH ───────────────────────────────────────────────
     if is_movie:
         safe_print(f"[*] Movie detected - resolving stream...")
-        direct = ResolverRegistry.resolve(url, session)
+        direct = ResolverRegistry.resolve(url, session, quality=quality)
         if direct:
             ext = 'mp4'
             filename = safe_filename(f"{title_text}.{ext}")
@@ -102,7 +102,7 @@ def extract_nepu(url, session, ctx=None):
     _notify_start(title_text, len(all_eps))
 
     def _resolve_ep(ep_url):
-        return ResolverRegistry.resolve(ep_url, session)
+        return ResolverRegistry.resolve(ep_url, session, quality=quality)
 
     prefetcher = Prefetcher(_resolve_ep)
     if all_eps:
