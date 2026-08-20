@@ -89,7 +89,7 @@ def find_direct_video(text):
     Every candidate must pass `_is_media_path` -- a bare substring match happily
     returns embed pages (see that helper). Preference order keeps HLS first."""
     for ext in [r'\.m3u8', r'\.mp4', r'\.mkv']:
-        found = re.findall(r'https?://[^\s"\'<>,\\]+' + ext + r'[^\s"\'<>,\\]*', text)
+        found = re.findall(r'https?://[^\s"\'<>\\]+' + ext + r'[^\s"\'<>\\]*', text)
         for cand in found:
             cand = cand.rstrip('.,;)')
             if _is_media_path(cand):
@@ -670,7 +670,7 @@ class KisskhMegaplayResolver(BaseResolver):
     _HOSTS = ('kisskh.megaplay.', 'megaplays.se', 'embtaku.', 'takuembed.',
               'anihdplay.', 'gogohd.', 'megaplay.', 'animesama.', 'tamilembed.',
               'gogoanime.me.uk', 'vidmoly.biz', 'vidmoly.me', 'vidmoly.to',
-              'vidmoly.net', 'vkspeed.com')
+              'vidmoly.net', 'vkspeed.com', 'ansembed.net')
 
     @staticmethod
     def can_resolve(url: str) -> bool:
