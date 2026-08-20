@@ -670,7 +670,7 @@ class KisskhMegaplayResolver(BaseResolver):
     _HOSTS = ('kisskh.megaplay.', 'megaplays.se', 'embtaku.', 'takuembed.',
               'anihdplay.', 'gogohd.', 'megaplay.', 'animesama.', 'tamilembed.',
               'gogoanime.me.uk', 'vidmoly.biz', 'vidmoly.me', 'vidmoly.to',
-              'vidmoly.net', 'vkspeed.com', 'ansembed.net')
+              'vidmoly.net', 'vkspeed.com', 'ansembed.net', 'sibnet.ru')
 
     @staticmethod
     def can_resolve(url: str) -> bool:
@@ -782,6 +782,13 @@ class KisskhMegaplayResolver(BaseResolver):
                         safe_print(f"      [!] getSources error: {e}")
                 else:
                     safe_print(f"      [!] megaplay: no stream_id found in URL or page")
+
+            # 4b) sibnet.ru shell: the source is a RELATIVE path in inline JS --
+            # player.src([{src: "/v/<hash>/<id>.mp4", ...}]) -- which 302s to a
+            # signed CDN URL. Absolute-URL regexes never see it.
+            sib_m = re.search(r'''player\.src\(\[\{src:\s*["']([^"']+)["']''', r.text)
+            if sib_m and sib_m.group(1).startswith('/'):
+                return urljoin('https://video.sibnet.ru/', sib_m.group(1))
 
             # 5) Standard source tag
             m = re.search(r'"source"\s*:\s*"([^"]+\.m3u8[^"]*)"', r.text)
