@@ -307,7 +307,8 @@ class DownloadwellaResolver(BaseResolver):
 
             data = {inp.get('name'): inp.get('value', '')
                     for inp in form.find_all('input') if inp.get('name')}
-            data['method_free'] = 'Free Download'
+            # LIVE (2026-08): forcing method_free to 'Free Download' makes the
+            # server reject the POST -- submit the form verbatim as rendered.
 
             try:
                 r2 = session.post(url, data=data, timeout=20, verify=False)
@@ -683,11 +684,13 @@ class KisskhMegaplayResolver(BaseResolver):
         try:
             headers = {
                 'User-Agent': UA_DESKTOP,
-                'Referer': session.headers.get('Referer', ''),
                 'Sec-Fetch-Dest': 'iframe',
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'cross-site',
             }
+            # LIVE (2026-08): tamilembed 403s any request carrying a Referer.
+            if 'tamilembed' not in url:
+                headers['Referer'] = session.headers.get('Referer', '')
             r = session.get(url, timeout=20, headers=headers)
             # NB: `not r` is truthy for any 4xx/5xx (requests.Response.__bool__
             # returns .ok), so it would swallow the 404s we explicitly want to
@@ -748,11 +751,16 @@ class KisskhMegaplayResolver(BaseResolver):
                     pass
 
             # 4) megaplay.buzz layout: getSources JSON endpoint
-            # e.g. https://megaplay.buzz/stream/s-2/31069/sub -> data-realid="31069"
+            # e.g. https://megaplay.buzz/stream/s-2/31069/sub -> data-id="31069"
+            # LIVE (2026-08): the API keys on data-id (the file id), NOT
+            # data-realid / the /stream/ URL id.
             if 'megaplay.buzz' in url.lower() or 'megaplay' in url.lower():
+                data_id_m = re.search(r'data-id=["\'](\d+)["\']', r.text)
                 real_id_m = re.search(r'data-realid=["\'](\d+)["\']', r.text)
                 ep_id_m = re.search(r'/stream/(?:s-\d+/)?(\d+)', url)
-                stream_id = real_id_m.group(1) if real_id_m else (ep_id_m.group(1) if ep_id_m else None)
+                stream_id = (data_id_m.group(1) if data_id_m
+                             else (real_id_m.group(1) if real_id_m
+                                   else (ep_id_m.group(1) if ep_id_m else None)))
                 if stream_id:
                     api_url = f"https://megaplay.buzz/stream/getSources?id={stream_id}"
                     try:
@@ -1491,10 +1499,32 @@ class VidhideResolver(BaseResolver):
     """vidhide (minochinos.com & mirrors). Same player family as streamwish -
     the source is a `sources:[{file:"...m3u8"}]` assignment, sometimes inside a
     packed script. Many asianc uploads are expired; those are detected and fail
-    cleanly (None) rather than returning a tombstone page."""
-    _HOSTS = ('minochinos.com', 'vidhide.', 'vidhidepro.', 'vidhidevip.',
-              'filelions.', 'vid-guard.', 'nining.', 'peytonepre.com',
-              'techradar.ink', 'ryderjet.com')
+    cleanly (None) rather than returning a tombstone page.
+
+    filelions network: frontend domains rotate (vidhidepro.com -> vidhidefast.com,
+    2026-08) and every frontend serves the same file-id space under the same
+    /e/ /f/ /d/ paths. A link on a dead frontend (522 / conn error) is retried
+    on the live mirrors instead of failing outright."""
+    _HOSTS = ('vidhidefast.', 'minochinos.com', 'vidhide.', 'vidhidepro.',
+              'vidhidevip.', 'filelions.', 'vid-guard.', 'nining.',
+              'peytonepre.com', 'techradar.ink', 'ryderjet.com')
+    _MIRROR_HOSTS = ('vidhide.com', 'minochinos.com', 'vidhidefast.com',
+                     'vidhidevip.com', 'vidhidepro.com', 'filelions.to')
+    _LAST_WORKING_HOST = None
+
+    @classmethod
+    def _candidate_hosts(cls, url):
+        """Last working host first, then the pasted host, then known mirrors."""
+        netloc = urlparse(url).netloc.lower()
+        hosts = []
+        if cls._LAST_WORKING_HOST:
+            hosts.append(cls._LAST_WORKING_HOST)
+        if netloc not in hosts:
+            hosts.append(netloc)
+        for h in cls._MIRROR_HOSTS:
+            if h not in hosts:
+                hosts.append(h)
+        return hosts
 
     @staticmethod
     def can_resolve(url: str) -> bool:
@@ -1505,20 +1535,27 @@ class VidhideResolver(BaseResolver):
     def resolve(url: str, session) -> str:
         try:
             parsed = urlparse(url)
-            base = f'{parsed.scheme}://{parsed.netloc}'
-            r = safe_get(session, url, referer=base + '/', timeout=20)
-            if not r:
-                return None
-            if _looks_dead(r.text):
-                safe_print("      [!] Vidhide: file expired/deleted")
-                return None
-            unpacked = _unpack_packed_js(r.text) or r.text
-            m = re.search(
-                r'sources\s*:\s*\[\s*\{[^}]*?file\s*:\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
-                unpacked)
-            if m:
-                return m.group(1)
-            return _find_hls_or_mp4(unpacked)
+            for host in VidhideResolver._candidate_hosts(url):
+                cand = url if host == parsed.netloc.lower() else urlunparse(
+                    (parsed.scheme, host, parsed.path, parsed.params,
+                     parsed.query, parsed.fragment))
+                r = safe_get(session, cand, referer=f'{parsed.scheme}://{host}/', timeout=20)
+                if not r:
+                    continue
+                if _looks_dead(r.text):
+                    continue
+                unpacked = _unpack_packed_js(r.text) or r.text
+                m = re.search(
+                    r'sources\s*:\s*\[\s*\{[^}]*?file\s*:\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
+                    unpacked)
+                if m:
+                    VidhideResolver._LAST_WORKING_HOST = host
+                    return m.group(1)
+                direct = _find_hls_or_mp4(unpacked)
+                if direct:
+                    VidhideResolver._LAST_WORKING_HOST = host
+                    return direct
+            return None
         except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
