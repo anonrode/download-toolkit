@@ -1,0 +1,232 @@
+{
+  "9jarocks": {
+    "rows": 8,
+    "s1": [
+      48,
+      48
+    ],
+    "s2_ok": 8,
+    "s3_ok": 8,
+    "s4_ok": 8,
+    "s4_na": 0,
+    "s4_fail": 0,
+    "results": {
+      "OK": 8
+    },
+    "probe_kinds": {
+      "MKV/EBML": 8
+    },
+    "engines": {
+      "app-mirror": 8
+    }
+  },
+  "anitaku": {
+    "rows": 8,
+    "s1": [
+      40,
+      40
+    ],
+    "s2_ok": 8,
+    "s3_ok": 8,
+    "s4_ok": 0,
+    "s4_na": 0,
+    "s4_fail": 8,
+    "results": {
+      "PROBE-FAIL": 8
+    },
+    "probe_kinds": {
+      "HLS-MASTER-403": 8
+    },
+    "engines": {
+      "app-mirror": 8
+    }
+  },
+  "asianc": {
+    "rows": 8,
+    "s1": [
+      46,
+      46
+    ],
+    "s2_ok": 8,
+    "s3_ok": 8,
+    "s4_ok": 2,
+    "s4_na": 0,
+    "s4_fail": 6,
+    "results": {
+      "PROBE-FAIL": 6,
+      "OK": 2
+    },
+    "probe_kinds": {
+      "HLS-HTTP-403": 1,
+      "HLS-HTTP-522": 3,
+      "HLS-HTML-NOT-MEDIA": 2,
+      "HLS-MPEG-TS": 2
+    },
+    "engines": {
+      "app-mirror": 8
+    }
+  },
+  "dramakey": {
+    "rows": 0,
+    "s1": [
+      0,
+      25
+    ],
+    "s2_ok": 0,
+    "s3_ok": 0,
+    "s4_ok": 0,
+    "s4_na": 0,
+    "s4_fail": 0,
+    "results": {},
+    "probe_kinds": {},
+    "engines": {}
+  },
+  "dramarain": {
+    "rows": 8,
+    "s1": [
+      47,
+      47
+    ],
+    "s2_ok": 4,
+    "s3_ok": 4,
+    "s4_ok": 3,
+    "s4_na": 0,
+    "s4_fail": 1,
+    "results": {
+      "NO-CANDIDATE": 4,
+      "PROBE-FAIL": 1,
+      "OK": 3
+    },
+    "probe_kinds": {
+      "PROBE-ERR Failed to perform, curl: (60) SSL certificate problem: unable to get local issuer certificate. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.": 1,
+      "MKV/EBML": 3
+    },
+    "engines": {
+      "app-mirror": 4
+    }
+  },
+  "naijaprey": {
+    "rows": 8,
+    "s1": [
+      47,
+      47
+    ],
+    "s2_ok": 8,
+    "s3_ok": 8,
+    "s4_ok": 4,
+    "s4_na": 0,
+    "s4_fail": 4,
+    "results": {
+      "PROBE-FAIL": 4,
+      "OK": 4
+    },
+    "probe_kinds": {
+      "HTML-NOT-MEDIA": 4,
+      "MKV/EBML": 4
+    },
+    "engines": {
+      "reference": 4,
+      "app-mirror": 4
+    }
+  },
+  "naijavault": {
+    "rows": 8,
+    "s1": [
+      49,
+      49
+    ],
+    "s2_ok": 1,
+    "s3_ok": 1,
+    "s4_ok": 0,
+    "s4_na": 0,
+    "s4_fail": 1,
+    "results": {
+      "NO-CANDIDATE": 7,
+      "PROBE-FAIL": 1
+    },
+    "probe_kinds": {
+      "PROBE-ERR Failed to perform, curl: (52) Empty reply from server. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.": 1
+    },
+    "engines": {
+      "app-mirror": 1
+    }
+  },
+  "nepu": {
+    "rows": 3,
+    "s1": [
+      44,
+      44
+    ],
+    "s2_ok": 1,
+    "s3_ok": 0,
+    "s4_ok": 0,
+    "s4_na": 0,
+    "s4_fail": 0,
+    "results": {
+      "RESOLVE-FAILED": 1,
+      "NO-CANDIDATE": 2
+    },
+    "probe_kinds": {},
+    "engines": {
+      "reference": 1
+    }
+  },
+  "nkiri": {
+    "rows": 0,
+    "s1": [
+      0,
+      50
+    ],
+    "s2_ok": 0,
+    "s3_ok": 0,
+    "s4_ok": 0,
+    "s4_na": 0,
+    "s4_fail": 0,
+    "results": {},
+    "probe_kinds": {},
+    "engines": {}
+  },
+  "pluto": {
+    "rows": 8,
+    "s1": [
+      45,
+      45
+    ],
+    "s2_ok": 7,
+    "s3_ok": 7,
+    "s4_ok": 7,
+    "s4_na": 0,
+    "s4_fail": 0,
+    "results": {
+      "OK": 7,
+      "NO-CANDIDATE": 1
+    },
+    "probe_kinds": {
+      "MKV/EBML": 7
+    },
+    "engines": {
+      "app-mirror": 7
+    }
+  },
+  "torrents": {
+    "rows": 8,
+    "s1": [
+      49,
+      49
+    ],
+    "s2_ok": 0,
+    "s3_ok": 8,
+    "s4_ok": 0,
+    "s4_na": 8,
+    "s4_fail": 0,
+    "results": {
+      "MAGNET": 8
+    },
+    "probe_kinds": {
+      "MAGNET": 8
+    },
+    "engines": {
+      "MAGNET": 8
+    }
+  }
+}

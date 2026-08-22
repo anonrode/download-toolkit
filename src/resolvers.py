@@ -7,7 +7,7 @@ import tempfile
 import subprocess
 from html import unescape
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, quote
+from urllib.parse import urljoin, urlparse, quote, urlunparse
 
 from ._aes import aes_cbc_decrypt
 
@@ -441,6 +441,62 @@ class WildshareResolver(BaseResolver):
                 raise
             safe_print(f"      [!] Wildshare: {e}")
             return None
+
+class NaijaPreyChainResolver(BaseResolver):
+    """Kotlin parity (NaijaPreyProvider.extractFileLink): the naijaprey pages
+    embed a vdl.np-downloader.com/sdm_downloads gateway whose post body holds a
+    single a.sdm_download anchor pointing at wildshare.net (which serves the
+    direct media file). Depth-capped at 2 => at most 2 page fetches."""
+
+    @staticmethod
+    def can_resolve(url: str) -> bool:
+        netloc = urlparse(url).netloc.lower()
+        return 'np-downloader.com' in netloc or 'sdm_downloads' in url
+
+    @staticmethod
+    def _extract_file_link(url: str, session, depth: int):
+        if depth >= 2:
+            return None
+        # a /d/ link IS the final direct URL (Kotlin acceptance) -- never
+        # re-fetch it through the chain
+        if '/d/' in url:
+            return url
+        try:
+            r = session.get(url, timeout=20)
+            if not r or r.status_code != 200:
+                return None
+            text = r.text
+        except _http_exc_bases() as e:
+            if _is_network_error(e):
+                raise
+            return None
+        except Exception as e:
+            safe_print(f"      [!] NaijaPreyChain: {e}")
+            return None
+        # 1) A ready direct media URL anywhere in the markup wins immediately.
+        m = re.search(r'https?://[^\s"\'<>]+\.(?:mp4|mkv|avi|webm)[^\s"\'<>]*', text)
+        if m:
+            return m.group(0)
+        # 2) Otherwise hop to the next stage: the a.sdm_download anchor (class
+        #    selector parity — a plain href regex hits the page's SELF link or
+        #    wp-json oEmbed URLs that appear earlier in the document).
+        a = re.search(r'<a[^>]*class="[^"]*sdm_download[^"]*"[^>]*href="(https://[^"]+)"', text)
+        nxt = a.group(1) if a else None
+        if not nxt:
+            m2 = re.search(r'https://(?:vdl\.np-downloader\.com/sdm_downloads/|wildshare\.net/)[^\s"\'<>]*', text)
+            nxt = m2.group(0) if m2 else None
+        if not nxt or nxt == url:
+            return None
+        # wildshare and /d/ hops are final download URLs (Kotlin parity: the
+        # provider accepts direct.contains("/d/") as a resolved direct link)
+        if 'wildshare.net' in nxt or '/d/' in nxt:
+            return nxt
+        return NaijaPreyChainResolver._extract_file_link(nxt, session, depth + 1)
+
+    @staticmethod
+    def resolve(url: str, session) -> str:
+        return NaijaPreyChainResolver._extract_file_link(url, session, 0)
+
 
 class StreamtapeResolver(BaseResolver):
     @staticmethod
@@ -1254,19 +1310,40 @@ class PlutoMoviesResolver(BaseResolver):
             if not r or r.status_code != 200:
                 return None
                 
+            text = r.text
             # Extract PlutoMovies download scripts
             # Primary: downloadButton onclick handler
             m = re.search(
                 r"getElementById\('downloadButton'\)\.onclick\s*=\s*function\(\)\s*\{"
                 r"\s*location\.href\s*=\s*'(https://[^']+)'",
-                r.text, re.DOTALL
+                text, re.DOTALL
             )
             if m:
                 return m.group(1)
             # Fallback: generic window.location.href
-            m = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", r.text)
+            m = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", text)
             if m:
                 return m.group(1)
+            # Kotlin parity (9b5eab9/689ffee): /series/ episode pages embed a
+            # plain dl.plutomovies.com anchor (live-verified 2026-08-22).
+            a = re.search(r'href="(https://[^"]*dl\.plutomovies\.com[^"]*)"', text)
+            if a:
+                return a.group(1)
+            # Directory pages (series hubs / season listings) have no download
+            # link, only child /series/ pages: descend into the most specific
+            # child so the registry recursion walks hub -> season -> episode.
+            children = []
+            seen = set()
+            for cm in re.finditer(r'href="([^"]*/series/[^"]*)"', text):
+                href = cm.group(1).split("#", 1)[0]
+                href = urljoin(url, href)
+                if href and href.lower() != url.lower() and href not in seen:
+                    seen.add(href)
+                    children.append(href)
+            if children:
+                ep = next((c for c in children if re.search(r's\d{1,2}[-_]?e\d{1,2}|episode-\d{1,3}', c, re.I)), None)
+                se = next((c for c in children if re.search(r'season-\d{1,2}', c, re.I)), None)
+                return ep or se or children[0]
             return None
         except _http_exc_bases() as e:
             if _is_network_error(e):
@@ -2018,6 +2095,7 @@ class VidsrcResolver(BaseResolver):
         m = re.search(r'/(?:movie|tv)/(\d+)(?:/(\d+)/(\d+))?', url)
         if not m:
             return None
+            print("TRACE-NONE", flush=True)
 
         tmdb_id = m.group(1)
         season = m.group(2)
@@ -2029,15 +2107,30 @@ class VidsrcResolver(BaseResolver):
             api_url = f"https://data.vidsrcme.ru/api.php?type=movie&tmdb={tmdb_id}&stream_urls"
 
         headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://cloudorchestranova.com/'}
+        # data.vidsrcme.ru is Cloudflare-fronted and flaky (verified
+        # 2026-08-22: api.php occasionally takes 6s+, wasm.php stalls 20s+);
+        # the historical 10s one-shot timeout made both unresolvable. Use a
+        # 20s timeout and retry once before giving up.
         try:
-            r = session.get(api_url, headers=headers, timeout=10)
-            data = r.json()
+            r = None
+            for attempt in (0, 1):
+                try:
+                    r = session.get(api_url, headers=headers, timeout=20)
+                    data = r.json()
+                    break
+                except Exception:
+                    if attempt == 1:
+                        return None
+                        print("TRACE-NONE", flush=True)
+                    time.sleep(0.5)
         except Exception:
             return None
+            print("TRACE-NONE", flush=True)
 
         stream_data = data.get('data', {}).get('stream_urls')
         if not stream_data:
             return None
+            print("TRACE-NONE", flush=True)
 
         if isinstance(stream_data, list):
             return stream_data[0] if stream_data else None
@@ -2046,13 +2139,35 @@ class VidsrcResolver(BaseResolver):
         wasm_url = data.get('vs', {}).get('wasm_url')
         if not wasm_url:
             return None
+            print("TRACE-NONE", flush=True)
 
         try:
-            wasm_bytes = session.get(wasm_url, headers=headers, timeout=10).content
+            wasm_bytes = None
+            for attempt in (0, 1):
+                try:
+                    wasm_bytes = session.get(wasm_url, headers=headers, timeout=20).content
+                    if wasm_bytes:
+                        break
+                except Exception:
+                    if attempt == 1:
+                        return None
+                        print("TRACE-NONE", flush=True)
+                    time.sleep(0.5)
+            if not wasm_bytes:
+                return None
+                print("TRACE-NONE", flush=True)
         except Exception:
             return None
+            print("TRACE-NONE", flush=True)
 
-        # Strategy 1: Node.js fast path (if node is installed)
+        # Strategy 1: Node.js fast path (if node is installed).
+        # NOTE: with `node -e <script> <arg1> <arg2>` the args land at
+        # process.argv[1] and process.argv[2] (the -e script is NOT argv[1]).
+        # The historical argv[2]/argv[3] layout read the wasm path as the
+        # ciphertext and undefined as the wasm path -> fs.readFileSync
+        # TypeError, so every encrypted stream_urls RESOLVE-FAILED
+        # (nepu.gd verified 2026-08-22).
+        master = None
         try:
             with tempfile.NamedTemporaryFile(suffix='.wasm', delete=False) as f:
                 f.write(wasm_bytes)
@@ -2060,8 +2175,8 @@ class VidsrcResolver(BaseResolver):
 
             js_code = (
                 "const fs=require('fs');"
-                "const enc=Buffer.from(process.argv[2],'base64');"
-                "const wasm=fs.readFileSync(process.argv[3]);"
+                "const enc=Buffer.from(process.argv[1],'base64');"
+                "const wasm=fs.readFileSync(process.argv[2]);"
                 "WebAssembly.instantiate(wasm,{}).then(i=>{"
                 "const {alloc,decrypt,memory}=i.instance.exports;"
                 "const p=alloc(enc.length);"
@@ -2079,25 +2194,85 @@ class VidsrcResolver(BaseResolver):
             if res.returncode == 0 and res.stdout.strip():
                 urls = [u.strip() for u in res.stdout.split('\n') if u.strip().startswith('http')]
                 if urls:
-                    return urls[0]
+                    master = urls[0]
         except Exception:
             pass
 
-        # Strategy 2: Pure Python WASM interpreter fallback (no node required)
-        try:
-            interp = _WasmInterpreter(wasm_bytes)
-            enc = base64.b64decode(enc_b64)
-            ptr = 16384
-            interp.memory[ptr:ptr+len(enc)] = enc
-            out_len = interp.decrypt(ptr, len(enc))
-            decrypted = bytes(interp.memory[ptr+12:ptr+12+out_len]).decode('utf-8', errors='ignore')
-            urls = [u.strip() for u in decrypted.split('\n') if u.strip().startswith('http')]
-            if urls:
-                return urls[0]
-        except Exception:
-            pass
+        # Strategy 2: Pure Python WASM interpreter fallback (no node required).
+        # Very slow on the 7KB vidsrc decryptor wasm, so it only runs when
+        # node is unavailable or failed.
+        if not master:
+            try:
+                interp = _WasmInterpreter(wasm_bytes)
+                enc = base64.b64decode(enc_b64)
+                ptr = 16384
+                interp.memory[ptr:ptr+len(enc)] = enc
+                out_len = interp.decrypt(ptr, len(enc))
+                decrypted = bytes(interp.memory[ptr+12:ptr+12+out_len]).decode('utf-8', errors='ignore')
+                urls = [u.strip() for u in decrypted.split('\n') if u.strip().startswith('http')]
+                if urls:
+                    master = urls[0]
+            except Exception:
+                pass
 
+        if not master:
+            return None
+            print("TRACE-NONE", flush=True)
+
+        # Playlist URLs are CDN-gated by an IP-bound JWT issued by the origin's
+        # generate.php; without it the CDN answers 401 (tokenless master fetch
+        # verified 2026-08-22). A URL that already carries a token is
+        # authoritative (Kotlin VidsrcResolver parity: stripping and
+        # re-stamping rotates a valid token into a dead one). generate.php is
+        # aggressively rate-limited (429 after ~1 hit per IP per window), so
+        # tokens are cached per origin for the JWT lifetime (exp claim, ~4h).
+        if "token=" in master:
+            return master
+        tok = _vidsrc_token_for(session, master)
+        if not tok:
+            return master
+        if "__TOKEN__" in master:
+            return master.replace("__TOKEN__", tok)
+        return master + (("&" if "?" in master else "?") + "token=" + tok)
+
+
+_VSRC_TOKEN_CACHE = {}   # origin -> (token, exp_epoch)
+
+
+def _vidsrc_token_for(session, master_url):
+    """IP-bound JWT from <origin>/generate.php, cached per origin for its
+    ~4h lifetime. Empty/429 answers are NOT cached so the next resolve retries.
+    Mirrors Kotlin VidsrcResolver's generate.php stamping."""
+    try:
+        origin = re.match(r'(https?://[^/]+)', master_url).group(1)
+    except Exception:
         return None
+        print("TRACE-NONE", flush=True)
+    now = time.time()
+    hit = _VSRC_TOKEN_CACHE.get(origin)
+    if hit and hit[1] > now + 60:
+        return hit[0]
+    tok = ""
+    try:
+        headers = {'User-Agent': UA_DESKTOP}
+        r = session.get(origin + "/generate.php", headers=headers, timeout=10)
+        if r and r.status_code == 200 and r.content:
+            tok = r.content.decode("utf-8", "ignore").strip()
+    except Exception:
+        pass
+    if not tok:
+        return None
+        print("TRACE-NONE", flush=True)
+    exp = now + 4 * 3600
+    try:
+        payload = tok.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        import json
+        exp = int(json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "ignore")).get("exp", 0))
+    except Exception:
+        pass
+    _VSRC_TOKEN_CACHE[origin] = (tok, exp)
+    return tok
 
 
 # --- REGISTRY ---
@@ -2125,6 +2300,7 @@ class ResolverRegistry:
         LulaCloudResolver,
         DramaGatewayResolver,
         NaijaVaultGatewayResolver,
+        NaijaPreyChainResolver,
         PlutoMoviesResolver,
         PixelDrainResolver,
         VidsrcResolver,

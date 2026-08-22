@@ -1,0 +1,3 @@
+{"site": "nepu", "query": "cobra kai", "show": "https://nepu.gd/watch/tv/77169", "s2_count": 10, "s2_ok": true, "s3_engine": "reference", "s3_resolved": null, "s3_ok": false, "s4": null, "result": "RESOLVE-FAILED"}
+{"site": "nepu", "query": "cobra kai", "show": "https://nepu.gd/watch/movie/1559919", "s2_count": 0, "s2_ok": false, "s3_ok": false, "s3_resolved": null, "s4": null, "result": "NO-CANDIDATE"}
+{"site": "nepu", "query": "cobra kai", "show": "https://nepu.gd/watch/tv/259383", "s2_count": 0, "s2_ok": false, "s3_ok": false, "s3_resolved": null, "s4": null, "result": "NO-CANDIDATE"}
