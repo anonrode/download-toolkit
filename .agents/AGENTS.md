@@ -215,3 +215,20 @@ These shipped in the last few sessions and encode traps that will bite a re-edit
 - **Gogoanime / Anitaku direct download quality resolution & worker referers.** Episode pages on `gogoanime.or.at` embed an AJAX action (`fetch_download_links` with `mal_id` and `ep`) which exposes multi-resolution MP4 downloads (360p, 480p, 720p, 1080p). `_resolve_ep` in `anitaku.py` queries this first to honor lower-quality requests (e.g. 480p ~80-120MB) rather than falling straight to MegaPlay's single-variant 1080p stream (~350-580MB). Stream worker domains (`workerforcloud`, `animixplaycors`, `workers.dev`) are registered in `get_referer_for_url` with Referer `https://gogoanime.or.at/` to prevent 403 hotlink blocks on external downloaders.
 
 - **Verification reality on this dev box.** Native Windows Python at `C:\Users\Anon\AppData\Local\Programs\Python\Python312\python` (invoke as `/c/Users/Anon/AppData/Local/Programs/Python/Python312/python` from Git Bash). ffmpeg isn't on PATH in a bare shell, so the ffmpeg gate in `download_with_ytdlp` returns early — you can `py_compile` and unit-test pure helpers (parser, `_human_size`, purge globbing) here, but true end-to-end HLS is only provable on the phone. Say which rung you actually cleared (§7).
+
+---
+
+## 12. Android Native Port & Monolith Alignment Invariant (2026-08)
+
+**CRITICAL MANDATE: ALWAYS LEARN FROM THE MONOLITH (`src/`) FIRST.**
+Whenever modifying, diagnosing, or implementing features in the native Android app (`download-toolkit-serverless`), **NEVER invent new assumptions, selectors, or routing rules.** The Python monolith is the ground truth. Always read the corresponding extractor (`src/extractors/*.py`), resolver (`src/resolvers.py`), or downloader backend (`src/downloader.py`) first.
+
+1. **BitTorrent Execution**:
+   - `magnet:?` URIs MUST NEVER pass into `yt-dlp` (`YoutubeDLRequest`) — `yt-dlp` runs inside Python `urllib` and throws `Unsupported url scheme: "magnet"`.
+   - Magnets MUST be executed directly via native `libaria2c.so` / `ProcessBuilder` with `--enable-dht=true`, `--bt-tracker=...`, `--summary-interval=1`, parsing aria2c stdout for real-time progress.
+2. **Scraping & Episode Extraction**:
+   - Always pass `baseUri` into Jsoup (`Jsoup.parse(html, pageUrl)`); without `baseUri`, `abs:href` returns `""` for relative links and silently drops every episode.
+   - Do not constrain scrapers to narrow CSS containers (like `.entry-content`). Search the full document for canonical locker domains (`downloadwella.com`, `loadedfiles.net`, `wetafiles.com`, `vikingfile.com`, `lulacloud.com`, `nkiserv.com`) matching the monolith's `soup.find_all('a', href=True)` pattern.
+3. **Reactive Search**:
+   - Multi-provider search MUST use `channelFlow` concurrency with instant first-result emission. Never block on sequential `def.await()` loops.
+

@@ -47,9 +47,28 @@ BAILOUT = 8                 # consecutive hard search failures -> stop site
 ITEM_BUDGET_S = 150         # per-show deadline across stages 2-4
 
 RULES_PATH = os.path.join(SERVERLESS, "scraper_rules.json")
+RULES_ENC_PATH = os.path.join(SERVERLESS, "scraper_rules.json.enc")
+# Key/IV must match DynamicRulesManager.kt (serverless app)
+RULES_KEY = bytes.fromhex("8f3a9c21d4e65b0789a2c4f6d1e3b5a7")
+RULES_IV = bytes.fromhex("5b7e9d2f4a6c8e10f3a5c7d9b1e2f4a6")
 
-with open(RULES_PATH, encoding="utf-8") as f:
-    RULES = json.load(f)
+
+def load_rules():
+    """App parity: rules ship encrypted (base64 of AES-128-CBC); decrypt with
+    the monolith's pure-python AES (independent of the encryptor and of the
+    app's javax.crypto — three implementations agreeing = parity proven)."""
+    if os.path.exists(RULES_ENC_PATH):
+        import base64
+        from src._aes import aes_cbc_decrypt
+        b64 = open(RULES_ENC_PATH, encoding="utf-8").read().strip()
+        plain = aes_cbc_decrypt(base64.b64decode(b64), RULES_KEY, RULES_IV)
+        return json.loads(plain)
+    # dev fallback: plaintext file still on disk
+    with open(RULES_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+RULES = load_rules()
 DOMAINS = RULES.get("domains", {})
 SITE_RULES = RULES.get("sites", {})
 MIRRORS = RULES.get("mirrors", {})

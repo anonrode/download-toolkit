@@ -1,0 +1,383 @@
+{
+ "movies": [
+  {
+   "show": "https://plutomovies.com/movie/789741/uncharted-2023",
+   "cand": [
+    "https://dl.plutomovies.com/8d89f10525ce4e32af4be25668597dcd/uncharted-2023-71257-mkv"
+   ],
+   "resolved": "https://7up.kissorgrab.com/dl/8450aba4b88a62726200112.b2336b367ce66d011accf41d0303a9fa:b76b6386b55ba52e005a75c5:d3d315b4",
+   "verify": {
+    "ok": true,
+    "kind": "MKV/EBML",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/534094/uncharted-2022",
+   "cand": [
+    "https://dl.plutomovies.com/09a97ae091d84ed492d8014a44c9abde/waploaded-11237-uncharted-2022-mp4"
+   ],
+   "resolved": "https://7up.kissorgrab.com/dl/17b625b4b88a64330493881.a06ce3af2bd5ffa77599d7220f379545:974ac88f9f55b0fe52692b1e:d3d37614",
+   "verify": {
+    "ok": true,
+    "kind": "MP4",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/290496/video-uncharted-prison-brea",
+   "cand": [],
+   "result": "NO-CANDIDATE-LINK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/674781/the-divergent-series-insurgen",
+   "cand": [
+    "https://dl.plutomovies.com/cc5ddc3b35d24b42966fc2521e022f1e/waploaded-35286-insurgent-2015-mp4"
+   ],
+   "resolved": "https://7up.kissorgrab.com/dl/629483c4b88a6422986504.d8d5244c68386f3d3d3bd9a91ac204da:b592c12129b40288a8edf6e8:d3d413734",
+   "verify": {
+    "ok": true,
+    "kind": "MP4",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/674200/divergent-2014",
+   "cand": [
+    "https://dl.plutomovies.com/3b8f0ed2f0124801a8c73747c5b9ff7b/waploaded-35178-divergent-2014-mp4"
+   ],
+   "resolved": "https://7up.kissorgrab.com/dl/207e77c4b88a6880833317.9856c08437090af5fbc4c2db07a96d26:b663d02d3fef3eebb2527f46:d33786971",
+   "verify": {
+    "ok": false,
+    "kind": "FETCH-ERR Failed to perform, curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 25 seconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.",
+    "ct": "",
+    "bytes": 0
+   },
+   "result": "FAIL"
+  },
+  {
+   "show": "https://plutomovies.com/movie/760286/the-impossible-2012",
+   "cand": [
+    "https://dl.plutomovies.com/959237be52c04390a705b1b81983a8b9/the-impossible-2012-60123-mkv"
+   ],
+   "resolved": "https://ol3.kissorgrab.com/dl/4932f3e4b88a65719616341.a3673e0a5595d358a3452099153a80f0:b699afb239fd18113963ff4b:d3d37723",
+   "verify": {
+    "ok": true,
+    "kind": "MKV/EBML",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/820192/godzilla-1998",
+   "cand": [
+    "https://dl.plutomovies.com/ef3c7c7e75ab4970bc914d591bb60614/godzilla-1998-848-mkv"
+   ],
+   "resolved": "https://ol3.kissorgrab.com/dl/3a7dafe4b88a61220393112.1723980bc8553213fe25403254fa01b7:7530369fa9eae6268b721ce2:d31455f6",
+   "verify": {
+    "ok": true,
+    "kind": "MKV/EBML",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/755821/godzilla-x-kong-the-new-empire",
+   "cand": [
+    "https://dl.plutomovies.com/038f696e3e8640d091c644f7df6c571e/godzilla-x-kong-the-new-empire-2024-58321-mkv"
+   ],
+   "resolved": "https://ol3.kissorgrab.com/dl/90127af4b88a65352859501.1d465a8ac50d301fc03bd0aec691517c:46c64d73d0ee711ff28ebe41:d303a4a7",
+   "verify": {
+    "ok": true,
+    "kind": "MKV/EBML",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/437433/godzilla-vs-kong-2021",
+   "cand": [
+    "https://dl.plutomovies.com/ec117cd75d374a9597cf4e6f4ccd4929/waploaded-2455-godzilla-vs-kong-2021-mp4"
+   ],
+   "resolved": "https://ol3.kissorgrab.com/dl/aa2e9a05b88a6956445861.f46f671e4e60a43a674ba446184ba3bb:53adc4bbdee3447baa53ff9f:d3d315e6a",
+   "verify": {
+    "ok": true,
+    "kind": "MP4",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/753761/godzilla-minus-one-2023",
+   "cand": [
+    "https://dl.plutomovies.com/f4a880f9f9624d5b8a3ed941076c7935/godzilla-minus-one-2023-57454-mkv"
+   ],
+   "resolved": "https://a26n.kissorgrab.com/dl/295bc615b88a6302991074.969a485a410f7f0f3051146ba15ec085:45c89555b04de6ca4f22122a:d3832736",
+   "verify": {
+    "ok": true,
+    "kind": "MKV/EBML",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/723379/shin-godzilla-2016-japanese",
+   "cand": [
+    "https://dl.plutomovies.com/4a67412626014d9182c201b7374997d1/shin-godzilla-2016-45882-mkv"
+   ],
+   "resolved": "https://a26n.kissorgrab.com/dl/c08ddb15b88a6581243822.5e091c45ca14bdf9d8a1027e2c25a4fa:9e56b4051c3c65bb0c73281a:d3438416",
+   "verify": {
+    "ok": false,
+    "kind": "FETCH-ERR Failed to perform, curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 25 seconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.",
+    "ct": "",
+    "bytes": 0
+   },
+   "result": "FAIL"
+  },
+  {
+   "show": "https://plutomovies.com/movie/721473/godzilla-2014",
+   "cand": [
+    "https://dl.plutomovies.com/d7c0e2e5b70e49ac9ca86af5bab1ed16/godzilla-2014-45076-mkv"
+   ],
+   "resolved": "https://a26n.kissorgrab.com/dl/41c17935b88a6442841003.8fe13c3c8ed0f35c70d7d1b84897e9a8:3ecc040217268d79bb244d6a:3363a545",
+   "verify": {
+    "ok": false,
+    "kind": "FETCH-ERR Failed to perform, curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 25 seconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.",
+    "ct": "",
+    "bytes": 0
+   },
+   "result": "FAIL"
+  },
+  {
+   "show": "https://plutomovies.com/movie/291654/godzilla-king-of-the-monsters",
+   "cand": [
+    "https://dl.plutomovies.com/98c0b5be8cfa4da6b134a06eecf587e9/waploaded-godzilla-king-of-the-monsters-2019-mp4"
+   ],
+   "resolved": "https://ol3.kissorgrab.com/dl/78bc3655b88a61812902301.c883c1637c60e8008a33ac44b30fdbb9:09b04791d7c095fe681af63e:3493d437",
+   "verify": {
+    "ok": true,
+    "kind": "MP4",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  },
+  {
+   "show": "https://plutomovies.com/movie/291065/godzilla-the-planet-eater-201",
+   "cand": [
+    "https://dl.plutomovies.com/7fadc953849f42338971b1b11ce063b2/waploaded-godzilla-the-planet-eater-2018-mp4"
+   ],
+   "resolved": "https://ol3.kissorgrab.com/dl/da2aa565b88a64423551931.8b44a18189558e0825a441fb8394a02d:d6de2ab1a94622933ad7e78e:d3955356",
+   "verify": {
+    "ok": false,
+    "kind": "EMPTY",
+    "ct": "text/html; charset=utf-8",
+    "bytes": 0
+   },
+   "result": "FAIL"
+  },
+  {
+   "show": "https://plutomovies.com/movie/837234/implosion-the-titanic-sub-disa",
+   "cand": [
+    "https://dl.plutomovies.com/a17a8e85d08245518f8d3806f174a17a/implosion-the-titanic-sub-disaster-2025-7258-mkv"
+   ],
+   "resolved": "https://ol3.kissorgrab.com/dl/0ba33965b88a69449419241.f370e00177acb1defe9e6b3d7cb28b16:c2ca0f7354a305c993abcfcb:d3548664",
+   "verify": {
+    "ok": true,
+    "kind": "MKV/EBML",
+    "ct": "application/octet-stream",
+    "bytes": 102400
+   },
+   "result": "OK"
+  }
+ ],
+ "series": [
+  {
+   "show": "https://plutomovies.com/series/813275/cobra-kai-s06-e15",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/0786de21408140c59381be27df04f9bb/cobra-kai-s06e15-79764-mkv"
+   ],
+   "ep_links": [
+    "/series/813274/cobra-kai-s06-e14",
+    "https://plutomovies.com/series/324767/all-american-2018-tv-series"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/770004/cobra-kai-season-6",
+   "dl_on_show_page": false,
+   "dl": [],
+   "ep_links": [
+    "/series/813275/cobra-kai-s06-e15",
+    "/series/813275/cobra-kai-s06-e15"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/319785/cobra-kai-2018-tv-series",
+   "dl_on_show_page": false,
+   "dl": [],
+   "ep_links": [
+    "/series/770004/cobra-kai-season-6",
+    "/series/770004/cobra-kai-season-6"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/813274/cobra-kai-s06-e14",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/7bb0222d55c94db99ba7af1d402a015f/cobra-kai-s06e14-79763-mkv"
+   ],
+   "ep_links": [
+    "/series/813273/cobra-kai-s06-e13",
+    "/series/813275/cobra-kai-s06-e15"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/813273/cobra-kai-s06-e13",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/f35c7696acd24dd38ff827c44518e6b7/cobra-kai-s06e13-79762-mkv"
+   ],
+   "ep_links": [
+    "/series/813272/cobra-kai-s06-e12",
+    "/series/813274/cobra-kai-s06-e14"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/813272/cobra-kai-s06-e12",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/a73b1b8dac93480a96c451cd3b1f68c8/cobra-kai-s06e12-79761-mkv"
+   ],
+   "ep_links": [
+    "/series/813271/cobra-kai-s06-e11",
+    "/series/813273/cobra-kai-s06-e13"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/813271/cobra-kai-s06-e11",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/011c5e93100347059c1a6d507412eb1d/cobra-kai-s06e11-79760-mkv"
+   ],
+   "ep_links": [
+    "/series/794973/cobra-kai-s06-e10",
+    "/series/813272/cobra-kai-s06-e12"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/794973/cobra-kai-s06-e10",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/83d33604756a4ce9ba4f0e1117eb730d/cobra-kai-s06e10-72971-mkv"
+   ],
+   "ep_links": [
+    "/series/794972/cobra-kai-s06-e09",
+    "/series/813271/cobra-kai-s06-e11"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/794972/cobra-kai-s06-e09",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/b48fec41d085438797fa22f6ac404dfe/cobra-kai-s06e09-72970-mkv"
+   ],
+   "ep_links": [
+    "/series/794971/cobra-kai-s06-e08",
+    "/series/794973/cobra-kai-s06-e10"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/794971/cobra-kai-s06-e08",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/4c80962e39884d108c81aaafc2082b2c/cobra-kai-s06e08-72969-mkv"
+   ],
+   "ep_links": [
+    "/series/794970/cobra-kai-s06-e07",
+    "/series/794972/cobra-kai-s06-e09"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/794970/cobra-kai-s06-e07",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/d8640c6ce9f3419e8f7a628f76e231d4/cobra-kai-s06e07-72968-mkv"
+   ],
+   "ep_links": [
+    "/series/794969/cobra-kai-s06-e06",
+    "/series/794971/cobra-kai-s06-e08"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/794969/cobra-kai-s06-e06",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/3ee14ea373ca4cd1a9ccaf71412f6f29/cobra-kai-s06e06-72967-mkv"
+   ],
+   "ep_links": [
+    "/series/770011/cobra-kai-s06-e05",
+    "/series/794970/cobra-kai-s06-e07"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/770011/cobra-kai-s06-e05",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/8cf67927f28645078fb95ecd6a8029ef/cobra-kai-s06e05-64081-mkv"
+   ],
+   "ep_links": [
+    "/series/770009/cobra-kai-s06-e04",
+    "/series/794969/cobra-kai-s06-e06"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/770009/cobra-kai-s06-e04",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/c8b6c4ec0b03423cb90952b325ee36e5/cobra-kai-s06e04-64080-mkv"
+   ],
+   "ep_links": [
+    "/series/770008/cobra-kai-s06-e03",
+    "/series/770011/cobra-kai-s06-e05"
+   ],
+   "status": 200
+  },
+  {
+   "show": "https://plutomovies.com/series/443796/vincenzo-s01e20",
+   "dl_on_show_page": true,
+   "dl": [
+    "https://dl.plutomovies.com/bd97fdef2d9e476fb86fd27ddc42fa31/waploaded-4299-vincenzo-s01e20-mp4"
+   ],
+   "ep_links": [
+    "/series/443795/vincenzo-s01e19",
+    "https://plutomovies.com/series/324767/all-american-2018-tv-series"
+   ],
+   "status": 200
+  }
+ ]
+}

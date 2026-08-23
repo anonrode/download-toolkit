@@ -1,0 +1,34 @@
+=== NEPU SERIES ===
+  [ 1] FAIL           Cobra Kai                              api=200 ref_st=401 HLS-VARIANT-404
+  [ 2] FAIL           Vincenzo                               api=200 ref_st=401 HLS-VARIANT-404
+  [ 3] FAIL           Squid Game                             api=200 ref_st=401 HLS-VARIANT-404
+  [ 4] FAIL           Money Heist                            api=200 ref_st=401 HLS-VARIANT-404
+  [ 5] FAIL           Breaking Bad                           api=200 ref_st=401 HLS-VARIANT-404
+  [ 6] FAIL           Stranger Things                        api=200 ref_st=401 HLS-VARIANT-404
+  [the heirs] no tv result
+  [ 7] FAIL           H2O: Just Add Water                    api=200 ref_st=401 HLS-VARIANT-404
+  [ 8] FAIL           Abbott Elementary                      api=200 ref_st=401 HLS-VARIANT-404
+  [the witcher] no tv result
+  [peaky blinders] no tv result
+  [ 9] FAIL           Lupin                                  api=200 ref_st=401 HLS-VARIANT-404
+  [10] FAIL           Narcos                                 api=200 ref_st=401 NO-TOKEN gen=429
+  [11] FAIL           Dark                                   api=200 ref_st=401 HLS-VARIANT-404
+  [mr robot] no tv result
+[nepu/series] DONE ok=0 fail=11 (resolve-null=0)
+=== NEPU MOVIES ===
+  [ 1] FAIL           Uncharted                              api=200 ref_st=401 HLS-VARIANT-404
+  [ 2] FAIL           Divergent                              api=200 ref_st=401 HLS-VARIANT-404
+  [ 3] FAIL           Mission: Impossible - The Final Reckon api=200 ref_st=401 NO-TOKEN gen=429
+  [ 4] FAIL           Godzilla                               api=200 ref_st=401 HLS-VARIANT-404
+  [ 5] FAIL           Titanic                                api=200 ref_st=401 HLS-VARIANT-404
+  [ 6] FAIL           Venom                                  api=200 ref_st=401 HLS-VARIANT-404
+  [ 7] FAIL           Joker                                  api=200 ref_st=401 NO-TOKEN gen=429
+  [ 8] FAIL           Interstellar                           api=200 ref_st=401 HLS-VARIANT-404
+  [ 9] FAIL           Gladiator                              api=200 ref_st=401 HLS-VARIANT-404
+  [10] FAIL           The Batman                             api=200 ref_st=401 HLS-VARIANT-404
+  [11] FAIL           Top Gun: Maverick                      api=200 ref_st=401 HLS-VARIANT-404
+  [12] FAIL           Black Panther                          api=200 ref_st=401 HLS-VARIANT-404
+  [13] FAIL           Fast & Furious Presents: Hobbs & Shaw  api=200 ref_st=401 HLS-VARIANT-404
+  [morbius] no movie result
+  [14] FAIL           Tenet                                  api=200 ref_st=401 HLS-VARIANT-404
+[nepu/movie] DONE ok=0 fail=14 (resolve-null=0)

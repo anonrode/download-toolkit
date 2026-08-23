@@ -1,0 +1,122 @@
+{
+ "dating-in-the-kitchen": {
+  "src": "gateway(link=5915,0)",
+  "direct": "https://drip.waffi.cloud/c/8/Dating-in-the-Kitchen-S01E01-DRAMARAIN-COM.mkv",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ },
+ "stand-or-fall": {
+  "src": "gateway(link=2792,0)",
+  "direct": "https://nkweta1.wetafiles.com:443/d/lwxuyvmatvzjnrnzbhhazr5dhptmj44g3xyzm7chrercciu6sx72gvqs52njsydh7oufxo32/S",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML (SSL-verify-off)",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ },
+ "the-warp-effect": {
+  "src": "gateway(link=3704,0)",
+  "direct": "https://nkweta1.wetafiles.com:443/d/lwx5uveatvzjnrnzbhhbtexyhilnfiua33jxrfwngnw5z3du4zcomde7sqqhgmcasarmkx2d/T",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML (SSL-verify-off)",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ },
+ "fireworks-of-my-heart": {
+  "src": "wetafiles x40",
+  "direct": "https://wetafiles.com/0jhgr1t75dk6/Fireworks.of.My.Heart.E22.(DRAMAKEY.COM).mkv.html",
+  "verify": {
+   "ok": true,
+   "kind": "HTML (SSL-verify-off)",
+   "ct": "text/html; charset=UTF-8",
+   "bytes": 25114
+  }
+ },
+ "the-dark-romance": {
+  "src": "gateway(link=9686,0)",
+  "direct": "https://drip.waffi.cloud/c/36/The%20Dark%20Romance%20S01E01%20(DRAMARAIN.COM).mkv",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ },
+ "a-vow-in-the-dark": {
+  "src": "gateway(link=8657,0)",
+  "direct": "https://drip.waffi.cloud/c/31/A-Vow-in-the-Dark-S01E01-DRAMARAIN-COM.mkv",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ },
+ "the-dark-dice": {
+  "src": "gateway(link=6180,0)",
+  "direct": "https://drip.waffi.cloud/c/11/The-Dark-Dice-S01E01-DRAMARAIN-COM.mkv",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ },
+ "the-sun-in-the-dark": {
+  "src": "gateway(link=6220,0)",
+  "direct": "https://drip.waffi.cloud/c/11/The-Sun-in-the-Dark-S01E01-DRAMARAIN-COM.mkv",
+  "verify": {
+   "ok": false,
+   "kind": "UNKNOWN ct=text/plain;charset=utf-8 head=b'Upstream error 522'",
+   "ct": "text/plain;charset=utf-8",
+   "bytes": 18
+  }
+ },
+ "dark-night-and-dawn": {
+  "src": "gateway(link=1751,0)",
+  "direct": "https://nkweta1.wetafiles.com:443/d/lwxxizuatvzjnrnzblhafdxbgzgr732nvkgw3tcj4uqfab7wqepro733dnmtc3qphmnjpvok/D",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML (SSL-verify-off)",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ },
+ "embrace-in-the-dark-night": {
+  "src": "gateway(link=1843,0)",
+  "direct": "https://nkweta2.wetafiles.com:443/d/lsxway4atvzjnrnzbphffrhyevzmr3jho5lmw5tt72lmsk57czxpvwgwojld33qiknltbfpj/E",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML (SSL-verify-off)",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ },
+ "bright-eyes-in-the-dark": {
+  "src": "gateway(link=1647,0)",
+  "direct": "https://nkweta2.wetafiles.com:443/d/lsxzy6uatvzjnrnzbdhfjhxth7dis7fuuaejtu7pvsjf4tamik2t2z5z4rjn4ujflypmwkwc/B",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML (SSL-verify-off)",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ },
+ "ren-yu": {
+  "src": "gateway(link=12006,0)",
+  "direct": "https://japa.waffi.cloud/c/5/Ren-Yu-S01E01-DRAMARAIN-COM.mkv",
+  "verify": {
+   "ok": true,
+   "kind": "MKV/EBML",
+   "ct": "application/octet-stream",
+   "bytes": 102400
+  }
+ }
+}

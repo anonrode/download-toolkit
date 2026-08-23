@@ -1,0 +1,66 @@
+=== ASIANC SERIES ===
+  [cobra kai] no candidate
+  [ 1] FAIL             vidbasic               vincenzo                                 HLS-HTML-NOT-MEDIA
+  [ 2] FAIL             vidbasic               the-squid-games                          HLS-HTML-NOT-MEDIA
+  [ 3] OK               vidbasic               money-heist-korea-joint-economic-area-pa HLS-MPEG-TS
+      [!] Streamwish: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://hglink.to/e/ria01miytddm -- trying next candidate...
+      [!] Vidhide: name 'urlunparse' is not defined
+      [!] Vidbasic mirror failed/dead: https://minochinos.com/v/g87gohenqc8a -- trying next candidate...
+      [!] Doodstream: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://dood.wf/e/vd2gh3icqtpn -- trying next candidate...
+      [!] Vidbasic mirror failed/dead: https://mixdrop.ps/e/pj88p6w6trlwdo -- trying next candidate...
+  [ 4] RESOLVE-FAILED   vidbasic               breaking-bad-fortune-teller-2016         
+  [stranger things] no candidate
+      [!] Streamwish: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://hglink.to/e/bb8f2py8hp90 -- trying next candidate...
+      [!] Vidhide: name 'urlunparse' is not defined
+      [!] Vidbasic mirror failed/dead: https://minochinos.com/v/ha4yvnrjc809 -- trying next candidate...
+      [!] Doodstream: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://dood.wf/e/dslpc1deaqkt -- trying next candidate...
+  [ 5] RESOLVE-FAILED   vidbasic               the-heirs                                
+  [h2o just add water] no candidate
+  [abbott elementary] no candidate
+  [the witcher] no candidate
+  [peaky blinders] no candidate
+  [ 6] OK               vidbasic               lupins-daughter-2021                     HLS-MPEG-TS
+  [ 7] FAIL             vidbasic               suriname                                 HLS-MASTER-404
+  [dark] no candidate
+  [mr robot] no candidate
+[asianc/series] DONE ok=2 fail=5 no-cand=0
+=== ASIANC MOVIES ===
+  [ 1] OK               vidbasic               train-to-busan-2-peninsula               HLS-MPEG-TS
+  [ 2] FAIL             vidbasic               godzilla-minus-one                       HLS-HTML-NOT-MEDIA
+  [ 3] FAIL             vidbasic               parasite-in-love-2021                    HLS-MASTER-404
+      [!] Streamwish: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://hglink.to/e/r6glqwy0jx34 -- trying next candidate...
+      [!] Vidhide: name 'urlunparse' is not defined
+      [!] Vidbasic mirror failed/dead: https://minochinos.com/v/qrmsbael7wq7 -- trying next candidate...
+      [!] Doodstream: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://dood.wf/e/70kmkzysylls -- trying next candidate...
+  [ 4] RESOLVE-FAILED   vidbasic               nanji-no-na                              
+      [!] Streamwish: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://hglink.to/e/4133g659f3j8 -- trying next candidate...
+      [!] Vidhide: name 'urlunparse' is not defined
+      [!] Vidbasic mirror failed/dead: https://minochinos.com/v/t45b96qzdcgk -- trying next candidate...
+      [!] Doodstream: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://dood.wf/e/8v7brtshliz2 -- trying next candidate...
+  [ 5] RESOLVE-FAILED   vidbasic               the-five-deadly-venoms                   
+      [!] Streamwish: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://hglink.to/e/d6h519wvqx2u -- trying next candidate...
+      [!] Vidhide: name 'urlunparse' is not defined
+      [!] Vidbasic mirror failed/dead: https://minochinos.com/v/tnbbbd7m7sty -- trying next candidate...
+      [!] Doodstream: file expired/deleted
+      [!] Vidbasic mirror failed/dead: https://dood.wf/e/w3ll24fuvo8y -- trying next candidate...
+      [!] Vidbasic mirror failed/dead: https://mixdrop.ps/e/dkxon9epcvdrj6 -- trying next candidate...
+  [ 6] RESOLVE-FAILED   vidbasic               youth-entrepreneurship-manual            
+  [ 7] FAIL             vidbasic               oldboy                                   HLS-HTML-NOT-MEDIA
+  [ 8] NO-EMBED         none                   the-handmaiden                           
+  [ 9] FAIL             vidbasic               memories-of-murder                       HLS-HTML-NOT-MEDIA
+  [burn 2018] no candidate
+  [10] FAIL             vidbasic               along-with-the-gods-the-last-49-days     HLS-MASTER-Failed to perform, curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 20 seconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+  [11] FAIL             vidbasic               tazza-one-eyed-jack                      HLS-MASTER-404
+  [the wreck 2021] no candidate
+  [12] OK               vidbasic               midnight-runners                         HLS-MPEG-TS
+  [forgotten 2017] no candidate
+[asianc/movie] DONE ok=2 fail=10 no-cand=0

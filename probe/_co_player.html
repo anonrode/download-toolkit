@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="referrer" content="origin">
+<title>Player</title>
+<link rel="stylesheet" href="/embed/iframe_player/assets/player.css?v=1786492668">
+</head>
+<body>
+<script>
+document.write("<script type='text/javascript' src='/embed/f59d610a61063c7ef3ccdc1fd40d2ae6.js?_=1787345940'><\/script>");
+</script>
+<div id="player" class="jw">
+    <video id="video" playsinline webkit-playsinline x-webkit-airplay="allow" crossorigin="anonymous"></video>
+
+    <div id="poster" class="jw-poster"></div>
+    <div class="jw-gradient"></div>
+
+    <img id="spinner" class="jw-spinner" src="/embed/iframe_player/rings.svg?v=1786492668" alt="" aria-hidden="true">
+
+    <div id="subs" class="jw-subs"><span id="subText" class="jw-sub-text"></span></div>
+
+    <!-- centre overlay: rewind · big-play · forward -->
+    <div class="jw-center">
+        <button id="rew" class="jw-center-seek" aria-label="Rewind 10s">
+            <svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>
+        </button>
+        <button id="bigPlay" class="jw-bigplay" aria-label="Play">
+            <svg id="iBigPlay" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            <svg id="iBigPause" viewBox="0 0 24 24" class="hidden"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+        </button>
+        <button id="fwd" class="jw-center-seek" aria-label="Forward 10s">
+            <svg viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/></svg>
+        </button>
+    </div>
+
+    <div id="error" class="jw-error" hidden><span id="errorText">This media is unavailable.</span></div>
+
+    <div id="title" class="jw-title"></div>
+
+    <div id="controls" class="jw-controls">
+        <div id="seek" class="jw-seek">
+            <div class="jw-rail">
+                <div id="buffered" class="jw-buffered"></div>
+                <div id="played" class="jw-played"></div>
+                <div id="knob" class="jw-knob"></div>
+            </div>
+            <div id="thumb" class="jw-thumb" hidden>
+                <div class="jw-thumb-box">
+                    <div id="thumbImg" class="jw-thumb-img"></div>
+                    <div id="thumbSpin" class="jw-thumb-spin"></div>
+                </div>
+                <div id="thumbTime" class="jw-thumb-time">0:00</div>
+            </div>
+            <div id="tip" class="jw-tip" hidden>0:00</div>
+        </div>
+
+        <div class="jw-bar">
+            <button id="play" class="jw-btn" aria-label="Play">
+                <svg id="iPlay" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                <svg id="iPause" viewBox="0 0 24 24" class="hidden"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+            </button>
+
+            <div class="jw-vol">
+                <button id="mute" class="jw-btn" aria-label="Mute">
+                    <svg id="iVol" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+                    <svg id="iMute" viewBox="0 0 24 24" class="hidden"><path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0021 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 003.69-1.81L19.73 21 21 19.73 4.27 3zM12 4L9.91 6.09 12 8.18z"/></svg>
+                </button>
+                <input id="volume" class="jw-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+            </div>
+
+            <div class="jw-time"><span id="cur">0:00</span> <span class="jw-time-sep">/</span> <span id="dur">0:00</span></div>
+
+            <div class="jw-spacer"></div>
+
+            <button id="ccBtn" class="jw-btn" aria-label="Subtitles">
+                <svg viewBox="0 0 24 24"><path d="M19 4H5a2 2 0 00-2 2v12a2 2 0 002 2h14a2 2 0 002-2V6a2 2 0 00-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-4a1 1 0 011-1h3a1 1 0 011 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1a1 1 0 01-1 1h-3a1 1 0 01-1-1v-4a1 1 0 011-1h3a1 1 0 011 1v1z"/></svg>
+            </button>
+            <button id="setBtn" class="jw-btn" aria-label="Settings">
+                <svg viewBox="0 0 24 24"><path d="M19.14 12.94a7.5 7.5 0 000-1.88l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.6-.22l-2.39.96a7 7 0 00-1.62-.94l-.36-2.54a.5.5 0 00-.5-.42h-3.84a.5.5 0 00-.5.42l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.5.5 0 00-.6.22L2.74 8.84a.5.5 0 00.12.64l2.03 1.58a7.5 7.5 0 000 1.88l-2.03 1.58a.5.5 0 00-.12.64l1.92 3.32c.14.24.43.34.7.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.06.24.27.42.5.42h3.84c.24 0 .44-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.27.12.56.02.7-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.01-1.58zM12 15.5A3.5 3.5 0 1112 8.5a3.5 3.5 0 010 7z"/></svg>
+            </button>
+            <button id="airBtn" class="jw-btn" aria-label="AirPlay" style="display:none">
+                <svg viewBox="0 0 24 24"><path d="M6 22h12l-6-6-6 6zM21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h4v-2H3V5h18v12h-4v2h4c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg>
+            </button>
+            <button id="castBtn" class="jw-btn" aria-label="Cast" style="display:none">
+                <svg viewBox="0 0 24 24"><path d="M1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5h2c0-3.87-3.13-7-7-7zm18-7H5c-1.1 0-2 .9-2 2v3h2v-3h14v10h-5v2h5c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2zM1 10v2c4.97 0 9 4.03 9 9h2c0-6.08-4.92-11-11-11z"/></svg>
+            </button>
+            <button id="fsBtn" class="jw-btn" aria-label="Fullscreen">
+                <svg id="iFs" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+                <svg id="iFsExit" viewBox="0 0 24 24" class="hidden"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
+            </button>
+        </div>
+    </div>
+    <!-- Auto-next episode banner (TV shows only) -->
+    <div id="upnext" class="jw-upnext" style="display:none">
+        <div class="jw-upnext-inner">
+            <span class="jw-upnext-label">Up Next</span>
+            <span class="jw-upnext-title" id="upnextTitle"></span>
+            <div class="jw-upnext-actions">
+                <button id="upnextPlay" class="jw-upnext-btn jw-upnext-btn--primary">Play Now</button>
+                <button id="upnextCancel" class="jw-upnext-btn">Cancel</button>
+            </div>
+            <div class="jw-upnext-bar"><div class="jw-upnext-progress" id="upnextProgress"></div></div>
+        </div>
+    </div>
+</div>
+
+<script>window.CONFIG = {"mediaType":"tv","idType":"tmdb","mediaId":"108978","imdb":"","tmdb":"108978","autoplay":true,"landing":false,"autoNext":false,"tv":true,"streamBase":"https://data.vidsrcme.ru/api.php?type=tv\u0026tmdb=108978","metaApi":"https://data.vidsrcme.ru/api.php?type=tv\u0026tmdb=108978\u0026season=1\u0026episode=1","season":1,"episode":1,"cacheBase":"/embed/iframe_player/cache.php"};</script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<script src="/embed/iframe_player/assets/vsdec.js?v=1786492668"></script>
+<script src="/embed/iframe_player/assets/player.js?v=1786492668"></script>
+<script src="/embed/iframe_player/assets/subtitles.js?v=1786492668"></script>
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1" async></script>
+<!-- Anti-tamper: disable browser devtools — https://github.com/theajack/disable-devtool (vendored, toggle in config.php) -->
+<script src="/embed/iframe_player/assets/disable-devtool.js?v=1786492668"></script>
+<script>
+(function () {
+    if (!window.DisableDevtool) return;
+    function kill() {
+        try { var v = document.querySelector('video'); if (v) { v.pause(); v.removeAttribute('src'); v.load(); } } catch (e) {}
+        try { if (window.parent && window.parent !== window) window.parent.postMessage({ type: 'VS_DEVTOOLS' }, '*'); } catch (e) {}
+        try { location.replace('about:blank'); } catch (e) { try { document.documentElement.innerHTML = ''; } catch (x) {} }
+    }
+    DisableDevtool({ disableMenu: true, clearLog: true, disableIframeParents: true, ondevtoolopen: kill });
+    // Kill this frame too if a nested/parent frame reports devtools (bubbles via the relay).
+    window.addEventListener('message', function (e) { if (e && e.data && e.data.type === 'VS_DEVTOOLS') kill(); });
+})();
+</script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"bedb60c0c0fa4f2c9728e9f822f872b1","r":1}' crossorigin="anonymous"></script>
+</body>
+</html>
