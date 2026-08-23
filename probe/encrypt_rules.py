@@ -43,7 +43,10 @@ RULES_KEY = bytes.fromhex("8f3a9c21d4e65b0789a2c4f6d1e3b5a7")   # 16 bytes (unch
 
 SERVERLESS = r"C:\Users\Anon\download-toolkit-serverless"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-KEY_PATH = os.path.join(REPO_ROOT, "ota_keys", "ota_signing_private_key.pem")
+# Keypair lives in the shared maintenance folder OUTSIDE both repos
+# (mirror of scripts/encrypt_rules.py KEY_PATH — keep in sync).
+KEY_PATH = os.environ.get("OTA_SIGNING_KEY_FILE") or os.path.join(
+    os.path.expanduser("~"), "anon-serverless-app-maintenance-build", "ota_signing_private_key.pem")
 
 # --- strict schema guards (a bad payload must be rejected BEFORE commit) ---
 MAX_PLAINTEXT_BYTES = 512 * 1024
