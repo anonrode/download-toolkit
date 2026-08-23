@@ -9,3 +9,4 @@ __pycache__/
 # locally edited/deleted launcher never counts as a change that blocks update.
 run.sh
 Anonrode.bat
+ota_keys/
