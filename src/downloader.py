@@ -2534,7 +2534,35 @@ def download_with_aria2c(url, folder, filename, summary,
             if code == 0 or file_is_complete:
                 if os.path.exists(filepath):
                     size = os.path.getsize(filepath)
+                    # aria2c trusts the server on content-type, so a CDN that
+                    # answers an expired token with a big HTML error page
+                    # (200, no text/html header needed) lands on disk as
+                    # <name>.mp4 and exit 0 reads as success. Sniff the head
+                    # before calling it done -- the requests path already
+                    # rejects text/html, so this only restores parity.
+                    try:
+                        with open(filepath, 'rb') as hf:
+                            _head = hf.read(512)
+                    except OSError:
+                        _head = b''
+                    _h = _head.lstrip(b'\xef\xbb\xbf \t\r\n')[:16]
+                    if _h[:9].lower() == b'<!doctype' or _h[:5].lower() == b'<html':
+                        progress.fail()
+                        ui_emit('download_failed',
+                                debug=f'HTML error page downloaded as media ({size/1024:.0f}KB)')
+                        try:
+                            os.remove(filepath)
+                        except OSError:
+                            pass
+                        if attempt < retries - 1 and not _is_stopped(stop_flag):
+                            url = _try_reresolve(source_url, url, attempt)
+                            time.sleep(3)
+                            continue
+                        _cleanup_session_file(session_file)
+                        summary.add_failed(filename)
+                        return False
                     if size < 100 * 1024:
+                        progress.fail()
                         progress.fail()
                         ui_emit('download_failed', debug=f'file too small ({size/1024:.0f}KB)')
                         try:
@@ -4098,7 +4126,21 @@ def download_file(url, folder, filename, summary,
                     ui_emit('failed', reason='Ghost HTML download (host dead)')
                     summary.add_failed(filename)
                 else:
-                    DownloadReceipt.mark_complete(ep_key, p, actual_size)
+                    # Second net for the aria2c path: a large HTML error page
+                    # passes the 100KB ghost check, so sniff the head before
+                    # the receipt ever says complete.
+                    try:
+                        with open(p, 'rb') as hf:
+                            _h = hf.read(512).lstrip(b'\xef\xbb\xbf \t\r\n')[:16]
+                    except OSError:
+                        _h = b''
+                    if _h[:9].lower() == b'<!doctype' or _h[:5].lower() == b'<html':
+                        os.remove(p)
+                        result = False
+                        ui_emit('failed', reason='HTML error page saved as media (host dead)')
+                        summary.add_failed(filename)
+                    else:
+                        DownloadReceipt.mark_complete(ep_key, p, actual_size)
                 break
         mark_episode_done(series_url, series_name or folder, filename)
     elif not result and series_url:
