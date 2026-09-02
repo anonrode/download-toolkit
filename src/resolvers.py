@@ -2,6 +2,7 @@ import re
 import sys
 import time
 import base64
+import socket
 import struct
 import tempfile
 import subprocess
@@ -338,6 +339,13 @@ class LoadedfilesResolver(BaseResolver):
     _HOST = re.compile(r'loadedfiles\.[a-z0-9-]+', re.I)
     _FALLBACK_TLDS = ('st', 'net', 'org', 'to', 'com')
     _LAST_WORKING_HOST = None
+    # Circuit breaker: when the .net origin hangs (TCP+TLS to the Cloudflare
+    # edge succeed but the origin never sends a byte -- the Sept 2026 Death
+    # Note outage), every TLD in the walk eventually 301s back to the same
+    # dead origin, so each link pays 5 full timeouts. Skip a host that just
+    # timed out for a few minutes instead of re-hanging per episode.
+    _DEAD_UNTIL = {}
+    _DEAD_COOLDOWN = 300.0
 
     @classmethod
     def _rewrite(cls, text: str, host: str) -> str:
@@ -377,12 +385,25 @@ class LoadedfilesResolver(BaseResolver):
             r1 = None
             live_host = None
             for host in hosts:
+                # Circuit breaker: skip a host that just hung (see _DEAD_UNTIL).
+                dead_until = LoadedfilesResolver._DEAD_UNTIL.get(host, 0)
+                if time.time() < dead_until:
+                    continue
                 candidate = LoadedfilesResolver._rewrite(url, host)
+                t0 = time.time()
                 r1 = safe_get(session, candidate, referer='https://my9jarocks.bz/', timeout=10, retries=1)
                 if r1:
                     live_host = host
                     LoadedfilesResolver._LAST_WORKING_HOST = host
+                    LoadedfilesResolver._DEAD_UNTIL.pop(host, None)
                     break
+                if time.time() - t0 >= 9.0:
+                    # A full near-timeout on a 10s GET means the edge answered
+                    # (or swallowed the connect) but never served the page --
+                    # park it so the remaining episodes skip this host fast.
+                    LoadedfilesResolver._DEAD_UNTIL[host] = time.time() + LoadedfilesResolver._DEAD_COOLDOWN
+                    safe_print(f"      [!] {host}: origin not responding -- "
+                               f"pausing this host for {int(LoadedfilesResolver._DEAD_COOLDOWN/60)} min")
             if not r1:
                 return None
             m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'", r1.text, re.I)
@@ -2278,6 +2299,11 @@ def _vidsrc_token_for(session, master_url):
 # --- REGISTRY ---
 
 class ResolverRegistry:
+    # host -> (host, ip_or_None, probed_at); shared across resolver passes so
+    # one DNS lookup per host serves every episode in a batch. See the park
+    # gate at the bottom of [resolve].
+    _park_cache = {}
+
     RESOLVERS = [
         StreamwishResolver,
         VidhideResolver,
@@ -2400,5 +2426,42 @@ class ResolverRegistry:
                 # Probe failure is not proof of death -- fall through and let
                 # the downloader (and its Ghost-file check) have the final say.
                 pass
+
+        # DNS-park gate. A host whose public A record is a known resolver IP
+        # (8.8.8.8 / 1.0.0.1 / 9.9.9.9) is domain-parked: it 302s every
+        # request to the DNS provider's homepage. Feeding such a URL to
+        # aria2c downloads a 216-byte redirect HTML body as "<movie>.mkv" and
+        # then burns every retry cycle on HTTP 500s (kissorgrab.com during
+        # the Insurgent attempt did exactly this -- its record flipped
+        # 300s-TTL between a real CDN server and 8.8.8.8). Failing fast here
+        # lets the caller's re-resolve/retry window catch the TTL flip and
+        # keeps the error honest. Results are cached ~5 min (matching the
+        # TTLs involved) so a 20-episode batch does one lookup per host, and
+        # a host that unparks itself is re-probed when the cache expires.
+        _PARKED_IPS = {'8.8.8.8', '8.8.4.4', '1.0.0.1', '1.1.1.1', '9.9.9.9'}
+        _PARK_CACHE_TTL = 300.0
+        try:
+            url_host = urlparse(url).hostname or ''
+        except Exception:
+            url_host = ''
+        if url_host and url_host != cls._park_cache.get(url_host, (None,))[0]:
+            try:
+                cls._park_cache[url_host] = (url_host, socket.gethostbyname(url_host))
+            except socket.gaierror:
+                cls._park_cache[url_host] = (url_host, None)
+            except Exception:
+                pass  # probe failure must never break a working URL
+            cls._park_cache[url_host] = (url_host, cls._park_cache[url_host][1], time.time())
+        entry = cls._park_cache.get(url_host)
+        if entry and len(entry) == 3 and time.time() - entry[2] < _PARK_CACHE_TTL:
+            ip = entry[1]
+            if ip is None:
+                safe_print(f"      [!] {url_host}: hostname does not resolve "
+                           "(NXDOMAIN) -- link is dead upstream")
+                return None
+            if ip in _PARKED_IPS:
+                safe_print(f"      [!] {url_host}: domain parked (A record is "
+                           "a public DNS resolver IP) -- link is dead upstream")
+                return None
 
         return url
