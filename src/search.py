@@ -1054,8 +1054,6 @@ async def _arun(query, site_filter, fast, hint, timeout):
         # DramaKey.com + .cc + DramaRain: slug probe only (no server search)
         if _match('dramakey') or _match('dramarain'):
             dk_pat = list(DRAMAKEY_WAVE1) + ([] if fast else list(DRAMAKEY_WAVE2))
-            tasks.append(('slug', 'DramaKey', _aprobe_slug(session, 'https://dramakey.com', dk_pat,
-                          base, season_slug, year, 'DramaKey', cancel_event)))
             tasks.append(('slug', 'DramaKey.cc', _aprobe_slug(session, 'https://dramakey.cc',
                           DRAMAKEY_CC_PATTERNS, base, season_slug, year,
                           'DramaKey.cc', cancel_event, verify_title=True)))
@@ -1318,15 +1316,6 @@ def _run_search_legacy(query, site_filter=None, fast=False, hint=None, timeout=4
             daemon=True
         )
         threads.append(t1)
-    if site_filter not in ('nkiri', 'plutomovies'):
-        t2 = threading.Thread(
-            target=_search_site,
-            args=('https://dramakey.com', DRAMAKEY_WAVE1, DRAMAKEY_WAVE2,
-                  base, season_slug, year, 'DramaKey',
-                  results, lock, fast, cancel_event, hint),
-            daemon=True
-        )
-        threads.append(t2)
     if site_filter not in ('nkiri', 'dramakey'):
         t3 = threading.Thread(
             target=_search_plutomovies,
