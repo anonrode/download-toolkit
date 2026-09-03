@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from .base import *
 
 def extract_nkiri(url, session, ctx=None):
@@ -107,7 +109,6 @@ def extract_nkiri(url, session, ctx=None):
                         safe_print(f"  [X] Could not extract link: {ep_name}")
                         record_episode_failure(url, name, safe_filename(f"{ep_name}.mp4"), summary, ep_name)
                 else:
-                    from concurrent.futures import ThreadPoolExecutor, as_completed
                     safe_print(f"\n  [*] Resolving {len(to_resolve)} link(s)...")
                     resolved = {}
                     def _resolve_with_own_session(ep_url):
