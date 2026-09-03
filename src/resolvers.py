@@ -435,11 +435,19 @@ class WildshareResolver(BaseResolver):
 
     @staticmethod
     def resolve(url: str, session) -> str:
+        # The 302 Location from the token handshake IS the final direct file
+        # (same path, ?download_token= query). Resolve() gets called again on
+        # it because the registry fast-path excludes wildshare .mkv URLs --
+        # GETting it here would stream the whole episode into the 20s timeout
+        # (measured: retries burned 7-20MB each and failed every episode).
+        if 'download_token=' in url:
+            return url
         try:
             try:
                 from curl_cffi import requests as cf_requests
                 s = cf_requests.Session(impersonate='chrome120')
             except ImportError:
+                safe_print("      [!] Wildshare: curl_cffi unavailable — plain requests (TLS fingerprint may be blocked)")
                 s = requests.Session()
             try:
                 s.headers['User-Agent'] = UA_DESKTOP

@@ -541,6 +541,15 @@ def _relevance_score(query, title):
     overlap = len(q & t) / len(q)
     if query.strip().lower() in (title or '').lower():
         overlap = min(1.0, overlap + 0.5)
+    # A title whose name tokens are ALL inside the query is a legitimate
+    # subset match ("The Avengers" for "Marvel's The Avengers") — the old
+    # bare fraction (0.5) fell under the 0.6 keep-bar and dropped true hits
+    # whenever the query carried a studio/possessive/qualifier word. Year
+    # digits in the title are ignored for the subset test (they come from
+    # the site, not the query).
+    t_name = {x for x in t if not x.isdigit()}
+    if t_name and t_name <= q:
+        overlap = max(overlap, min(1.0, 0.5 + 0.5 * len(t_name) / len(q)))
     return overlap
 
 def _filter_by_relevance(query, scored_results):
@@ -775,12 +784,23 @@ async def _asearch_asianc(session, query):
     out = []
     try:
         data = json.loads(text)
+        q_toks = _rel_tokens(query)
         for item in (data if isinstance(data, list) else []):
             if not isinstance(item, dict):
                 continue
             link = item.get('url', '')
             title = item.get('name') or item.get('value') or ''
             if not link:
+                continue
+            # AsianC sometimes pairs a display name with an unrelated slug
+            # ("Alchemy of Souls" -> /drama-detail/salvation-interpreter),
+            # which the downloader then extracts under the wrong title. The
+            # slug is what actually gets fetched, so require it to share at
+            # least one meaning-bearing token with the query; drop the row
+            # otherwise (the true page, when it exists, is under a slug that
+            # matches and survives this check).
+            slug_toks = _rel_tokens(link.rsplit('/', 1)[-1].replace('-', ' '))
+            if not (slug_toks & q_toks):
                 continue
             if link.startswith('/'):
                 link = 'https://asianc.id' + link
@@ -970,6 +990,15 @@ async def _asearch_nepu(session, query):
             out.append(('Nepu', full_url, display_title))
     except Exception:
         pass
+    # Nepu proxies TMDB fuzzy search: ~20 rows that share ANY token with the
+    # query ("Shake It Up" for "It"). The relevance filter already drops the
+    # zero-overlap tail, but ~10 fuzzy rows still crowd the merged list, so
+    # cap the per-query contribution (exact-title rows first — the API's
+    # order is fuzzy, not relevance).
+    if len(out) > 6:
+        q_low = _rel_tokens(query)
+        out.sort(key=lambda r: 0 if _rel_tokens(r[2]) & q_low == q_low else 1)
+        out = out[:6]
     return out
 
 
@@ -1204,9 +1233,13 @@ async def _arun(query, site_filter, fast, hint, timeout):
     for site, _ in slug_results:
         safe_print("  " + render_message('search_found_on', site=site))
 
-    # Merge: exact slug hits first, then Anitaku, then relevance-filtered search, then Pluto.
-    ranked_search = _filter_by_relevance(query, search_scored)
-    merged = slug_results + anitaku_results + ranked_search + pluto_results
+    # Merge: exact slug hits first, then relevance-filtered search (which
+    # includes the anime AJAX rows — they previously bypassed the filter and
+    # one fuzzy Gogo row outranked true hits; see _filter_by_relevance), then
+    # Pluto. Slug hits and Pluto keep their exemption: their match is
+    # server-side exact, unlike the anime literal-substring matcher.
+    ranked_search = _filter_by_relevance(query, search_scored + anitaku_results)
+    merged = slug_results + ranked_search + pluto_results
     # Dedupe on a normalized key (drop query string + trailing slash) so an RSS
     # result carrying ?utm_source= doesn't duplicate the clean slug-probe hit.
     seen, final = set(), []

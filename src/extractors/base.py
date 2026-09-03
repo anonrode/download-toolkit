@@ -87,6 +87,22 @@ SOCIAL_DOMAINS = [
 ]
 
 # ─── HELPERS ──────────────────────────────────────────────────
+def _looks_like_redirect_stub(text):
+    """True when the page is (nearly) nothing but a redirect script.
+
+    Genuine JS-bounce stubs are tiny: a <script>window.location.href=...</script>
+    plus maybe a fallback link. Real content pages (Nepu embeds keyboard
+    shortcut handlers like `window.location.href='/watchlist'` for letter-key
+    navigation) match the same regex, and blindly following those turned a
+    200 OK Insurgent page into a /watchlist loop that killed the fetch.
+    Size heuristic: a stub has no substantial markup beyond the script."""
+    if len(text) > 2048:
+        return False
+    body = re.sub(r'(?is)<script\b.*?</script>', '', text)
+    body = re.sub(r'(?is)<style\b.*?</style>', '', body)
+    body = re.sub(r'(?s)<!--.*?-->', '', body)
+    return len(body.strip()) < 256
+
 def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
     if _seen is None:
         _seen = set()
@@ -114,7 +130,7 @@ def safe_get(session, url, timeout=20, referer=None, retries=3, _seen=None):
             # failure: a find_direct_video() fallback will happily return
             # whatever unrelated video is on the homepage.
             m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', r.text)
-            if m:
+            if m and _looks_like_redirect_stub(r.text):
                 redirect_url = m.group(1)
                 if not redirect_url.startswith('http'):
                     redirect_url = urljoin(url, redirect_url)
