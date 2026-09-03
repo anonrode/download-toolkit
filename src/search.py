@@ -265,7 +265,7 @@ def _parse_query(raw):
     season_slug = ('s%02d' % season_n) if season_n else 's01'
     # Extract year
     year_m = re.search(r'(20\d{2})', q)
-    year   = year_m.group(1) if year_m else str(datetime.date.today().year)
+    year   = year_m.group(1) if year_m else None
     # Build base slug
     slug = re.sub(r'\s+', '-', q)
     slug = re.sub(r'[^a-z0-9-]', '', slug)
@@ -334,10 +334,15 @@ def _verify_403(url, base):
 
 def _probe_patterns(base_url, patterns, base, season_slug, year, cancel_event=None):
     domain = base_url.rstrip('/')
+    # year is None when the query carries none: {year} slug patterns are
+    # unguessable then (the old code substituted the CURRENT year, probing
+    # e.g. sholay-2026- for a 1975 film — dead weight that could never hit).
+    if not year:
+        patterns = [p for p in patterns if '{year}' not in p]
     urls   = [
         domain + '/' + p.replace('{base}', base)
                         .replace('{season}', season_slug)
-                        .replace('{year}', year) + '/'
+                        .replace('{year}', year or '') + '/'
         for p in patterns
     ]
 
@@ -680,7 +685,10 @@ async def _aprobe_slug(session, base_url, patterns, base, season_slug, year,
     domain = base_url.rstrip('/')
     urls = []
     for p in patterns:
-        path = p.replace('{base}', base).replace('{season}', season_slug).replace('{year}', year)
+        # See _probe_patterns: a missing year makes {year} patterns unguessable.
+        if not year and '{year}' in p:
+            continue
+        path = p.replace('{base}', base).replace('{season}', season_slug).replace('{year}', year or '')
         urls.append(domain + '/' + path.strip('/') + '/')
 
     tasks = [asyncio.ensure_future(_ahead(session, u)) for u in urls]
@@ -1256,7 +1264,7 @@ def _run_search(query, site_filter=None, fast=False, hint=None, timeout=45):
     if not base:
         safe_print(render_message('search_empty_query'))
         return []
-    cache_key = f"{site_filter or 'all'}:{base}:{season_slug}:{year}:{'fast' if fast else 'full'}:{hint or ''}"
+    cache_key = f"{site_filter or 'all'}:{base}:{season_slug}:{year or '-'}:{'fast' if fast else 'full'}:{hint or ''}"
 
     use_cache = _search_cache_enabled()
     if use_cache:
