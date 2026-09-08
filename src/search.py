@@ -676,6 +676,44 @@ async def _averify_title(session, url, base):
     title = m.group(1).lower()
     return _relevance_score(base.replace('-', ' '), title) >= 0.5
 
+# ─── HOST PARKING (dead-origin breaker for slug probes) ───────
+# dramakey.com flaps: NXDOMAIN for days, then back with no notice. Probing a
+# dead origin costs the full HEAD timeout on EVERY search (measured ~13s
+# median latency tax across a 201-query sweep). Park the host after 3
+# consecutive dead probes for 30 minutes; the first search after the park
+# expires re-probes and revives it automatically.
+_HOST_PARK = {}          # host -> {'fails': int, 'until': epoch}
+_HOST_PARK_FAILS = 3
+_HOST_PARK_TTL = 30 * 60
+
+def _host_unparked(host):
+    now = time.time()
+    rec = _HOST_PARK.get(host)
+    if not rec:
+        return True
+    until = rec.get('until', 0)
+    if not until:
+        # Streak still accumulating (until == 0): not parked, but keep the
+        # record — treating 0 as "expired" here wiped the streak on every
+        # search, so the park could never trip.
+        return True
+    if now >= until:
+        _HOST_PARK.pop(host, None)   # park expired -> probe again
+        return True
+    return False
+
+def _host_probe_failed(host):
+    rec = _HOST_PARK.setdefault(host, {'fails': 0, 'until': 0})
+    rec['fails'] += 1
+    if rec['fails'] >= _HOST_PARK_FAILS:
+        rec['until'] = time.time() + _HOST_PARK_TTL
+        rec['fails'] = 0
+        safe_print(f"  [!] {host} unreachable {_HOST_PARK_FAILS}x — "
+                   f"pausing probes for {_HOST_PARK_TTL // 60} min")
+
+def _host_probe_ok(host):
+    _HOST_PARK.pop(host, None)   # a live answer clears any failure streak
+
 async def _aprobe_slug(session, base_url, patterns, base, season_slug, year,
                        site_name, cancel_event, verify_title=False):
     """Probe all slug patterns CONCURRENTLY; return the highest-priority 200.
@@ -705,6 +743,9 @@ async def _aprobe_slug(session, base_url, patterns, base, season_slug, year,
     settled = {}          # pattern index -> (status, final_url)
     pending = set(tasks)
     next_needed = 0       # lowest index whose verdict we still don't know
+    # DNS-park bookkeeping: urlsplit is a stdlib re-import on the no-aiohttp
+    # path, so reference via the module that always has it.
+    _probe_host = urlparse(base_url).netloc.lower()
     try:
         while pending:
             done, pending = await asyncio.wait(
@@ -718,6 +759,11 @@ async def _aprobe_slug(session, base_url, patterns, base, season_slug, year,
                     # path: a failed probe is simply "not a 200".
                     status, final = 0, urls[i]
                 settled[i] = (status, final)
+                # Live evidence for the park gate: any HTTP answer at all
+                # (even a 404) proves the origin resolves and serves, so it
+                # must not be counted toward the dead-host park.
+                if status:
+                    _host_probe_ok(_probe_host)
 
             # Walk the contiguous settled prefix in priority order. Anything
             # past a gap is undecidable yet, so we stop and wait for more.
@@ -730,6 +776,12 @@ async def _aprobe_slug(session, base_url, patterns, base, season_slug, year,
                     return (site_name, final)
                 next_needed += 1
             if next_needed >= len(urls):
+                # Every pattern landed and none was a 200. Distinguish a
+                # miss (origin answered 404s — healthy) from a dead host
+                # (every probe status 0: DNS/refused/timeout) so the park
+                # gate only trips on true outages, never on plain misses.
+                if urls and all(settled.get(i, (0,))[0] == 0 for i in range(len(urls))):
+                    _host_probe_failed(_probe_host)
                 return None
         return None
     finally:
@@ -1091,6 +1143,9 @@ async def _arun(query, site_filter, fast, hint, timeout):
         # DramaKey.com + .cc + DramaRain: slug probe only (no server search)
         if _match('dramakey') or _match('dramarain'):
             dk_pat = list(DRAMAKEY_WAVE1) + ([] if fast else list(DRAMAKEY_WAVE2))
+            if _host_unparked('dramakey.com'):
+                tasks.append(('slug', 'DramaKey', _aprobe_slug(session, 'https://dramakey.com', dk_pat,
+                              base, season_slug, year, 'DramaKey', cancel_event)))
             tasks.append(('slug', 'DramaKey.cc', _aprobe_slug(session, 'https://dramakey.cc',
                           DRAMAKEY_CC_PATTERNS, base, season_slug, year,
                           'DramaKey.cc', cancel_event, verify_title=True)))
