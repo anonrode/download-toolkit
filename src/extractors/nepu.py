@@ -133,7 +133,12 @@ def extract_nepu(url, session, ctx=None):
         _wait(ctx)
         safe_print(f"\n  [{i}/{len(work)}] {ep_label} - {title_text}")
 
-        direct = prefetcher.get(timeout=30)
+        # 75s: comfortably above a resolver's worst-case budget (vidsrc caps
+        # itself at 45s) so the prefetch normally lands before we time out.
+        # At 30s a slow-but-working resolve was abandoned here and re-run
+        # inline -- two concurrent resolves double-hitting generate.php,
+        # which 429s after one hit, producing tokenless masters that 401.
+        direct = prefetcher.get(timeout=75)
         if i < len(work):
             prefetcher.prefetch(work[i][0])
 

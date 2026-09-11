@@ -6,6 +6,8 @@ import socket
 import struct
 import tempfile
 import subprocess
+import os
+import threading
 from html import unescape
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, quote, urlunparse
@@ -1845,6 +1847,7 @@ class _WasmInterpreter:
         self.memory = bytearray(128 * 65536)
         self.globals = [0] * 16
         self.functions = []
+        self._deadline = None
         self._parse()
 
     def _read_leb128_u(self, data, offset):
@@ -1899,10 +1902,10 @@ class _WasmInterpreter:
                 idx += fn_size
                 self.functions.append(fn_body)
 
-    def decrypt(self, ptr, length):
-        return self.call_func(4, [ptr, length])
+    def decrypt(self, ptr, length, deadline=None):
+        return self.call_func(4, [ptr, length], deadline)
 
-    def call_func(self, fn_idx, args):
+    def call_func(self, fn_idx, args, deadline=None):
         body = self.functions[fn_idx]
         idx = 0
         local_groups, idx = self._read_leb128_u(body, idx)
@@ -1916,9 +1919,9 @@ class _WasmInterpreter:
 
         op_bytes = body[idx:]
         stack = []
-        return self._exec_block(op_bytes, 0, locals_list, stack)
+        return self._exec_block(op_bytes, 0, locals_list, stack, deadline)
 
-    def _exec_block(self, code, pc, locals_val, stack):
+    def _exec_block(self, code, pc, locals_val, stack, deadline=None):
         def i32(val): return val & 0xffffffff
         def s32(val):
             val = val & 0xffffffff
@@ -1931,7 +1934,11 @@ class _WasmInterpreter:
             return ((val << count) | (val >> (32 - count))) & 0xffffffff
 
         blocks = []
+        ops = 0
         while pc < len(code):
+            ops += 1
+            if deadline is not None and not ops % 65536 and time.time() > deadline:
+                raise RuntimeError("wasm interpreter exceeded its time budget")
             op = code[pc]; pc += 1
             if op in (0x00, 0x01):
                 pass
@@ -2091,6 +2098,41 @@ class _WasmInterpreter:
         return stack[-1] if stack else None
 
 
+# --- node binary lookup for the vidsrc wasm decryptor ---
+_NODE_PATH = None
+_NODE_PROBED = False
+
+
+def _find_node():
+    """Locate a usable node binary once per process. The vidsrc decryptor
+    wasm runs in <1s under node but can take minutes under the pure-Python
+    interpreter, so a PATH that hides node used to silently push every
+    encrypted stream_urls resolve into the slow fallback."""
+    global _NODE_PATH, _NODE_PROBED
+    if _NODE_PROBED:
+        return _NODE_PATH
+    _NODE_PROBED = True
+    import shutil
+    cand = shutil.which('node')
+    if not cand:
+        for p in (r'C:\Tools\nodejs\node.exe',
+                  r'C:\Program Files\nodejs\node.exe',
+                  r'C:\Program Files (x86)\nodejs\node.exe',
+                  '/usr/local/bin/node', '/usr/bin/node'):
+            if os.path.isfile(p):
+                cand = p
+                break
+    if cand:
+        try:
+            chk = subprocess.run([cand, '-e', 'process.exit(0)'],
+                                 capture_output=True, timeout=5)
+            if chk.returncode == 0:
+                _NODE_PATH = cand
+        except Exception:
+            _NODE_PATH = None
+    return _NODE_PATH
+
+
 class VidsrcResolver(BaseResolver):
     """
     Resolves Vidsrc stream embeds (vidsrc.mov, vsembed.ru, cloudorchestranova.com,
@@ -2107,11 +2149,21 @@ class VidsrcResolver(BaseResolver):
 
     @staticmethod
     def resolve(url: str, session) -> str:
+        # Wall-clock budget for the whole chain (iframe -> api.php -> wasm ->
+        # decrypt -> token). ResolverRegistry wraps us in a 3-attempt retry,
+        # so unbounded internal timeouts used to stack into 3+ minute
+        # "resolves" the caller had already abandoned and re-run.
+        deadline = time.time() + 45.0
+
+        def _tleft():
+            return deadline - time.time()
+
         if 'nepu.' in url:
             try:
                 url = url.replace('nepu.to', 'nepu.gd')
                 headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://nepu.gd/'}
-                r = session.get(url, headers=headers, timeout=10)
+                r = session.get(url, headers=headers,
+                                timeout=max(3, min(10, _tleft())))
                 if r and r.status_code == 200:
                     soup = BeautifulSoup(r.text, 'html.parser')
                     iframe = soup.find('iframe', id='playerFrame') or soup.find('iframe', src=re.compile(r'vidsrc'))
@@ -2123,8 +2175,8 @@ class VidsrcResolver(BaseResolver):
         m_type = 'tv' if '/tv/' in url else 'movie'
         m = re.search(r'/(?:movie|tv)/(\d+)(?:/(\d+)/(\d+))?', url)
         if not m:
+            safe_print("      [!] vidsrc: no tmdb id in URL")
             return None
-            print("TRACE-NONE", flush=True)
 
         tmdb_id = m.group(1)
         season = m.group(2)
@@ -2137,29 +2189,31 @@ class VidsrcResolver(BaseResolver):
 
         headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://cloudorchestranova.com/'}
         # data.vidsrcme.ru is Cloudflare-fronted and flaky (verified
-        # 2026-08-22: api.php occasionally takes 6s+, wasm.php stalls 20s+);
-        # the historical 10s one-shot timeout made both unresolvable. Use a
-        # 20s timeout and retry once before giving up.
-        try:
-            r = None
-            for attempt in (0, 1):
-                try:
-                    r = session.get(api_url, headers=headers, timeout=20)
-                    data = r.json()
-                    break
-                except Exception:
-                    if attempt == 1:
-                        return None
-                        print("TRACE-NONE", flush=True)
+        # 2026-08-22: api.php occasionally takes 6s+, wasm.php stalls 20s+).
+        # Two tries, but both gated on the wall-clock budget so a stalled
+        # host burns at most ~40s here instead of 20s+20s on every
+        # registry retry attempt.
+        data = None
+        for attempt in (0, 1):
+            if attempt and _tleft() < 8:
+                break
+            try:
+                r = session.get(api_url, headers=headers,
+                                timeout=max(3, min(20, _tleft())))
+                data = r.json()
+                break
+            except Exception:
+                if not attempt and _tleft() > 8:
                     time.sleep(0.5)
-        except Exception:
+
+        if data is None:
+            safe_print("      [!] vidsrc: api.php unreachable or non-JSON")
             return None
-            print("TRACE-NONE", flush=True)
 
         stream_data = data.get('data', {}).get('stream_urls')
         if not stream_data:
+            safe_print("      [!] vidsrc: api.php returned no stream_urls")
             return None
-            print("TRACE-NONE", flush=True)
 
         if isinstance(stream_data, list):
             return stream_data[0] if stream_data else None
@@ -2167,76 +2221,86 @@ class VidsrcResolver(BaseResolver):
         enc_b64 = stream_data
         wasm_url = data.get('vs', {}).get('wasm_url')
         if not wasm_url:
+            safe_print("      [!] vidsrc: api.php returned no wasm_url")
             return None
-            print("TRACE-NONE", flush=True)
 
-        try:
-            wasm_bytes = None
-            for attempt in (0, 1):
-                try:
-                    wasm_bytes = session.get(wasm_url, headers=headers, timeout=20).content
-                    if wasm_bytes:
-                        break
-                except Exception:
-                    if attempt == 1:
-                        return None
-                        print("TRACE-NONE", flush=True)
+        wasm_bytes = None
+        for attempt in (0, 1):
+            if attempt and _tleft() < 8:
+                break
+            try:
+                wasm_bytes = session.get(wasm_url, headers=headers,
+                                         timeout=max(3, min(20, _tleft()))).content
+                if wasm_bytes:
+                    break
+            except Exception:
+                if not attempt and _tleft() > 8:
                     time.sleep(0.5)
-            if not wasm_bytes:
-                return None
-                print("TRACE-NONE", flush=True)
-        except Exception:
+        if not wasm_bytes:
+            safe_print("      [!] vidsrc: wasm download failed")
             return None
-            print("TRACE-NONE", flush=True)
 
-        # Strategy 1: Node.js fast path (if node is installed).
+        # Strategy 1: Node.js fast path (if node is available).
         # NOTE: with `node -e <script> <arg1> <arg2>` the args land at
         # process.argv[1] and process.argv[2] (the -e script is NOT argv[1]).
         # The historical argv[2]/argv[3] layout read the wasm path as the
         # ciphertext and undefined as the wasm path -> fs.readFileSync
         # TypeError, so every encrypted stream_urls RESOLVE-FAILED
-        # (nepu.gd verified 2026-08-22).
+        # (nepu.gd verified 2026-08-22). Worse, the cleanup call
+        # `os.unlink(wasm_path)` sat AFTER subprocess.run but `os` was never
+        # imported in this module -- the NameError was swallowed by the bare
+        # except below, so the node result was discarded EVERY time and every
+        # encrypted resolve fell through to the minutes-slow interpreter.
         master = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.wasm', delete=False) as f:
-                f.write(wasm_bytes)
-                wasm_path = f.name
+        node_exe = _find_node()
+        if node_exe and _tleft() > 12:
+            wasm_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.wasm', delete=False) as f:
+                    f.write(wasm_bytes)
+                    wasm_path = f.name
 
-            js_code = (
-                "const fs=require('fs');"
-                "const enc=Buffer.from(process.argv[1],'base64');"
-                "const wasm=fs.readFileSync(process.argv[2]);"
-                "WebAssembly.instantiate(wasm,{}).then(i=>{"
-                "const {alloc,decrypt,memory}=i.instance.exports;"
-                "const p=alloc(enc.length);"
-                "new Uint8Array(memory.buffer,p,enc.length).set(enc);"
-                "const l=decrypt(p,enc.length);"
-                "process.stdout.write(new TextDecoder().decode(new Uint8Array(memory.buffer,p+12,l)));"
-                "}).catch(()=>{process.exit(1);});"
-            )
+                js_code = (
+                    "const fs=require('fs');"
+                    "const enc=Buffer.from(process.argv[1],'base64');"
+                    "const wasm=fs.readFileSync(process.argv[2]);"
+                    "WebAssembly.instantiate(wasm,{}).then(i=>{"
+                    "const {alloc,decrypt,memory}=i.instance.exports;"
+                    "const p=alloc(enc.length);"
+                    "new Uint8Array(memory.buffer,p,enc.length).set(enc);"
+                    "const l=decrypt(p,enc.length);"
+                    "process.stdout.write(new TextDecoder().decode(new Uint8Array(memory.buffer,p+12,l)));"
+                    "}).catch(()=>{process.exit(1);});"
+                )
 
-            res = subprocess.run(
-                ['node', '-e', js_code, enc_b64, wasm_path],
-                capture_output=True, text=True, timeout=10
-            )
-            os.unlink(wasm_path)
-            if res.returncode == 0 and res.stdout.strip():
-                urls = [u.strip() for u in res.stdout.split('\n') if u.strip().startswith('http')]
-                if urls:
-                    master = urls[0]
-        except Exception:
-            pass
+                res = subprocess.run(
+                    [node_exe, '-e', js_code, enc_b64, wasm_path],
+                    capture_output=True, text=True, timeout=10
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    urls = [u.strip() for u in res.stdout.split('\n') if u.strip().startswith('http')]
+                    if urls:
+                        master = urls[0]
+            except Exception:
+                pass
+            finally:
+                if wasm_path:
+                    try:
+                        os.unlink(wasm_path)
+                    except OSError:
+                        pass
 
         # Strategy 2: Pure Python WASM interpreter fallback (no node required).
         # Very slow on the 7KB vidsrc decryptor wasm, so it only runs when
-        # node is unavailable or failed.
-        if not master:
+        # node is unavailable or failed, and under the same wall-clock budget
+        # (it used to run unbounded -- minutes per call).
+        if not master and _tleft() > 15:
             try:
                 interp = _WasmInterpreter(wasm_bytes)
                 enc = base64.b64decode(enc_b64)
                 ptr = 16384
                 interp.memory[ptr:ptr+len(enc)] = enc
-                out_len = interp.decrypt(ptr, len(enc))
+                out_len = interp.decrypt(ptr, len(enc), deadline=deadline)
                 decrypted = bytes(interp.memory[ptr+12:ptr+12+out_len]).decode('utf-8', errors='ignore')
                 urls = [u.strip() for u in decrypted.split('\n') if u.strip().startswith('http')]
                 if urls:
@@ -2245,8 +2309,9 @@ class VidsrcResolver(BaseResolver):
                 pass
 
         if not master:
+            safe_print("      [!] vidsrc: decrypt produced no stream URL "
+                       "(node + Python interpreter both failed)")
             return None
-            print("TRACE-NONE", flush=True)
 
         # Playlist URLs are CDN-gated by an IP-bound JWT issued by the origin's
         # generate.php; without it the CDN answers 401 (tokenless master fetch
@@ -2259,49 +2324,62 @@ class VidsrcResolver(BaseResolver):
             return master
         tok = _vidsrc_token_for(session, master)
         if not tok:
-            return master
+            # A tokenless master is CDN-401 (verified 2026-08-22). Returning
+            # it fakes a resolve and burns the download on a 401; failing
+            # honestly lets the caller's retry hit the token cache or catch
+            # the end of the 429 window.
+            safe_print("      [!] vidsrc: no JWT from generate.php - "
+                       "master would 401 without it")
+            return None
         if "__TOKEN__" in master:
             return master.replace("__TOKEN__", tok)
         return master + (("&" if "?" in master else "?") + "token=" + tok)
 
 
 _VSRC_TOKEN_CACHE = {}   # origin -> (token, exp_epoch)
+_VSRC_TOKEN_LOCK = threading.Lock()
 
 
 def _vidsrc_token_for(session, master_url):
     """IP-bound JWT from <origin>/generate.php, cached per origin for its
-    ~4h lifetime. Empty/429 answers are NOT cached so the next resolve retries.
+    ~4h lifetime. generate.php 429s after ~1 hit per IP per window, so the
+    fetch is serialized per process (a prefetch thread and an inline
+    re-resolve were double-hitting it) and an empty answer gets exactly one
+    spaced retry. Empty answers are NOT cached so the next resolve retries.
     Mirrors Kotlin VidsrcResolver's generate.php stamping."""
     try:
         origin = re.match(r'(https?://[^/]+)', master_url).group(1)
     except Exception:
         return None
-        print("TRACE-NONE", flush=True)
-    now = time.time()
-    hit = _VSRC_TOKEN_CACHE.get(origin)
-    if hit and hit[1] > now + 60:
-        return hit[0]
-    tok = ""
-    try:
-        headers = {'User-Agent': UA_DESKTOP}
-        r = session.get(origin + "/generate.php", headers=headers, timeout=10)
-        if r and r.status_code == 200 and r.content:
-            tok = r.content.decode("utf-8", "ignore").strip()
-    except Exception:
-        pass
-    if not tok:
-        return None
-        print("TRACE-NONE", flush=True)
-    exp = now + 4 * 3600
-    try:
-        payload = tok.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        import json
-        exp = int(json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "ignore")).get("exp", 0))
-    except Exception:
-        pass
-    _VSRC_TOKEN_CACHE[origin] = (tok, exp)
-    return tok
+    with _VSRC_TOKEN_LOCK:
+        now = time.time()
+        hit = _VSRC_TOKEN_CACHE.get(origin)
+        if hit and hit[1] > now + 60:
+            return hit[0]
+        tok = ""
+        for attempt in (0, 1):
+            try:
+                headers = {'User-Agent': UA_DESKTOP}
+                r = session.get(origin + "/generate.php", headers=headers, timeout=10)
+                if r and r.status_code == 200 and r.content:
+                    tok = r.content.decode("utf-8", "ignore").strip()
+            except Exception:
+                pass
+            if tok or attempt:
+                break
+            time.sleep(3.0)   # short 429 window; one spaced retry
+        if not tok:
+            return None
+        exp = now + 4 * 3600
+        try:
+            payload = tok.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            import json
+            exp = int(json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "ignore")).get("exp", 0))
+        except Exception:
+            pass
+        _VSRC_TOKEN_CACHE[origin] = (tok, exp)
+        return tok
 
 
 # --- REGISTRY ---
