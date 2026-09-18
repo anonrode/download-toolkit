@@ -1626,19 +1626,36 @@ def is_streaming_link(url):
 def check_url_alive(url, session):
     """
     Returns 'ok', 'expired', or 'unknown'.
-    Uses a ranged GET (bytes=0-0) instead of HEAD -- many CDNs return 403
+    Uses a ranged GET (bytes=0-1023) instead of HEAD -- many CDNs return 403
     to HEAD requests even for valid files, but serve correctly on GET.
     404/410 are definitive expiry signals; 403 is ambiguous, so we treat
     it as 'unknown' and let the download attempt proceed.
+    Inspects the first 1KB of the probed body: if the response starts with
+    HTML error markers, the URL is rejected (returns 'expired').
     """
     try:
         r = session.get(url, timeout=10, allow_redirects=True,
-                        headers={'Range': 'bytes=0-0'})
-        if r.status_code in (404, 410):
-            return 'expired'
-        if r.status_code in (200, 206):
-            return 'ok'
-        return 'unknown'
+                        headers={'Range': 'bytes=0-1023'}, stream=True)
+        try:
+            if r.status_code in (404, 410):
+                return 'expired'
+            if r.status_code in (200, 206):
+                # Inspect the first 1KB of the probed body
+                chunk = next(r.iter_content(1024), b'')
+                if isinstance(chunk, str):
+                    head = chunk.lstrip('\ufeff \t\r\n').lower().encode('utf-8')
+                else:
+                    head = chunk.lstrip(b'\xef\xbb\xbf \t\r\n').lower()
+                html_markers = (b'<!doctype html', b'<html', b'<head', b'<body', b'<!--', b'{"')
+                if any(head.startswith(m) for m in html_markers):
+                    return 'expired'
+                return 'ok'
+            return 'unknown'
+        finally:
+            try:
+                r.close()
+            except Exception:
+                pass
     except Exception:
         return 'unknown'
 

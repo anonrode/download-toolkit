@@ -305,6 +305,15 @@ class DownloadwellaResolver(BaseResolver):
             soup = BeautifulSoup(r.text, 'html.parser')
             form = soup.find('form')
             if not form:
+                for a in soup.find_all('a', href=True):
+                    href = a['href'].strip()
+                    if any(k in href for k in ('/d/', '/download/', 'token=', '?pt=')) or any(href.lower().endswith(ext) for ext in ('.mp4', '.mkv', '.webm')):
+                        if not href.startswith('http'):
+                            href = urljoin(url, href)
+                        return href
+                direct = find_direct_video(r.text)
+                if direct:
+                    return direct
                 safe_print("      [!] Downloadwella: No form element found on page")
                 return None
 
@@ -381,6 +390,55 @@ class LoadedfilesResolver(BaseResolver):
         return re.match(r'(www\.)?loadedfiles\.[a-z0-9-]+$', netloc) is not None
 
     @staticmethod
+    def _unescape_js_url(u: str) -> str:
+        if not u:
+            return u
+        u = u.replace(r'\/', '/').replace(r'\u0026', '&')
+        try:
+            u = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), u)
+        except Exception:
+            pass
+        return u.strip('\'" ')
+
+    @classmethod
+    def _extract_link(cls, html: str, live_host: str) -> str:
+        if not html:
+            return None
+        # 1. var downloadUrl = '...'
+        m = re.search(r'''(?:var\s+downloadUrl|downloadUrl)\s*=\s*['"]([^'"]+)['"]''', html, re.I)
+        if m:
+            raw = cls._unescape_js_url(m.group(1))
+            return cls._rewrite(raw, live_host)
+
+        # 2. Alpine.js dlTimer({ ... link: '...' ... })
+        m = re.search(r'''dlTimer\s*\(\s*\{.*?link\s*:\s*['"]([^'"]+)['"]''', html, re.DOTALL | re.I)
+        if m:
+            raw = cls._unescape_js_url(m.group(1))
+            return cls._rewrite(raw, live_host)
+
+        # 3. Anchor fallback with /d/, /token/download/, or ?pt=
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            for a in soup.find_all('a', href=True):
+                href = a['href'].strip()
+                if any(k in href for k in ('/d/', '/token/download/', '?pt=')):
+                    raw = cls._unescape_js_url(href)
+                    if not raw.startswith('http'):
+                        raw = urljoin(f'https://{live_host}/', raw)
+                    return cls._rewrite(raw, live_host)
+        except Exception:
+            pass
+
+        m = re.search(r'''href=['"]([^'"]*(?:/d/|/token/download/|\?pt=)[^'"]*)['"]''', html, re.I)
+        if m:
+            raw = cls._unescape_js_url(m.group(1))
+            if not raw.startswith('http'):
+                raw = urljoin(f'https://{live_host}/', raw)
+            return cls._rewrite(raw, live_host)
+
+        return None
+
+    @staticmethod
     def resolve(url: str, session) -> str:
         try:
             hosts = LoadedfilesResolver._candidate_hosts(url)
@@ -405,26 +463,29 @@ class LoadedfilesResolver(BaseResolver):
                     # park it so the remaining episodes skip this host fast.
                     LoadedfilesResolver._DEAD_UNTIL[host] = time.time() + LoadedfilesResolver._DEAD_COOLDOWN
                     safe_print(f"      [!] {host}: origin not responding -- "
-                               f"pausing this host for {int(LoadedfilesResolver._DEAD_COOLDOWN/60)} min")
+                                f"pausing this host for {int(LoadedfilesResolver._DEAD_COOLDOWN/60)} min")
             if not r1:
                 return None
-            m1 = re.search(r"var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'", r1.text, re.I)
-            if not m1:
+            step1 = LoadedfilesResolver._extract_link(r1.text, live_host)
+            if not step1:
                 return None
-            step1 = LoadedfilesResolver._rewrite(m1.group(1), live_host)
+            step1 = LoadedfilesResolver._rewrite(step1, live_host)
             r2 = safe_get(session, step1, referer=f'https://{live_host}/', timeout=10, retries=2)
             if not r2:
                 return None
-            m2 = re.search(r"var downloadUrl = '(https://loadedfiles\.[a-z0-9-]+/[^']+)'", r2.text, re.I)
-            if not m2:
+            step2 = LoadedfilesResolver._extract_link(r2.text, live_host)
+            if not step2:
+                if any(k in step1 for k in ('.mp4', '.mkv', '/d/', '?pt=')):
+                    return step1
                 return None
             try:
-                step2 = LoadedfilesResolver._rewrite(m2.group(1), live_host)
+                step2 = LoadedfilesResolver._rewrite(step2, live_host)
                 r3 = session.get(step2, timeout=10, allow_redirects=False)
-                return r3.headers.get('location')
+                loc = r3.headers.get('location')
+                return loc if loc else step2
             except Exception as e:
                 safe_print(f"      [!] Loadedfiles redirect: {e}")
-                return None
+                return step2
         except Exception as e:
             safe_print(f"      [!] Loadedfiles: {e}")
             return None
@@ -457,14 +518,23 @@ class WildshareResolver(BaseResolver):
                 r = s.get(url, timeout=20)
                 if not r or r.status_code != 200:
                     return None
-                pt = re.search(r'pt=([A-Za-z0-9%+=/]+)', r.text)
-                if not pt:
+                pt_val = None
+                m = re.search(r'''(?:[?&]pt=|["']pt["']\s*:\s*["']|\bpt\s*[:=]\s*["'])([A-Za-z0-9%+=/_\-]+)''', r.text)
+                if m:
+                    pt_val = m.group(1)
+                elif re.search(r'''pt=([A-Za-z0-9%+=/_\-]+)''', r.text):
+                    pt_val = re.search(r'''pt=([A-Za-z0-9%+=/_\-]+)''', r.text).group(1)
+                if not pt_val:
+                    safe_print("      [!] Wildshare: could not extract ?pt= token")
                     return None
                 parts = url.rstrip('/').split('/')
                 file_id = next((p for p in reversed(parts) if not p.endswith(('.mkv', '.mp4', '.m3u8'))), parts[-1])
-                pt_url = f'https://wildshare.net/{file_id}?{pt.group(0)}'
+                pt_url = f'https://wildshare.net/{file_id}?pt={pt_val}'
                 r2 = s.get(pt_url, timeout=20, allow_redirects=False)
-                return r2.headers.get('location')
+                loc = r2.headers.get('location')
+                if loc:
+                    return loc
+                return None
             finally:
                 s.close()
         except Exception as e:
@@ -530,10 +600,12 @@ class NaijaPreyChainResolver(BaseResolver):
 
 
 class StreamtapeResolver(BaseResolver):
+    _HOSTS = ('streamtape.com', 'watchadsontape.com', 'strtape.tech')
+
     @staticmethod
     def can_resolve(url: str) -> bool:
         netloc = urlparse(url).netloc.lower()
-        return any(domain in netloc for domain in ['streamtape.com', 'watchadsontape.com'])
+        return any(domain in netloc for domain in StreamtapeResolver._HOSTS)
 
     @staticmethod
     def resolve(url: str, session) -> str:
@@ -542,13 +614,13 @@ class StreamtapeResolver(BaseResolver):
             if not r or r.status_code == 404:
                 return None
             m = re.search(
-                r"getElementById\('robotlink'\)[^;]*innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)",
+                r'''getElementById\(['"]robotlink['"]\)[^;]*innerHTML\s*=\s*['"]([^'"]+)['"]\s*\+\s*(?:\(['"]|['"])([^'"\)]+)(?:['"]\)|['"])''',
                 r.text, re.DOTALL
             )
             if m:
                 base_s, raw = m.group(1), m.group(2)
-                find_idx = r.text.find("getElementById('robotlink')")
-                subtext = r.text[find_idx:] if find_idx != -1 else r.text
+                find_m = re.search(r'''getElementById\(['"]robotlink['"]\)''', r.text)
+                subtext = r.text[find_m.start():] if find_m else r.text
                 for n in re.findall(r'\.substring\((\d+)\)', subtext):
                     raw = raw[int(n):]
                 get_url = 'https:' + base_s + raw
@@ -566,21 +638,33 @@ class StreamtapeResolver(BaseResolver):
             return None
 
 class VidmolyResolver(BaseResolver):
+    _HOSTS = ('vidmoly.me', 'vidmoly.to', 'vidmoly.net', 'vidmoly.biz')
+
     @staticmethod
     def can_resolve(url: str) -> bool:
-        return 'vidmoly.me' in urlparse(url).netloc.lower()
+        netloc = urlparse(url).netloc.lower()
+        return any(h in netloc for h in VidmolyResolver._HOSTS)
 
     @staticmethod
     def resolve(url: str, session) -> str:
         try:
-            r = session.get(url, timeout=20)
+            r = session.get(url, timeout=20, headers={'User-Agent': UA_DESKTOP, 'Referer': url})
             if not r or r.status_code != 200:
                 return None
-                
-            # Vidmoly hides stream link in file: "http...playlist.m3u8" inside javascript
-            m = re.search(r'file\s*:\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', r.text)
+            if _looks_dead(r.text):
+                safe_print("      [!] Vidmoly: file expired/deleted")
+                return None
+
+            unpacked = _unpack_packed_js(r.text) or r.text
+
+            # Vidmoly hides stream link in file: "http...playlist.m3u8" or .mp4 inside javascript
+            m = re.search(r'file\s*:\s*["\'](https?://[^"\']+\.(?:m3u8|mp4)[^"\']*)["\']', unpacked)
             if m:
                 return m.group(1)
+
+            direct = _find_hls_or_mp4(unpacked) or find_direct_video(unpacked)
+            if direct:
+                return direct
             return None
         except _http_exc_bases() as e:
             if _is_network_error(e):
@@ -1033,6 +1117,10 @@ class VikingFileResolver(BaseResolver):
         p = urlparse(url)
         if 'vikingfile.com' not in p.netloc.lower():
             return False
+        # If /d/ is in the path, allow it even if it ends with .mkv or .mp4
+        # (Vikingfile mints /d/<token>/<title>.mkv which redirects to Cloudflare R2)
+        if '/d/' in p.path.lower():
+            return True
         # The resolved CDN link is usually ANOTHER vikingfile.com host, and
         # 'vikingfile.com' is listed in the registry's resolver_domains — so the
         # registry's `.mp4` fast-path deliberately does NOT short-circuit it, and
@@ -1106,6 +1194,8 @@ class VikingFileResolver(BaseResolver):
 
             loc1 = r1.headers.get('location')
             if loc1:
+                if any(h in loc1.lower() for h in ('r2.cloudflarestorage.com', '.r2.dev')):
+                    return loc1
                 r2 = None
                 for attempt in range(3):
                     try:
@@ -1121,6 +1211,8 @@ class VikingFileResolver(BaseResolver):
                 loc2 = r2.headers.get('location')
                 if loc2:
                     return loc2
+                if any(h in loc1.lower() for h in ('r2.cloudflarestorage.com', '.r2.dev')):
+                    return loc1
                 if any(x in loc1 for x in ['.mp4', '.mkv', 'cdn', 'download']):
                     return loc1
                 # r2 was fetched with allow_redirects=False and has no location,
@@ -1232,9 +1324,30 @@ class DramaGatewayResolver(BaseResolver):
             if not r or r.status_code != 200:
                 return None
                 
-            m = re.search(r'window\.location\.href\s*=\s*"([^"]+)"', r.text)
+            # Method 1: JS window.location / window.location.href redirection
+            m = re.search(r'''window\.location(?:\.href)?\s*=\s*['"]([^'"]+)['"]''', r.text)
             if m:
-                return m.group(1)
+                dest = m.group(1)
+                if not dest.startswith('http'):
+                    dest = urljoin(url, dest)
+                return dest
+
+            # Method 2: Download button elements
+            soup = BeautifulSoup(r.text, 'html.parser')
+            btn = soup.find('a', class_=re.compile(r'download', re.I)) or soup.find('a', id=re.compile(r'download', re.I))
+            if btn and btn.get('href'):
+                dest = btn['href'].strip()
+                if not dest.startswith('http'):
+                    dest = urljoin(url, dest)
+                return dest
+
+            # Method 3: Locker anchors
+            for a in soup.find_all('a', href=True):
+                href = a['href'].strip()
+                if any(x in href.lower() for x in ['waffi', 'vikingfile', 'lulacloud', 'loadedfiles', 'downloadwella']):
+                    if not href.startswith('http'):
+                        href = urljoin(url, href)
+                    return href
             return None
         except _http_exc_bases() as e:
             if _is_network_error(e):
@@ -1285,20 +1398,29 @@ class NaijaVaultGatewayResolver(BaseResolver):
                 
             soup = BeautifulSoup(r2.text, 'html.parser')
             
-            # Method A: Class download-btn
-            btn = soup.find('a', class_='download-btn')
+            # Method A: Class download-btn / download button elements
+            btn = soup.find('a', class_=re.compile(r'download', re.I)) or soup.find('a', id=re.compile(r'download', re.I))
             if btn and btn.get('href'):
-                return btn['href']
+                dest = btn['href'].strip()
+                if not dest.startswith('http'):
+                    dest = urljoin(temp_url, dest)
+                return dest
                 
-            # Method B: Regex search downloadURL script variables
-            m = re.search(r'var\s+downloadURL\s*=\s*"([^"]+)"', r2.text)
+            # Method B: Regex search downloadURL / window.location script variables
+            m = re.search(r'''(?:(?:var\s+)?downloadURL|window\.location(?:\.href)?)\s*=\s*['"]([^'"]+)['"]''', r2.text)
             if m:
-                return m.group(1)
+                dest = m.group(1)
+                if not dest.startswith('http'):
+                    dest = urljoin(temp_url, dest)
+                return dest
                 
-            # Method C: Find vikingfile / lulacloud anchors
+            # Method C: Find all known locker anchors
+            known_lockers = ['vikingfile.com', 'lulacloud.com', 'loadedfiles', 'downloadwella.com', 'wetafiles.com', 'pixeldrain.com', 'waffi.cloud', 'wildshare.net']
             for a in soup.find_all('a', href=True):
-                href = a['href']
-                if any(x in href.lower() for x in ['vikingfile.com', 'lulacloud.com']):
+                href = a['href'].strip()
+                if any(x in href.lower() for x in known_lockers):
+                    if not href.startswith('http'):
+                        href = urljoin(temp_url, href)
                     return href
             return None
         except _http_exc_bases() as e:
@@ -1468,29 +1590,45 @@ class DoodstreamResolver(BaseResolver):
     def resolve(url: str, session) -> str:
         try:
             parsed = urlparse(url)
-            base = f'{parsed.scheme}://{parsed.netloc}'
-            # Normalise /d/ share links to the /e/ embed the player script lives on.
-            embed = url.replace('/d/', '/e/')
-            r = safe_get(session, embed, referer=base + '/', timeout=20)
-            if not r:
-                return None
-            if _looks_dead(r.text):
-                safe_print("      [!] Doodstream: file expired/deleted")
-                return None
-            m = re.search(r"(/pass_md5/[^'\"\s]+)", r.text)
-            if not m:
-                return None
-            pass_url = base + m.group(1)
-            r2 = session.get(pass_url, timeout=20,
-                             headers={'Referer': embed, 'User-Agent': UA_DESKTOP})
-            if not r2 or r2.status_code != 200 or not r2.text.strip():
-                return None
-            prefix = r2.text.strip()
-            token = pass_url.rstrip('/').split('/')[-1]
-            import random as _rnd, string as _str
-            rand = ''.join(_rnd.choice(_str.ascii_letters + _str.digits) for _ in range(10))
-            expiry = int(time.time() * 1000)
-            return f'{prefix}{rand}?token={token}&expiry={expiry}'
+            original_host = parsed.netloc.lower()
+            candidate_hosts = []
+            if original_host:
+                candidate_hosts.append(original_host)
+            for h in ('doodstream.com', 'dood.to', 'd000d.com'):
+                if h not in candidate_hosts:
+                    candidate_hosts.append(h)
+
+            path = parsed.path.replace('/d/', '/e/')
+
+            for host in candidate_hosts:
+                base = f'https://{host}'
+                embed = f'{base}{path}'
+                try:
+                    r = session.get(embed, timeout=15,
+                                    headers={'Referer': base + '/', 'User-Agent': UA_DESKTOP})
+                    if not r or r.status_code != 200:
+                        continue
+                    if _looks_dead(r.text):
+                        safe_print("      [!] Doodstream: file expired/deleted")
+                        return None
+                    m = re.search(r"(/pass_md5/[^'\"\s]+)", r.text)
+                    if not m:
+                        continue
+                    pass_url = base + m.group(1)
+                    r2 = session.get(pass_url, timeout=15,
+                                     headers={'Referer': embed, 'User-Agent': UA_DESKTOP})
+                    if not r2 or r2.status_code != 200 or not r2.text.strip():
+                        continue
+                    prefix = r2.text.strip()
+                    token = pass_url.rstrip('/').split('/')[-1]
+                    import random as _rnd, string as _str
+                    rand = ''.join(_rnd.choice(_str.ascii_letters + _str.digits) for _ in range(10))
+                    expiry = int(time.time() * 1000)
+                    return f'{prefix}{rand}?token={token}&expiry={expiry}'
+                except Exception:
+                    continue
+
+            return None
         except _http_exc_bases() as e:
             if _is_network_error(e):
                 raise
@@ -1518,8 +1656,21 @@ class MixdropResolver(BaseResolver):
             parsed = urlparse(url)
             base = f'{parsed.scheme}://{parsed.netloc}'
             embed = url.replace('/f/', '/e/')
-            r = safe_get(session, embed, referer=base + '/', timeout=20)
-            if not r:
+            headers = {'Referer': base + '/', 'User-Agent': UA_DESKTOP}
+            r = None
+            try:
+                r = session.get(embed, headers=headers, timeout=20)
+            except requests.exceptions.SSLError:
+                r = session.get(embed, headers=headers, timeout=20, verify=False)
+            except Exception as e:
+                if 'ssl' in type(e).__name__.lower() or 'certificate' in str(e).lower():
+                    try:
+                        r = session.get(embed, headers=headers, timeout=20, verify=False)
+                    except Exception:
+                        r = safe_get(session, embed, referer=base + '/', timeout=20)
+                else:
+                    r = safe_get(session, embed, referer=base + '/', timeout=20)
+            if not r or r.status_code != 200:
                 return None
             if _looks_dead(r.text):
                 safe_print("      [!] Mixdrop: file expired/deleted")
@@ -1550,7 +1701,7 @@ class StreamwishResolver(BaseResolver):
     Returns an .m3u8 (yt-dlp then selects quality via the height-capped format)."""
     _HOSTS = ('hglink.to', 'streamwish.', 'strwsh.', 'stwish.', 'wishembed.',
               'mwish.', 'awish.', 'sfastwish.', 'swishsrv.', 'ajmidyad', 'khadhnayad',
-              'obeywish.com', 'jodwish.com', 'streamwish.to', 'embedwish.')
+              'obeywish.com', 'jodwish.com', 'streamwish.to', 'embedwish.', 'filelions.')
 
     @staticmethod
     def can_resolve(url: str) -> bool:
@@ -1588,6 +1739,9 @@ class StreamwishResolver(BaseResolver):
                 # The raw player HTML has a Dean Edwards packed script. Unpack it
                 # to reveal jwplayer config containing `links: { "hls2": "...m3u8" }`.
                 unpacked = _unpack_packed_js(r.text) or r.text
+                if _looks_dead(unpacked):
+                    safe_print("      [!] Streamwish: file expired/deleted")
+                    return None
 
                 # Look for jwplayer `links` object with `hls2` key first (preferred),
                 # then fall back to generic HLS/mp4 extraction.
@@ -1624,7 +1778,7 @@ class VidhideResolver(BaseResolver):
               'vidhidevip.', 'filelions.', 'vid-guard.', 'nining.',
               'peytonepre.com', 'techradar.ink', 'ryderjet.com')
     _MIRROR_HOSTS = ('vidhide.com', 'minochinos.com', 'vidhidefast.com',
-                     'vidhidevip.com', 'vidhidepro.com', 'filelions.to')
+                     'vidhidevip.com', 'vidhidepro.com', 'filelions.to', 'ryderjet.com')
     _LAST_WORKING_HOST = None
 
     @classmethod
@@ -2161,7 +2315,7 @@ class VidsrcResolver(BaseResolver):
         if 'nepu.' in url:
             try:
                 url = url.replace('nepu.to', 'nepu.gd')
-                headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://nepu.gd/'}
+                headers = {'User-Agent': UA_DESKTOP, 'Referer': 'https://nepu.gd/', 'Cookie': 'hv=1'}
                 r = session.get(url, headers=headers,
                                 timeout=max(3, min(10, _tleft())))
                 if r and r.status_code == 200:
@@ -2439,7 +2593,7 @@ class ResolverRegistry:
         _path = urlparse(url).path.lower()
         if any(_path.endswith(ext) for ext in ['.mp4', '.mkv', '.m3u8', '.webm']):
             parsed = urlparse(url).netloc.lower()
-            resolver_domains = ['waffi.cloud', 'loadedfiles.', 'wildshare.net', 'vikingfile.com', 'lulacloud.com', 'pixeldrain.com', 'streamtape.com', 'watchadsontape.com', 'vidmoly.me']
+            resolver_domains = ['waffi.cloud', 'loadedfiles.', 'wildshare.net', 'vikingfile.com', 'lulacloud.com', 'pixeldrain.com', 'streamtape.com', 'watchadsontape.com', 'strtape.tech', 'vidmoly.']
             if not any(dom in parsed for dom in resolver_domains):
                 return url
 
