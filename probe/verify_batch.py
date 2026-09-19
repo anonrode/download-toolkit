@@ -510,6 +510,9 @@ def search_rules_site(s, site, q):
         if not href:
             continue
         href = _abs(base, href)
+        if site == "dramarain":
+            if re.match(r"^https?://[^/]+/[a-z]+-drama/?$", href, re.I) or any(k in href.lower() for k in ("/category/", "/tag/", "/page/", "/genre/")):
+                continue
         if href not in out:
             out.append(href)
     return out, "HTML"
@@ -531,22 +534,28 @@ def search_nkiri(s, q):
     return [], "HTML-MISS"
 
 
-DRAMAKEY_CAND = ["", "-korean-drama", "-chinese-drama", "-thai-drama", "-season-1"]
+DRAMAKEY_CAND = ["", "-season-1"]
 DRAMAKEY_BASES = [
-    ("https://dramakey.com", "{slug}/"), ("https://dramakey.com", "drama/{slug}/"),
-    ("https://dramakey.cc", "{slug}/"), ("https://dramakey.cc", "drama/{slug}/"),
+    ("https://dramakey.cc", "chinese/{slug}/"),
+    ("https://dramakey.cc", "korean/{slug}/"),
+    ("https://dramakey.cc", "thai/{slug}/"),
+    ("https://dramakey.cc", "japanese/{slug}/"),
+    ("https://dramakey.cc", "philippines/{slug}/"),
+    ("https://dramakey.cc", "drama/{slug}/"),
+    ("https://dramakey.cc", "{slug}/"),
+    ("https://dramakey.com", "{slug}/"),
 ]
 
 
 def search_dramakey(s, q):
-    """Parity mirror of DramaKeyProvider slug-guessing (capped: 8 tries/query)."""
+    """Parity mirror of DramaKeyProvider slug-guessing (capped: 16 tries/query)."""
     slug = re.sub(r"[^a-z0-9]+", "-", q.lower()).strip("-")
     tokens = {t for t in slug.split("-") if len(t) > 1}
     tried = 0
     for suffix in DRAMAKEY_CAND:
         s2 = f"{slug}{suffix}"
         for base, path in DRAMAKEY_BASES:
-            if tried >= 8:
+            if tried >= 16:
                 return [], "SLUG-CAP"
             url = f"{base}/{path.format(slug=s2)}"
             html, status = fetch(s, url, allow_404=True)

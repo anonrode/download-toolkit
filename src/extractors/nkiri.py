@@ -45,8 +45,8 @@ def extract_nkiri(url, session, ctx=None):
     # nkiserv file, keep the direct file: it skips resolution entirely, and
     # downloadwella page links rot (404) while the CDN copy stays up.
     if dw_links and cdn_links:
-        dw_eps = {_ep_no(l) for l in dw_links} - {None}
-        cdn_links = [l for l in cdn_links if _ep_no(l) is None or _ep_no(l) not in dw_eps]
+        cdn_eps = {_ep_no(l) for l in cdn_links} - {None}
+        dw_links = [l for l in dw_links if _ep_no(l) is None or _ep_no(l) not in cdn_eps]
 
     if dw_links or cdn_links:
         dw_links = _filter_by_episode_range(dw_links, ctx) if dw_links else []
