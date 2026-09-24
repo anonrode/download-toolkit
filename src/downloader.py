@@ -1595,7 +1595,7 @@ def get_referer_for_url(url):
     # megap.norami.top, megap.shiora.top, megap.mikora.top, megap.akirax.buzz...).
     if 'workerforcloud' in url or 'animixplaycors' in url or 'workers.dev' in url:
         return 'https://gogoanime.or.at/'
-    if 'megap.' in url:
+    if 'megap.' in url or 'nexabloom' in url or 'watching.onl' in url:
         return 'https://megaplay.buzz/'
     return base_domain(url) + '/'
 

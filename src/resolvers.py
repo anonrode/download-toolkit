@@ -943,7 +943,22 @@ class KisskhMegaplayResolver(BaseResolver):
                         r_api = session.get(api_url, headers=api_h, timeout=10)
                         if r_api and r_api.status_code == 200:
                             data = r_api.json()
-                            file_url = data.get('sources', {}).get('file')
+                            file_url = data.get('sources', {}).get('file') if isinstance(data.get('sources'), dict) else None
+                            if not file_url and data.get('enc'):
+                                try:
+                                    import json as _json
+                                    b64 = data['enc'].replace('-', '+').replace('_', '/')
+                                    pad = len(b64) % 4
+                                    if pad:
+                                        b64 += '=' * (4 - pad)
+                                    raw = base64.b64decode(b64)
+                                    key = b'i?LMTAx0Q6,:}50U'.ljust(32, b'\0')[:32]
+                                    iv = b"W0;27ToaUpl_P%'c"[:16]
+                                    _plain = aes_cbc_decrypt(raw, key, iv)
+                                    _obj = _json.loads(_plain.decode('utf-8', errors='ignore'))
+                                    file_url = _obj.get('file')
+                                except Exception as _e:
+                                    safe_print(f"      [!] megaplay enc decrypt error: {_e}")
                             if file_url:
                                 return file_url
                             safe_print(f"      [!] getSources returned no file: {data}")
