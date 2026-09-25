@@ -734,6 +734,17 @@ class VidbasicResolver(BaseResolver):
             if direct:
                 return direct
 
+            # 1a) fast-path for 3rdplayer: if page contains data-video or iframe src pointing to 3rdplayer,
+            # fetch and decrypt directly
+            m_player = re.search(r'(?:data-video|<iframe[^>]+src)=["\']([^"\']*3rdplayer[^"\']*)["\']', text)
+            if m_player:
+                player_url = urljoin(url, unescape(m_player.group(1)))
+                pr = session.get(player_url, timeout=20, headers={'Referer': url})
+                if pr is not None and pr.status_code == 200:
+                    direct = VidbasicResolver._decrypt_payload(pr.text)
+                    if direct:
+                        return direct
+
             # 1b) server-selector layout: vidb.top now serves a multi-server page
             # whose data-video / data-src / iframe attrs point at EXTERNAL mirror
             # embeds (streamwish hglink.to, vidhide minochinos.com, doodstream,
@@ -747,6 +758,15 @@ class VidbasicResolver(BaseResolver):
                 if not cand.startswith('http') or cand == url or cand in seen:
                     continue
                 seen.add(cand)
+
+                if '3rdplayer' in cand:
+                    pr = session.get(cand, timeout=20, headers={'Referer': url})
+                    if pr is not None and pr.status_code == 200:
+                        direct = VidbasicResolver._decrypt_payload(pr.text)
+                        if direct:
+                            return direct
+                    continue
+
                 for other in ResolverRegistry.RESOLVERS:
                     if other is VidbasicResolver:
                         continue
@@ -760,21 +780,11 @@ class VidbasicResolver(BaseResolver):
                     except Exception:
                         continue
 
-            # 2) embed page points at /3rdplayer.html?...&key=... — fetch and decrypt
-            mv = re.search(r'data-video=["\']([^"\']+)["\']', text)
-            if mv:
-                player_url = urljoin(url, unescape(mv.group(1)))
-                pr = session.get(player_url, timeout=20, headers={'Referer': url})
-                if pr is not None and pr.status_code == 200:
-                    direct = VidbasicResolver._decrypt_payload(pr.text)
-                    if direct:
-                        return direct
-
-            # 3) embedload.cfd wrapper iframes the real vidbasic host.
+            # 2) embedload.cfd wrapper iframes the real vidbasic host.
             # This recursion is our own, so the registry's _depth > 5 limit never
             # sees it: A can iframe B which iframes A again, and `inner != url`
             # only catches a page iframing itself. Carry our own counter.
-            mi = re.search(r'<iframe[^>]+src=["\']([^"\']*(?:vidbasic|vidb\.top)[^"\']*)["\']', text)
+            mi = re.search(r'<iframe[^>]+src=["\']([^"\']*(?:vidbasic|vidb\.top|3rdplayer|/embed/)[^"\']*)["\']', text)
             if mi and _depth < 3:
                 inner = urljoin(url, mi.group(1))
                 if inner != url:
@@ -1738,9 +1748,9 @@ class StreamwishResolver(BaseResolver):
             # bypass the obfuscated main.js loader and serve the raw player HTML
             # containing a Dean Edwards packed script with the jwplayer config.
             candidates = [
+                url,  # active embed URL first
                 f'https://sfastwish.com/e/{vid}',
                 f'https://embedwish.com/e/{vid}',
-                url,  # fallback to original if transform fails
             ]
 
             for cand in candidates:

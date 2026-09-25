@@ -1589,7 +1589,7 @@ def get_referer_for_url(url):
     # domain (the base_domain fallback), every fragment 416s forever on a decoy
     # and the download produces an unplayable file. The player origin is what a
     # real browser sends, so pin it here.
-    if 'vidbasic' in url or 'jisooido' in url:
+    if 'vidbasic' in url or 'jisooido' in url or 'exoidol' in url:
         return 'https://vidb.top/'
     # Megaplay (megaplay.buzz embed -> getSources JSON -> HLS on a rotating CDN:
     # megap.norami.top, megap.shiora.top, megap.mikora.top, megap.akirax.buzz...).
