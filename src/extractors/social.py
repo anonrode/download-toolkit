@@ -179,6 +179,14 @@ def extract_social(url, session, ctx=None):
                                pause_flag=pause,
                                preferred_quality=ctx.get('social_quality', '720p'),
                                smart_select=True)
+    if not ok and 'instagram.com' in url and not _user_stopped():
+        safe_print("[*] yt-dlp produced no video formats. Attempting Instagram photo/carousel music muxer...")
+        from .instagram_muxer import try_mux_instagram
+        muxed_path = try_mux_instagram(url, folder, session=session)
+        if muxed_path and os.path.exists(muxed_path) and os.path.getsize(muxed_path) > 0:
+            safe_print(f"[+] Successfully muxed Instagram post: {os.path.basename(muxed_path)}")
+            summary.add_success()
+            ok = True
     summary.report()
     return bool(ok) and not _user_stopped()
 def _yt_quality_prompt(default_quality):
