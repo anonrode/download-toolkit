@@ -118,9 +118,6 @@ def media_to_parts(m: Dict[str, Any]) -> Optional[MediaParts]:
         return None
 
     audio = _music_asset_info(m)
-    if is_carousel and not audio:
-        return None
-
     audio_url = ""
     duration_ms = 0
     title = None
@@ -234,12 +231,21 @@ def probe_media(shortcode: str, session=None) -> Optional[MediaParts]:
                         pass
 
         if lsd:
+            gql_headers = {
+                **headers,
+                "X-FB-Friendly-Name": "PolarisLoggedOutDesktopWWWPostRootContentQuery",
+                "X-FB-LSD": lsd,
+                "X-Requested-With": "XMLHttpRequest",
+            }
             gql_data = {
                 "lsd": lsd,
+                "fb_api_caller_class": "RelayModern",
+                "fb_api_req_friendly_name": "PolarisLoggedOutDesktopWWWPostRootContentQuery",
+                "server_timestamps": "true",
                 "doc_id": DOC_ID,
-                "variables": json.dumps({"shortcode": shortcode})
+                "variables": json.dumps({"media_id": pk}, separators=(',', ':'))
             }
-            gql_res = session.post(GRAPHQL_URL, data=gql_data, headers=headers, timeout=15)
+            gql_res = session.post(GRAPHQL_URL, data=gql_data, headers=gql_headers, timeout=15)
             if gql_res.status_code == 200:
                 gql_json = gql_res.json()
                 objs = _find_media_objects(gql_json)
@@ -259,6 +265,44 @@ def probe_media(shortcode: str, session=None) -> Optional[MediaParts]:
                         return parts
                 except Exception:
                     continue
+    except Exception:
+        pass
+
+    # 4. Impersonated GraphQL fallback via yt-dlp internal extractor (bypasses Cloudflare / datacenter blocks)
+    try:
+        import yt_dlp
+        ydl = yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True})
+        ie = yt_dlp.extractor.instagram.InstagramIE(ydl)
+        ie.initialize()
+        url = f"https://www.instagram.com/p/{shortcode}/"
+        webpage = ie._download_webpage(url, shortcode)
+        lsd = ie._lsd_token
+        from yt_dlp.utils import filter_dict, urlencode_postdata
+        gql_headers = filter_dict({
+            **ie._api_headers,
+            'X-FB-Friendly-Name': 'PolarisLoggedOutDesktopWWWPostRootContentQuery',
+            'X-FB-LSD': lsd,
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': url,
+        })
+        gql_data = urlencode_postdata({
+            'lsd': lsd,
+            'fb_api_caller_class': 'RelayModern',
+            'fb_api_req_friendly_name': 'PolarisLoggedOutDesktopWWWPostRootContentQuery',
+            'server_timestamps': 'true',
+            'variables': json.dumps({'media_id': pk}, separators=(',', ':')),
+            'doc_id': DOC_ID,
+        })
+        gql_json = ie._download_json(
+            'https://www.instagram.com/api/graphql', shortcode,
+            fatal=False, impersonate=True,
+            headers=gql_headers, data=gql_data
+        )
+        if gql_json:
+            objs = _find_media_objects(gql_json)
+            parts = pick_muxable(objs)
+            if parts:
+                return parts
     except Exception:
         pass
 
