@@ -289,6 +289,8 @@ class DownloadwellaResolver(BaseResolver):
 
     @staticmethod
     def resolve(url: str, session) -> str:
+        if '/d/' in urlparse(url).path:
+            return url
         # Network failures (DNS drop, reset) re-raise so the registry's unified
         # wait-and-retry handles them — a dropped connection does NOT mean the
         # link is gone. Real "not found" (bad HTTP / no form) fails fast.
@@ -440,6 +442,8 @@ class LoadedfilesResolver(BaseResolver):
 
     @staticmethod
     def resolve(url: str, session) -> str:
+        if any(k in url.lower() for k in ('/token/download/', '/d/')):
+            return url
         try:
             hosts = LoadedfilesResolver._candidate_hosts(url)
             r1 = None
@@ -1333,7 +1337,7 @@ class DramaGatewayResolver(BaseResolver):
         parsed = urlparse(url)
         netloc = parsed.netloc.lower()
         path = parsed.path.lower()
-        return any(domain in netloc for domain in ['dramarain.com', 'dramakey.cc']) and '/download' in path
+        return any(domain in netloc for domain in ['dramarain.com', 'dramakey.cc', 'dramakey.com']) and '/download' in path
 
     @staticmethod
     def resolve(url: str, session) -> str:
