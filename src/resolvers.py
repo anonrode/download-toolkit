@@ -412,8 +412,10 @@ class LoadedfilesResolver(BaseResolver):
             raw = cls._unescape_js_url(m.group(1))
             return cls._rewrite(raw, live_host)
 
-        # 2. Alpine.js dlTimer({ ... link: '...' ... })
-        m = re.search(r'''dlTimer\s*\(\s*\{.*?link\s*:\s*['"]([^'"]+)['"]''', html, re.DOTALL | re.I)
+        # 2. Alpine.js dlTimer or x-data ({ ... link: '...' ... })
+        m = re.search(r'''(?:dlTimer\s*\(\s*\{|x-data\s*=\s*['"]\s*\{).*?link\s*:\s*['"]([^'"]+)['"]''', html, re.DOTALL | re.I)
+        if not m:
+            m = re.search(r'''link\s*:\s*['"]([^'"]+)['"]''', html, re.I)
         if m:
             raw = cls._unescape_js_url(m.group(1))
             return cls._rewrite(raw, live_host)
@@ -448,6 +450,7 @@ class LoadedfilesResolver(BaseResolver):
             hosts = LoadedfilesResolver._candidate_hosts(url)
             r1 = None
             live_host = None
+            candidate = None
             for host in hosts:
                 # Circuit breaker: skip a host that just hung (see _DEAD_UNTIL).
                 dead_until = LoadedfilesResolver._DEAD_UNTIL.get(host, 0)
@@ -474,7 +477,9 @@ class LoadedfilesResolver(BaseResolver):
             if not step1:
                 return None
             step1 = LoadedfilesResolver._rewrite(step1, live_host)
-            r2 = safe_get(session, step1, referer=f'https://{live_host}/', timeout=10, retries=2)
+            if '?pt=' in step1:
+                time.sleep(5)
+            r2 = safe_get(session, step1, referer=candidate or f'https://{live_host}/', timeout=10, retries=2)
             if not r2:
                 return None
             step2 = LoadedfilesResolver._extract_link(r2.text, live_host)
@@ -484,7 +489,7 @@ class LoadedfilesResolver(BaseResolver):
                 return None
             try:
                 step2 = LoadedfilesResolver._rewrite(step2, live_host)
-                r3 = session.get(step2, timeout=10, allow_redirects=False)
+                r3 = session.get(step2, headers={'Referer': step1}, timeout=10, allow_redirects=False)
                 loc = r3.headers.get('location')
                 return loc if loc else step2
             except Exception as e:
